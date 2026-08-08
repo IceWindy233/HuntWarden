@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<web-app xmlns="http://xmlns.jcp.org/xml/ns/javaee" version="4.0">
+  <display-name>HuntWarden harmless dynamic filter lab</display-name>
+  <listener>
+    <listener-class>lab.LabBootstrapListener</listener-class>
+  </listener>
+</web-app>

@@ -1,0 +1,515 @@
+#!/usr/bin/env python3
+"""Root-owned, operation-whitelisted helper used by SSHExecutor.
+
+The helper reads one JSON object from stdin and emits one JSON envelope. It never
+uses shell=True and never accepts an arbitrary command from the controller.
+"""
+
+from __future__ import annotations
+
+import base64
+import datetime as dt
+import glob
+import hashlib
+import json
+import os
+import pathlib
+import platform
+import pwd
+import re
+import shutil
+import stat
+import subprocess
+import sys
+import tempfile
+from typing import Any, Callable
+
+MAX_INPUT = 1024 * 1024
+MAX_TEXT = 2 * 1024 * 1024
+RECEIPT_DIR = pathlib.Path("/var/lib/huntwarden/actions")
+PROBE_JAR = pathlib.Path("/opt/huntwarden/huntwarden-tomcat-probe.jar")
+SCRIPT_EXTENSIONS = {".php", ".phtml", ".php5", ".jsp", ".jspx", ".asp", ".aspx", ".py", ".pl", ".cgi"}
+USERNAME = re.compile(r"^[a-z_][a-z0-9_-]{0,31}$", re.I)
+CLASS_NAME = re.compile(r"^[A-Za-z_$][A-Za-z0-9_$.]{0,511}$")
+
+
+class HelperError(Exception):
+    def __init__(self, code: str, message: str):
+        super().__init__(message)
+        self.code = code
+
+
+def emit(payload: dict[str, Any]) -> None:
+    sys.stdout.write(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
+    sys.stdout.flush()
+
+
+def read_request() -> dict[str, Any]:
+    raw = sys.stdin.buffer.read(MAX_INPUT + 1)
+    if len(raw) > MAX_INPUT:
+        raise HelperError("INVALID_ARGUMENT", "request exceeds 1 MiB")
+    value = json.loads(raw or b"{}")
+    if not isinstance(value, dict):
+        raise HelperError("INVALID_ARGUMENT", "request must be a JSON object")
+    return value
+
+
+def safe_path(value: Any, *, must_exist: bool = True) -> pathlib.Path:
+    if not isinstance(value, str) or not value.startswith("/") or "\x00" in value:
+        raise HelperError("INVALID_ARGUMENT", "path must be absolute")
+    path = pathlib.Path(value)
+    if ".." in path.parts:
+        raise HelperError("INVALID_ARGUMENT", "path traversal is forbidden")
+    resolved = path.resolve(strict=must_exist)
+    return resolved
+
+
+def safe_username(value: Any) -> str:
+    if not isinstance(value, str) or not USERNAME.fullmatch(value):
+        raise HelperError("INVALID_ARGUMENT", "invalid username")
+    return value
+
+
+def safe_int(value: Any, minimum: int, maximum: int, name: str) -> int:
+    if not isinstance(value, int) or value < minimum or value > maximum:
+        raise HelperError("INVALID_ARGUMENT", f"invalid {name}")
+    return value
+
+
+def run(argv: list[str], timeout: int = 25, check: bool = True) -> subprocess.CompletedProcess[str]:
+    try:
+        result = subprocess.run(argv, text=True, capture_output=True, timeout=timeout, check=False)
+    except subprocess.TimeoutExpired as exc:
+        raise HelperError("TOOL_TIMEOUT", f"operation timed out: {argv[0]}") from exc
+    if check and result.returncode != 0:
+        message = (result.stderr or result.stdout).strip()[:2000]
+        code = "PERMISSION_DENIED" if "permission denied" in message.lower() else "UNSUPPORTED_ENVIRONMENT"
+        raise HelperError(code, f"{argv[0]} exited {result.returncode}: {message}")
+    return result
+
+
+def sha256_file(path: pathlib.Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def atomic_json(path: pathlib.Path, value: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    fd, temp = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(value, handle, ensure_ascii=False, separators=(",", ":"))
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(temp, 0o600)
+        os.replace(temp, path)
+    finally:
+        if os.path.exists(temp):
+            os.unlink(temp)
+
+
+def action_id(request: dict[str, Any]) -> str:
+    value = request.get("actionId")
+    if not isinstance(value, str) or not re.fullmatch(r"ACT-[0-9a-f-]{36}", value):
+        raise HelperError("INVALID_ARGUMENT", "invalid actionId")
+    return value
+
+
+def receipt_path(value: str) -> pathlib.Path:
+    return RECEIPT_DIR / f"{value}.json"
+
+
+def begin_receipt(value: str, operation: str, request: dict[str, Any]) -> dict[str, Any]:
+    path = receipt_path(value)
+    incoming_digest = hashlib.sha256(json.dumps(request, sort_keys=True).encode()).hexdigest()
+    if path.exists():
+        existing = json.loads(path.read_text("utf-8"))
+        if existing.get("operation") != operation or existing.get("argsDigest") != incoming_digest:
+            raise HelperError("INVALID_ARGUMENT", "actionId was already bound to different arguments")
+        return existing
+    receipt = {
+        "actionId": value,
+        "operation": operation,
+        "status": "STARTED",
+        "argsDigest": incoming_digest,
+        "startedAt": dt.datetime.now(dt.timezone.utc).isoformat(),
+    }
+    atomic_json(path, receipt)
+    return receipt
+
+
+def finish_receipt(receipt: dict[str, Any], status_value: str, result: dict[str, Any]) -> dict[str, Any]:
+    receipt.update({"status": status_value, "result": result, "finishedAt": dt.datetime.now(dt.timezone.utc).isoformat()})
+    atomic_json(receipt_path(str(receipt["actionId"])), receipt)
+    return receipt
+
+
+def java_binary(pid: int | None = None) -> str | None:
+    if pid is not None:
+        try:
+            executable = pathlib.Path(f"/proc/{pid}/exe").resolve(strict=True)
+            if executable.name.startswith("java") and executable.is_file():
+                return str(executable)
+        except OSError:
+            pass
+    discovered = shutil.which("java")
+    if discovered:
+        return discovered
+    for candidate in ("/opt/java/openjdk/bin/java", "/usr/local/openjdk-17/bin/java", "/usr/lib/jvm/java-17-openjdk/bin/java"):
+        if pathlib.Path(candidate).is_file():
+            return candidate
+    return None
+
+
+def get_host_info(_: dict[str, Any]) -> dict[str, Any]:
+    os_release: dict[str, str] = {}
+    release = pathlib.Path("/etc/os-release")
+    if release.exists():
+        for line in release.read_text("utf-8", errors="replace").splitlines():
+            if "=" in line:
+                key, value = line.split("=", 1)
+                os_release[key] = value.strip('"')
+    java_path = java_binary()
+    java = run([java_path, "-version"], check=False).stderr.splitlines()[:2] if java_path else []
+    return {
+        "hostname": platform.node(), "platform": platform.system(), "kernel": platform.release(),
+        "architecture": platform.machine(), "osRelease": os_release, "java": java,
+        "yaraAvailable": shutil.which("yara") is not None,
+    }
+
+
+def list_processes(request: dict[str, Any]) -> list[dict[str, Any]]:
+    pattern = request.get("pattern")
+    if pattern is not None and (not isinstance(pattern, str) or len(pattern) > 128):
+        raise HelperError("INVALID_ARGUMENT", "invalid process pattern")
+    rows = []
+    for line in run(["ps", "-eo", "pid=,ppid=,user=,etimes=,args="], check=True).stdout.splitlines():
+        parts = line.strip().split(None, 4)
+        if len(parts) != 5 or (pattern and pattern.lower() not in parts[4].lower()):
+            continue
+        rows.append({"pid": int(parts[0]), "ppid": int(parts[1]), "user": parts[2], "elapsedSeconds": int(parts[3]), "command": parts[4][:4096]})
+    return rows[:2000]
+
+
+def discover_web_roots(_: dict[str, Any]) -> list[dict[str, str]]:
+    roots: dict[str, str] = {}
+    config_globs = ["/etc/nginx/**/*.conf", "/etc/apache2/**/*.conf", "/etc/httpd/**/*.conf"]
+    directive = re.compile(r"^\s*(?:root|DocumentRoot)\s+['\"]?([^;'\"\s]+)", re.I)
+    for expression in config_globs:
+        for name in glob.glob(expression, recursive=True)[:1000]:
+            try:
+                for line in pathlib.Path(name).read_text("utf-8", errors="replace").splitlines():
+                    match = directive.search(line)
+                    if match and match.group(1).startswith("/"):
+                        roots[str(pathlib.Path(match.group(1)).resolve())] = "nginx" if "nginx" in name else "apache"
+            except OSError:
+                continue
+    for path, server in [("/var/www/html", "common"), ("/usr/local/tomcat/webapps", "tomcat"), ("/opt/tomcat/webapps", "tomcat")]:
+        if pathlib.Path(path).is_dir():
+            roots[str(pathlib.Path(path).resolve())] = server
+    return [{"path": path, "server": server} for path, server in sorted(roots.items())]
+
+
+def find_recent_web_files(request: dict[str, Any]) -> list[dict[str, Any]]:
+    roots = request.get("roots")
+    if not isinstance(roots, list) or not roots or len(roots) > 50:
+        raise HelperError("INVALID_ARGUMENT", "invalid roots")
+    hours = safe_int(request.get("modifiedWithinHours"), 1, 24 * 365, "modifiedWithinHours")
+    maximum = safe_int(request.get("maxFiles"), 1, 5000, "maxFiles")
+    max_size = safe_int(request.get("maxFileSizeBytes"), 1024, 1024 * 1024 * 100, "maxFileSizeBytes")
+    cutoff = dt.datetime.now().timestamp() - hours * 3600
+    items: list[dict[str, Any]] = []
+    for raw_root in roots:
+        root = safe_path(raw_root)
+        if not root.is_dir():
+            continue
+        for directory, _, files in os.walk(root, followlinks=False):
+            for filename in files:
+                path = pathlib.Path(directory) / filename
+                if path.suffix.lower() not in SCRIPT_EXTENSIONS:
+                    continue
+                try:
+                    info = path.lstat()
+                    if not stat.S_ISREG(info.st_mode) or info.st_mtime < cutoff or info.st_size > max_size:
+                        continue
+                    items.append({"path": str(path), "size": info.st_size, "mtime": dt.datetime.fromtimestamp(info.st_mtime, dt.timezone.utc).isoformat(), "sha256": sha256_file(path)})
+                except (OSError, PermissionError):
+                    continue
+                if len(items) >= maximum:
+                    return items
+    return items
+
+
+def yara_scan_files(request: dict[str, Any]) -> list[dict[str, Any]]:
+    if not shutil.which("yara"):
+        raise HelperError("UNSUPPORTED_ENVIRONMENT", "yara is not installed")
+    paths = request.get("paths")
+    if not isinstance(paths, list) or len(paths) > 500:
+        raise HelperError("INVALID_ARGUMENT", "invalid paths")
+    rule_path = safe_path(request.get("rulePath"))
+    results = []
+    for value in paths:
+        path = safe_path(value)
+        output = run(["yara", "--timeout=10", str(rule_path), str(path)], timeout=15, check=False)
+        matches = [line.split(None, 1)[0] for line in output.stdout.splitlines() if line.strip()]
+        results.append({"path": str(path), "matches": matches, "error": output.stderr.strip()[:1000] or None})
+    return results
+
+
+def inspect_script_file(request: dict[str, Any]) -> dict[str, Any]:
+    path = safe_path(request.get("path"))
+    max_bytes = safe_int(request.get("maxBytes"), 1024, 65536, "maxBytes")
+    raw = path.read_bytes()[:max_bytes]
+    text = raw.decode("utf-8", errors="replace")
+    patterns = {
+        "commandExecution": r"Runtime\.getRuntime\(\)\.exec|ProcessBuilder|shell_exec|passthru|system\s*\(",
+        "dynamicEvaluation": r"\beval\s*\(|\bassert\s*\(|base64_decode\s*\(",
+        "obfuscation": r"gzinflate|str_rot13|chr\s*\(|ClassLoader\.defineClass",
+    }
+    features = {name: len(re.findall(expr, text, re.I)) for name, expr in patterns.items()}
+    return {"path": str(path), "sha256": sha256_file(path), "size": path.stat().st_size, "features": features, "excerpt": text, "truncated": path.stat().st_size > len(raw)}
+
+
+def search_web_access_log(request: dict[str, Any]) -> list[dict[str, Any]]:
+    path = safe_path(request.get("path"))
+    name = pathlib.Path(str(request.get("fileName", ""))).name
+    if not name or len(name) > 255:
+        raise HelperError("INVALID_ARGUMENT", "invalid fileName")
+    maximum = safe_int(request.get("maxLines"), 1, 5000, "maxLines")
+    matches = []
+    for expression in ["/var/log/nginx/access*.log", "/var/log/apache2/access*.log", "/var/log/httpd/access_log*"]:
+        for log_name in glob.glob(expression)[:100]:
+            try:
+                for line in pathlib.Path(log_name).read_text("utf-8", errors="replace").splitlines():
+                    if name in line:
+                        matches.append({"log": log_name, "line": line[:8192]})
+                        if len(matches) >= maximum:
+                            return matches
+            except OSError:
+                continue
+    return matches
+
+
+def collect_file(request: dict[str, Any]) -> dict[str, Any]:
+    path = safe_path(request.get("path"))
+    maximum = safe_int(request.get("maxBytes"), 1, 100 * 1024 * 1024, "maxBytes")
+    info = path.stat()
+    if not stat.S_ISREG(info.st_mode) or info.st_size > maximum:
+        raise HelperError("EVIDENCE_COLLECTION", "file is not regular or exceeds collection limit")
+    data = path.read_bytes()
+    return {"dataBase64": base64.b64encode(data).decode(), "sha256": hashlib.sha256(data).hexdigest(), "size": len(data)}
+
+
+def list_java_processes(_: dict[str, Any]) -> list[dict[str, Any]]:
+    return list_processes({"pattern": "java"})
+
+
+def detect_java_container(request: dict[str, Any]) -> dict[str, Any]:
+    pid = safe_int(request.get("pid"), 1, 2**31 - 1, "pid")
+    cmdline = pathlib.Path(f"/proc/{pid}/cmdline").read_bytes().replace(b"\x00", b" ").decode("utf-8", errors="replace")
+    lowered = cmdline.lower()
+    container = "tomcat" if "catalina" in lowered or "tomcat" in lowered else "unknown"
+    return {"pid": pid, "container": container, "command": cmdline[:8192], "supported": container == "tomcat"}
+
+
+def run_tomcat_probe(request: dict[str, Any]) -> dict[str, Any]:
+    if not PROBE_JAR.is_file():
+        raise HelperError("UNSUPPORTED_ENVIRONMENT", f"probe jar missing: {PROBE_JAR}")
+    pid = safe_int(request.get("pid"), 1, 2**31 - 1, "pid")
+    java_path = java_binary(pid)
+    if not java_path:
+        raise HelperError("UNSUPPORTED_ENVIRONMENT", "target JVM executable is unavailable")
+    command = request.get("command")
+    if command not in {"list_components", "inspect_class", "dump_class"}:
+        raise HelperError("INVALID_ARGUMENT", "invalid probe command")
+    argv = [java_path, "--add-modules", "jdk.attach", "-jar", str(PROBE_JAR), "attach", str(pid), str(command)]
+    class_name = request.get("className")
+    if command != "list_components":
+        if not isinstance(class_name, str) or not CLASS_NAME.fullmatch(class_name):
+            raise HelperError("INVALID_ARGUMENT", "invalid className")
+        argv.append(class_name)
+    result = run(argv, timeout=30)
+    value = json.loads(result.stdout)
+    if not isinstance(value, dict):
+        raise HelperError("UNSUPPORTED_ENVIRONMENT", "probe returned invalid JSON")
+    return value
+
+
+def search_class_on_disk(request: dict[str, Any]) -> dict[str, Any]:
+    pid = safe_int(request.get("pid"), 1, 2**31 - 1, "pid")
+    class_name = request.get("className")
+    if not isinstance(class_name, str) or not CLASS_NAME.fullmatch(class_name):
+        raise HelperError("INVALID_ARGUMENT", "invalid className")
+    relative = class_name.replace(".", "/") + ".class"
+    roots = [pathlib.Path(f"/proc/{pid}/cwd"), pathlib.Path("/usr/local/tomcat"), pathlib.Path("/opt/tomcat")]
+    matches = []
+    for root in roots:
+        try:
+            resolved = root.resolve()
+            for candidate in resolved.glob(f"**/{pathlib.Path(relative).name}"):
+                if str(candidate).endswith(relative):
+                    matches.append(str(candidate))
+                    if len(matches) >= 20:
+                        break
+        except (OSError, PermissionError):
+            continue
+    return {"pid": pid, "className": class_name, "found": bool(matches), "paths": matches}
+
+
+def list_privileged_accounts(_: dict[str, Any]) -> list[dict[str, Any]]:
+    sudo_users: set[str] = set()
+    for group_name in ("sudo", "wheel"):
+        result = run(["getent", "group", group_name], check=False)
+        if result.returncode == 0 and result.stdout.strip():
+            fields = result.stdout.strip().split(":")
+            if len(fields) >= 4:
+                sudo_users.update(filter(None, fields[3].split(",")))
+    rows = []
+    for account in pwd.getpwall():
+        privileged = account.pw_uid == 0 or account.pw_name in sudo_users
+        interactive = account.pw_shell not in {"/usr/sbin/nologin", "/sbin/nologin", "/bin/false", ""}
+        if privileged or (account.pw_uid < 1000 and interactive):
+            rows.append({"username": account.pw_name, "uid": account.pw_uid, "gid": account.pw_gid, "shell": account.pw_shell, "home": account.pw_dir, "sudo": account.pw_name in sudo_users, "interactive": interactive})
+    return rows
+
+
+def inspect_account(request: dict[str, Any]) -> dict[str, Any]:
+    username = safe_username(request.get("username"))
+    try:
+        account = pwd.getpwnam(username)
+    except KeyError as exc:
+        raise HelperError("INVALID_ARGUMENT", "account does not exist") from exc
+    groups = run(["id", "-nG", username]).stdout.strip().split()
+    shadow = run(["getent", "shadow", username], check=False).stdout.strip().split(":")
+    return {
+        "username": username, "uid": account.pw_uid, "gid": account.pw_gid, "groups": groups,
+        "shell": account.pw_shell, "home": account.pw_dir,
+        "passwordLocked": bool(shadow and (shadow[1].startswith("!") or shadow[1].startswith("*"))),
+        "accountExpireDays": shadow[7] if len(shadow) > 7 else "",
+    }
+
+
+def inspect_authorized_keys(request: dict[str, Any]) -> list[dict[str, Any]]:
+    username = safe_username(request.get("username"))
+    account = pwd.getpwnam(username)
+    path = pathlib.Path(account.pw_dir) / ".ssh" / "authorized_keys"
+    if not path.exists():
+        return []
+    items = []
+    for index, line in enumerate(path.read_text("utf-8", errors="replace").splitlines(), 1):
+        value = line.strip()
+        if not value or value.startswith("#"):
+            continue
+        fields = value.split()
+        key_index = next((i for i, item in enumerate(fields) if item.startswith(("ssh-", "ecdsa-", "sk-"))), -1)
+        if key_index < 0 or key_index + 1 >= len(fields):
+            continue
+        try:
+            decoded = base64.b64decode(fields[key_index + 1], validate=True)
+            fingerprint = "SHA256:" + base64.b64encode(hashlib.sha256(decoded).digest()).decode().rstrip("=")
+        except ValueError:
+            fingerprint = "INVALID"
+        items.append({"line": index, "type": fields[key_index], "fingerprint": fingerprint, "comment": " ".join(fields[key_index + 2:])[:256], "hasOptions": key_index > 0})
+    return items
+
+
+def get_login_history(request: dict[str, Any]) -> list[dict[str, Any]]:
+    username = safe_username(request.get("username"))
+    maximum = safe_int(request.get("maxEntries"), 1, 500, "maxEntries")
+    result = run(["last", "-F", "-n", str(maximum), username], check=False)
+    return [{"raw": line[:2048]} for line in result.stdout.splitlines() if line.strip() and not line.startswith(("wtmp begins", "reboot"))]
+
+
+def get_action_receipt(request: dict[str, Any]) -> dict[str, Any]:
+    value = action_id(request)
+    path = receipt_path(value)
+    if not path.exists():
+        return {"actionId": value, "status": "UNKNOWN"}
+    return json.loads(path.read_text("utf-8"))
+
+
+def quarantine_file(request: dict[str, Any]) -> dict[str, Any]:
+    value = action_id(request)
+    source = safe_path(request.get("path"))
+    expected = request.get("expectedSha256")
+    if not isinstance(expected, str) or not re.fullmatch(r"[0-9a-f]{64}", expected):
+        raise HelperError("INVALID_ARGUMENT", "invalid expectedSha256")
+    root = safe_path(request.get("quarantineRoot"), must_exist=False)
+    receipt = begin_receipt(value, "quarantine_file", request)
+    if receipt["status"] == "SUCCEEDED":
+        return receipt
+    if sha256_file(source) != expected:
+        return finish_receipt(receipt, "FAILED", {"reason": "source hash changed"})
+    root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    target_dir = root / value
+    target_dir.mkdir(mode=0o700, exist_ok=True)
+    target = target_dir / source.name
+    if source.stat().st_dev != target_dir.stat().st_dev:
+        return finish_receipt(receipt, "FAILED", {"reason": "cross-filesystem quarantine refused"})
+    metadata = {"originalPath": str(source), "mode": stat.S_IMODE(source.stat().st_mode), "uid": source.stat().st_uid, "gid": source.stat().st_gid, "sha256": expected}
+    os.rename(source, target)
+    os.chmod(target, 0o000)
+    return finish_receipt(receipt, "SUCCEEDED", {**metadata, "quarantinePath": str(target), "verifiedMissing": not source.exists()})
+
+
+def disable_account(request: dict[str, Any]) -> dict[str, Any]:
+    value = action_id(request)
+    username = safe_username(request.get("username"))
+    executor = safe_username(request.get("executorUsername"))
+    if username in {"root", executor}:
+        raise HelperError("PERMISSION_DENIED", "root and active executor account cannot be disabled")
+    before = inspect_account({"username": username})
+    receipt = begin_receipt(value, "disable_account", request)
+    if receipt["status"] == "SUCCEEDED":
+        return receipt
+    run(["usermod", "--lock", "--expiredate", "1", username])
+    after = inspect_account({"username": username})
+    succeeded = bool(after.get("passwordLocked")) and str(after.get("accountExpireDays")) not in {"", "-1"}
+    return finish_receipt(receipt, "SUCCEEDED" if succeeded else "FAILED", {"before": before, "after": after})
+
+
+OPERATIONS: dict[str, Callable[[dict[str, Any]], Any]] = {
+    "get_host_info": get_host_info,
+    "list_processes": list_processes,
+    "discover_web_roots": discover_web_roots,
+    "find_recent_web_files": find_recent_web_files,
+    "yara_scan_files": yara_scan_files,
+    "inspect_script_file": inspect_script_file,
+    "search_web_access_log": search_web_access_log,
+    "collect_file": collect_file,
+    "list_java_processes": list_java_processes,
+    "detect_java_container": detect_java_container,
+    "run_tomcat_probe": run_tomcat_probe,
+    "search_class_on_disk": search_class_on_disk,
+    "list_privileged_accounts": list_privileged_accounts,
+    "inspect_account": inspect_account,
+    "inspect_authorized_keys": inspect_authorized_keys,
+    "get_login_history": get_login_history,
+    "get_action_receipt": get_action_receipt,
+    "quarantine_file": quarantine_file,
+    "disable_account": disable_account,
+}
+
+
+def main() -> int:
+    if len(sys.argv) != 2 or sys.argv[1] not in OPERATIONS:
+        emit({"ok": False, "error": {"code": "INVALID_ARGUMENT", "message": "unknown operation"}})
+        return 2
+    try:
+        request = read_request()
+        result = OPERATIONS[sys.argv[1]](request)
+        emit({"ok": True, "result": result})
+        return 0
+    except HelperError as exc:
+        emit({"ok": False, "error": {"code": exc.code, "message": str(exc)}})
+        return 1
+    except Exception as exc:  # defensive boundary: never emit a Python traceback over SSH
+        emit({"ok": False, "error": {"code": "UNSUPPORTED_ENVIRONMENT", "message": f"{type(exc).__name__}: {exc}"}})
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

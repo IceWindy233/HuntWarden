@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="background" x1="130" y1="80" x2="900" y2="940" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#112d3a"/>
+      <stop offset="1" stop-color="#06131d"/>
+    </linearGradient>
+    <linearGradient id="shield" x1="300" y1="250" x2="760" y2="800" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#63edf1"/>
+      <stop offset="1" stop-color="#16aeba"/>
+    </linearGradient>
+    <filter id="glow" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur stdDeviation="18" result="blur"/>
+      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+  <rect x="42" y="42" width="940" height="940" rx="220" fill="url(#background)"/>
+  <rect x="66" y="66" width="892" height="892" rx="198" fill="none" stroke="#42d7df" stroke-opacity=".28" stroke-width="8"/>
+  <path d="M512 174 790 278v202c0 179-105 301-278 373C339 781 234 659 234 480V278l278-104Z" fill="#0a202b" stroke="url(#shield)" stroke-width="28" filter="url(#glow)"/>
+  <path d="M333 319h96v146h166V319h96v386h-96V554H429v151h-96V319Z" fill="#d9fdff"/>
+  <circle cx="774" cy="254" r="38" fill="#43dfb0" stroke="#0a202b" stroke-width="13"/>
+</svg>

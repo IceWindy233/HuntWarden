@@ -1,0 +1,14 @@
+.git
+.env
+node_modules
+dist
+coverage
+data
+host-helper/__pycache__
+labs/.lab-state
+java/tomcat-probe/.gradle
+java/tomcat-probe/build/*
+!java/tomcat-probe/build/libs
+!java/tomcat-probe/build/libs/huntwarden-tomcat-probe.jar
+*.log
+.DS_Store

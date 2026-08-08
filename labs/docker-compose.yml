@@ -1,0 +1,23 @@
+services:
+  lab-web:
+    build:
+      context: ..
+      dockerfile: labs/web/Dockerfile
+    ports: ["2222:22", "8080:80"]
+    hostname: lab-web
+
+  lab-tomcat:
+    build:
+      context: ..
+      dockerfile: labs/tomcat/Dockerfile
+    ports: ["2223:22", "8081:8080"]
+    hostname: lab-tomcat
+    cap_add: ["SYS_PTRACE"]
+    security_opt: ["seccomp=unconfined"]
+
+  lab-account:
+    build:
+      context: ..
+      dockerfile: labs/account/Dockerfile
+    ports: ["2224:22"]
+    hostname: lab-account

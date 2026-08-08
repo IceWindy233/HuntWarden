@@ -1,0 +1,46 @@
+agent:
+  maxTurns: 30
+  maxToolCalls: 100
+  defaultMode: SCAN
+  promptVersion: huntwarden-agent-v1
+
+model:
+  source: builtin
+  provider: deepseek
+  model: deepseek-v4-flash
+  thinkingLevel: high
+
+executor:
+  type: ssh
+  timeoutSeconds: 30
+  helperPath: /usr/local/libexec/huntwarden-helper
+  knownHostsPath: ./labs/.lab-state/known_hosts
+  privateKeyPath: ./labs/.lab-state/id_ed25519
+
+storage:
+  baseDir: ./data
+  databaseFile: runtime.db
+
+llmData:
+  maxTextBytes: 65536
+
+webshell:
+  modifiedWithinHours: 168
+  maxCandidateFiles: 500
+  maxFileSizeBytes: 10485760
+  yaraRuleDir: ./rules/yara
+
+java:
+  supportedContainers: [tomcat]
+  allowClassDump: true
+  allowRuntimeModification: false
+  probeJar: ./java/tomcat-probe/build/libs/huntwarden-tomcat-probe.jar
+
+account:
+  checkAuthorizedKeys: true
+  checkLoginHistory: true
+
+remediation:
+  requireApproval: true
+  allowedTools: [quarantine_file, disable_account]
+  quarantineRoot: /var/lib/huntwarden/quarantine

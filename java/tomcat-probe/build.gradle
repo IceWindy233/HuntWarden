@@ -1,0 +1,44 @@
+plugins {
+    id 'java'
+}
+
+group = 'io.huntwarden'
+version = '0.1.0'
+
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(17)
+    }
+}
+
+tasks.withType(JavaCompile).configureEach {
+    options.encoding = 'UTF-8'
+    options.release = 17
+    options.compilerArgs += ['--add-modules', 'jdk.attach']
+}
+
+tasks.jar {
+    archiveFileName = 'huntwarden-tomcat-probe.jar'
+    manifest {
+        attributes(
+            'Main-Class': 'io.huntwarden.probe.Main',
+            'Agent-Class': 'io.huntwarden.probe.ProbeAgent',
+            'Can-Redefine-Classes': 'false',
+            'Can-Retransform-Classes': 'true'
+        )
+    }
+}
+
+repositories {
+    mavenCentral()
+}
+
+dependencies {
+    testImplementation platform('org.junit:junit-bom:5.11.4')
+    testImplementation 'org.junit.jupiter:junit-jupiter'
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+}
+
+tasks.test {
+    useJUnitPlatform()
+}
