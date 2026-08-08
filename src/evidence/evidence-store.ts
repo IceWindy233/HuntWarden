@@ -10,7 +10,11 @@ function safeName(value: string): string {
 }
 
 export class EvidenceStore {
-  constructor(private readonly baseDir: string, private readonly runtime: RuntimeStore) {}
+  constructor(
+    private readonly baseDir: string,
+    private readonly runtime: RuntimeStore,
+    private readonly checkpoint?: (name: string) => void,
+  ) {}
 
   async putBuffer(input: {
     taskId: string; host: string; type: string; source: string; tool: string;
@@ -47,6 +51,7 @@ export class EvidenceStore {
         await handle.close();
       }
       await rename(tempPath, finalPath);
+      this.checkpoint?.("evidence_file_written_before_metadata");
     }
     await chmod(finalPath, 0o600);
     const evidence: Evidence = {

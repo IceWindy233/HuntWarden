@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import type { Finding } from "../../src/domain/types.js";
+import { ApprovalService } from "../../src/agent/approval-service.js";
 import { EvidenceStore } from "../../src/evidence/evidence-store.js";
 import { RuntimeStore } from "../../src/storage/runtime-store.js";
 import { testTask } from "../helpers.js";
@@ -72,6 +73,34 @@ describe("RuntimeStore", () => {
     expect(store.relocateEvidencePaths([legacyRoot], currentRoot)).toBe(1);
     expect(store.getEvidence(task.taskId, created.evidenceId)?.storagePath).toContain(join("HuntWarden", "runtime"));
     expect(store.relocateEvidencePaths([legacyRoot], currentRoot)).toBe(0);
+    store.close();
+  });
+
+  it("启动对账将遗留活动任务标记为待人工恢复并使旧审批失效", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "huntwarden-interruption-"));
+    directories.push(directory);
+    const store = await RuntimeStore.open(directory, "runtime.db");
+    const task = testTask("REMEDIATE");
+    task.status = "WAITING_APPROVAL";
+    store.createTask(task);
+    const approvals = new ApprovalService(store);
+    const pending = approvals.request(task, "quarantine_file", { evidenceRef: "EV-test" });
+    const approved = approvals.request(task, "disable_account", { accountRef: "ACCT-test" });
+    approvals.decide(approved.approvalId, true);
+
+    const reconciled = store.reconcileInterruptedTasks();
+    expect(reconciled).toHaveLength(1);
+    expect(store.getTask(task.taskId)).toMatchObject({
+      status: "ABORTED",
+      interruption: { previousStatus: "WAITING_APPROVAL", reason: "PROCESS_INTERRUPTED", recoveryRequired: true },
+    });
+    expect(store.listApprovals(task.taskId)).toEqual(expect.arrayContaining([
+      expect.objectContaining({ approvalId: pending.approvalId, status: "EXPIRED" }),
+      expect.objectContaining({ approvalId: approved.approvalId, status: "EXPIRED" }),
+    ]));
+    expect(() => approvals.decide(pending.approvalId, true)).toThrow(/失效/);
+    expect(store.listAudit(task.taskId).at(-1)?.event).toBe("task_interrupted_detected");
+    expect(store.reconcileInterruptedTasks()).toHaveLength(0);
     store.close();
   });
 });

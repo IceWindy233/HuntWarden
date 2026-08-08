@@ -27,6 +27,7 @@ export const IPC = {
   taskSteer: "huntwarden:task:steer",
   approvalDecide: "huntwarden:approval:decide",
   reportGenerate: "huntwarden:report:generate",
+  reportList: "huntwarden:report:list",
   reportRead: "huntwarden:report:read",
   evidenceReveal: "huntwarden:evidence:reveal",
   reportReveal: "huntwarden:report:reveal",

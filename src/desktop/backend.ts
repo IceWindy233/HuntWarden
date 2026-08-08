@@ -1,5 +1,5 @@
 import { EventEmitter } from "node:events";
-import { access, readFile } from "node:fs/promises";
+import { access } from "node:fs/promises";
 import { join, resolve, sep } from "node:path";
 import { builtinModels } from "@earendil-works/pi-ai/providers/all";
 import { getSupportedThinkingLevels } from "@earendil-works/pi-ai";
@@ -11,7 +11,7 @@ import { isInvalidPackagedLabCredentialPath } from "../config/profile-path-repai
 import type { AppConfig } from "../config/schema.js";
 import type { DesktopCredentialStore } from "../credentials/credential-store.js";
 import { validateTargetConfig } from "../domain/validation.js";
-import type { ApprovalTicket, AuditEvent, Evidence, Finding, TaskContext } from "../domain/types.js";
+import type { ApprovalTicket, AuditEvent, Evidence, Finding, ReportRecord, TaskContext } from "../domain/types.js";
 import { SSHExecutor } from "../executor/ssh-executor.js";
 import type {
   ConfigProfile,
@@ -37,6 +37,7 @@ export interface DesktopBackendOptions {
   credentials: DesktopCredentialStore;
   labStateDir?: string;
   modelBundleFactory?: (config: AppConfig) => ModelBundle;
+  checkpoint?: (name: string) => void;
   legacyRuntimeDirs?: string[];
 }
 
@@ -198,6 +199,7 @@ export class DesktopBackend extends EventEmitter {
       evidence: application.store.listEvidence(taskId),
       approvals: application.store.listApprovals(taskId),
       actionReceipts: application.store.listActionReceipts(taskId),
+      reports: application.store.listReports(taskId),
       audit: application.store.listAudit(taskId, 500),
       conversation: application.store.loadMessages(taskId).map((message) => {
         if (message.role === "user") {
@@ -250,7 +252,7 @@ export class DesktopBackend extends EventEmitter {
   async steerTask(taskId: string, text: string): Promise<void> { await this.requireApplication().steerTask(taskId, text); }
   abortTask(taskId: string): void { this.requireApplication().abortTask(taskId); }
   decideApproval(approvalId: string, approved: boolean): void { this.requireApplication().decideApproval(approvalId, approved); }
-  async generateReport(taskId: string): Promise<string> { return await this.runAndNotify(taskId, () => this.requireApplication().generateReport(taskId)); }
+  async generateReport(taskId: string): Promise<ReportRecord> { return await this.runAndNotify(taskId, () => this.requireApplication().generateReport(taskId)); }
 
   getEvidence(evidenceId: string): Evidence {
     const application = this.requireApplication();
@@ -261,16 +263,14 @@ export class DesktopBackend extends EventEmitter {
     throw new Error(`Evidence 不存在: ${evidenceId}`);
   }
 
-  getReportPath(taskId: string): string {
-    const task = this.requireApplication().store.getTask(taskId);
-    if (!task) throw new Error(`任务不存在: ${taskId}`);
-    return join(this.requireApplication().config.storage.baseDir, "reports", `${taskId}.md`);
+  async listReports(taskId: string): Promise<ReportRecord[]> {
+    this.requireTaskExists(taskId);
+    return await this.requireApplication().reports.list(taskId);
   }
 
-  async readReport(taskId: string): Promise<string | undefined> {
-    const path = this.getReportPath(taskId);
-    try { return await readFile(path, "utf8"); }
-    catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined; throw error; }
+  async readReport(taskId: string, reportId?: string): Promise<{ report: ReportRecord; markdown: string } | undefined> {
+    this.requireTaskExists(taskId);
+    return await this.requireApplication().reports.read(taskId, reportId);
   }
 
   isManagedPath(path: string): boolean {
@@ -303,9 +303,10 @@ export class DesktopBackend extends EventEmitter {
     if (!this.activeProfile) return;
     const store = await RuntimeStore.open(this.activeProfile.config.storage.baseDir, this.activeProfile.config.storage.databaseFile);
     if (this.options.legacyRuntimeDirs?.length) store.relocateEvidencePaths(this.options.legacyRuntimeDirs, this.activeProfile.config.storage.baseDir);
+    store.reconcileInterruptedTasks();
     const { models, model } = this.options.modelBundleFactory?.(this.activeProfile.config)
       ?? createModelBundle(this.activeProfile.config, this.options.credentials);
-    this.application = new Application(this.activeProfile.config, store, models, model);
+    this.application = new Application(this.activeProfile.config, store, models, model, this.options.checkpoint);
     this.application.on("changed", (taskId: string) => this.publishTask(taskId));
     this.application.on("approval_requested", (ticket: ApprovalTicket) => this.emitDesktop({ type: "approval_requested", ticket }));
   }
@@ -363,6 +364,10 @@ export class DesktopBackend extends EventEmitter {
   private requireApplication(): Application {
     if (!this.application) throw new Error("尚未激活配置 Profile");
     return this.application;
+  }
+
+  private requireTaskExists(taskId: string): void {
+    if (!this.requireApplication().store.getTask(taskId)) throw new Error(`任务不存在: ${taskId}`);
   }
 
   private defaultCredentialEnv(provider: string): string {

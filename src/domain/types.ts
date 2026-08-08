@@ -12,7 +12,7 @@ export type TaskStatus =
   | "FAILED"
   | "ABORTED";
 
-export type CheckCategory = "webshell" | "java_memory_shell" | "backdoor_account";
+export type CheckCategory = "webshell" | "java_memory_shell" | "backdoor_account" | "linux_persistence";
 export type FindingStatus =
   | "CONFIRMED"
   | "HIGHLY_SUSPICIOUS"
@@ -48,6 +48,12 @@ export interface TaskContext {
   updatedAt: string;
   turnCount: number;
   toolCallCount: number;
+  interruption?: {
+    previousStatus: Extract<TaskStatus, "RUNNING" | "WAITING_APPROVAL" | "RECOVERING" | "REPORTING">;
+    reason: "PROCESS_INTERRUPTED";
+    detectedAt: string;
+    recoveryRequired: boolean;
+  };
 }
 
 export interface SecurityToolResult<TSummary = unknown, TItem = unknown> {
@@ -127,10 +133,23 @@ export interface ActionReceipt {
   finishedAt?: string;
 }
 
+export type ReportGenerationMode = "MODEL" | "REPAIRED" | "FALLBACK" | "LEGACY";
+
+export interface ReportRecord {
+  reportId: string;
+  taskId: string;
+  version: number;
+  path: string;
+  sha256: string;
+  generationMode: ReportGenerationMode;
+  validationErrors: string[];
+  createdAt: string;
+}
+
 export interface CandidateReference<T = Record<string, unknown>> {
   ref: string;
   taskId: string;
-  kind: "candidate" | "process" | "component" | "class" | "account";
+  kind: "candidate" | "process" | "component" | "class" | "account" | "persistence";
   value: T;
   createdAt: string;
 }

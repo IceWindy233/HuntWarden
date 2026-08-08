@@ -11,6 +11,8 @@ const PREFIXES = {
   component: "COMP",
   class: "CLASS",
   account: "ACCT",
+  persistence: "PERSIST",
+  report: "RPT",
 } as const;
 
 export type IdKind = keyof typeof PREFIXES;

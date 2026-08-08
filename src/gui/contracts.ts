@@ -1,7 +1,7 @@
 import type { AppConfig } from "../config/schema.js";
-import type { ActionReceipt, ApprovalTicket, AuditEvent, Evidence, Finding, TaskContext, TaskMode, CheckCategory } from "../domain/types.js";
+import type { ActionReceipt, ApprovalTicket, AuditEvent, Evidence, Finding, ReportRecord, TaskContext, TaskMode, CheckCategory } from "../domain/types.js";
 
-export const DESKTOP_API_VERSION = 1 as const;
+export const DESKTOP_API_VERSION = 2 as const;
 
 export interface ConfigProfileSummary {
   profileId: string;
@@ -80,6 +80,7 @@ export interface TaskSnapshot {
   evidence: Evidence[];
   approvals: ApprovalTicket[];
   actionReceipts: ActionReceipt[];
+  reports: ReportRecord[];
   audit: AuditEvent[];
   conversation: {
     role: "user" | "assistant" | "tool";
@@ -150,10 +151,11 @@ export interface HuntWardenDesktopApi {
   recoverTask(taskId: string): Promise<void>;
   steerTask(input: { taskId: string; text: string }): Promise<void>;
   decideApproval(input: { approvalId: string; approved: boolean }): Promise<void>;
-  generateReport(taskId: string): Promise<{ path: string }>;
-  readReport(taskId: string): Promise<string | undefined>;
+  generateReport(taskId: string): Promise<ReportRecord>;
+  listReports(taskId: string): Promise<ReportRecord[]>;
+  readReport(input: { taskId: string; reportId?: string }): Promise<{ report: ReportRecord; markdown: string } | undefined>;
   revealEvidence(evidenceId: string): Promise<void>;
-  revealReport(taskId: string): Promise<void>;
+  revealReport(input: { taskId: string; reportId?: string }): Promise<void>;
 
   subscribe(listener: (event: DesktopEvent) => void): () => void;
 }

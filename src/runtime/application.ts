@@ -1,10 +1,11 @@
+import { EventEmitter } from "node:events";
 import { readFile } from "node:fs/promises";
 import type { Models, Model, Api } from "@earendil-works/pi-ai";
 import { ApprovalService } from "../agent/approval-service.js";
 import type { AppConfig } from "../config/schema.js";
 import { createId } from "../common/ids.js";
 import { InvalidArgumentError } from "../common/errors.js";
-import type { CheckCategory, TargetConfig, TaskContext, TaskMode } from "../domain/types.js";
+import type { CheckCategory, ReportRecord, TargetConfig, TaskContext, TaskMode } from "../domain/types.js";
 import { validateTargetConfig } from "../domain/validation.js";
 import { EvidenceStore } from "../evidence/evidence-store.js";
 import { SSHExecutor } from "../executor/ssh-executor.js";
@@ -26,10 +27,11 @@ export class Application extends EventEmitter {
     readonly store: RuntimeStore,
     private readonly models: Models,
     private readonly model: Model<Api>,
+    private readonly checkpoint?: (name: string) => void,
   ) {
     super();
     this.approvals = new ApprovalService(store);
-    this.reports = new ReportService(config.storage.baseDir, store, config.llmData.maxTextBytes);
+    this.reports = new ReportService(config.storage.baseDir, store, config.llmData.maxTextBytes, checkpoint);
     this.approvals.on("requested", (ticket) => this.emit("approval_requested", ticket));
     this.approvals.on("decided", (ticket) => this.emit("changed", ticket.taskId));
   }
@@ -44,7 +46,7 @@ export class Application extends EventEmitter {
       taskId: createId("task"), request: input.request, target: input.target, mode: input.mode,
       status: "CREATED", modelProvider: this.config.model.provider, modelId: this.config.model.model,
       promptVersion: this.config.agent.promptVersion,
-      checks: input.checks ?? ["webshell", "java_memory_shell", "backdoor_account"], coverage: {},
+      checks: input.checks ?? ["webshell", "java_memory_shell", "backdoor_account", "linux_persistence"], coverage: {},
       createdAt: now, updatedAt: now, turnCount: 0, toolCallCount: 0,
     };
     this.store.createTask(task);
@@ -60,10 +62,10 @@ export class Application extends EventEmitter {
       void this.executor?.close();
     }
     this.executor = new SSHExecutor(task.target, this.config.executor.helperPath, this.config.executor.timeoutSeconds * 1000);
-    const evidence = new EvidenceStore(this.config.storage.baseDir, this.store);
-    const deps = { task, config: this.config, store: this.store, evidence, executor: this.executor, approvals: this.approvals };
+    const evidence = new EvidenceStore(this.config.storage.baseDir, this.store, this.checkpoint);
+    const deps = { task, config: this.config, store: this.store, evidence, executor: this.executor, approvals: this.approvals, ...(this.checkpoint ? { checkpoint: this.checkpoint } : {}) };
     const tools = createSecurityTools(deps);
-    this.runtime = new SecurityAgentRuntime({ task, config: this.config, store: this.store, executor: this.executor, approvals: this.approvals, tools, models: this.models, model: this.model });
+    this.runtime = new SecurityAgentRuntime({ task, config: this.config, store: this.store, executor: this.executor, approvals: this.approvals, tools, models: this.models, model: this.model, ...(this.checkpoint ? { checkpoint: this.checkpoint } : {}) });
     this.runtime.on("event", () => this.emit("changed", task.taskId));
     this.runtimeTaskId = task.taskId;
     return this.runtime;
@@ -83,13 +85,18 @@ export class Application extends EventEmitter {
 
   async startTask(taskId: string): Promise<void> {
     const task = this.requireTask(taskId);
-    await this.runtimeFor(task).prompt(task.request);
+    const runtime = this.runtimeFor(task);
+    await runtime.prompt(task.request);
+    await this.reports.generate(this.requireTask(taskId), runtime);
     this.emit("changed", taskId);
   }
 
   async recoverTask(taskId: string): Promise<void> {
     const task = this.requireTask(taskId);
-    await this.runtimeFor(task).recover();
+    if (!task.interruption?.recoveryRequired) throw new InvalidArgumentError("任务没有需要处理的中断状态");
+    const runtime = this.runtimeFor(task);
+    if (task.interruption.previousStatus !== "REPORTING") await runtime.recover();
+    await this.reports.generate(this.requireTask(taskId), runtime);
     this.emit("changed", taskId);
   }
 
@@ -115,11 +122,11 @@ export class Application extends EventEmitter {
     this.emit("changed", ticket.taskId);
   }
 
-  async generateReport(taskId: string): Promise<string> {
+  async generateReport(taskId: string): Promise<ReportRecord> {
     const task = this.requireTask(taskId);
-    const path = await this.reports.generate(task, this.runtimeFor(task));
+    const report = await this.reports.generate(task, this.runtimeFor(task));
     this.emit("changed", taskId);
-    return path;
+    return report;
   }
 
   async inferLabFingerprint(knownHostsPath = this.config.executor.knownHostsPath, port?: number): Promise<string> {
@@ -137,4 +144,3 @@ export class Application extends EventEmitter {
     return task;
   }
 }
-import { EventEmitter } from "node:events";

@@ -27,6 +27,8 @@
     "test:docker": "npm run lab:reset && npm run test:docker:running",
     "test:docker:running": "HUNTWARDEN_DOCKER_TESTS=1 vitest run tests/docker",
     "test:gui:remediation": "npm run build && HUNTWARDEN_GUI_REMEDIATION_TESTS=1 vitest run tests/e2e/gui-remediation.test.ts --testTimeout=180000 --hookTimeout=180000",
+    "test:gui:investigation": "npm run build && HUNTWARDEN_GUI_INVESTIGATION_TESTS=1 vitest run tests/e2e/gui-investigation.test.ts --testTimeout=180000 --hookTimeout=180000",
+    "test:gui:recovery": "npm run build && HUNTWARDEN_GUI_RECOVERY_TESTS=1 vitest run tests/e2e/gui-recovery.test.ts --testTimeout=180000 --hookTimeout=180000",
     "test:watch": "vitest",
     "model:check": "tsx src/cli/check-model.ts",
     "model:list": "tsx src/cli/list-models.ts",

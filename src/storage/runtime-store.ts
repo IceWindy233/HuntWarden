@@ -12,6 +12,7 @@ import type {
   Evidence,
   Finding,
   FindingStatus,
+  ReportRecord,
   TaskContext,
   TaskStatus,
 } from "../domain/types.js";
@@ -169,6 +170,15 @@ export class RuntimeStore {
         updated_at TEXT NOT NULL,
         FOREIGN KEY(task_id) REFERENCES tasks(task_id) ON DELETE CASCADE
       );
+      CREATE TABLE IF NOT EXISTS reports (
+        report_id TEXT PRIMARY KEY,
+        task_id TEXT NOT NULL,
+        version INTEGER NOT NULL,
+        payload TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        UNIQUE(task_id, version),
+        FOREIGN KEY(task_id) REFERENCES tasks(task_id) ON DELETE CASCADE
+      );
       CREATE TABLE IF NOT EXISTS artifact_refs (
         ref TEXT PRIMARY KEY,
         task_id TEXT NOT NULL,
@@ -189,6 +199,7 @@ export class RuntimeStore {
       CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
       CREATE INDEX IF NOT EXISTS idx_tool_runs_task ON tool_runs(task_id, status);
       CREATE INDEX IF NOT EXISTS idx_audit_task ON audit_events(task_id, seq);
+      CREATE INDEX IF NOT EXISTS idx_reports_task ON reports(task_id, version);
     `);
   }
 
@@ -222,6 +233,40 @@ export class RuntimeStore {
   listTasks(): TaskContext[] {
     const rows = this.db.prepare("SELECT payload FROM tasks ORDER BY updated_at DESC").all() as unknown as JsonRow[];
     return rows.map((row) => JSON.parse(row.payload) as TaskContext);
+  }
+
+  reconcileInterruptedTasks(): TaskContext[] {
+    const active = new Set<TaskStatus>(["RUNNING", "WAITING_APPROVAL", "RECOVERING", "REPORTING"]);
+    const tasks = this.listTasks().filter((task) => active.has(task.status));
+    if (tasks.length === 0) return [];
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      for (const task of tasks) {
+        const previousStatus = task.status as Extract<TaskStatus, "RUNNING" | "WAITING_APPROVAL" | "RECOVERING" | "REPORTING">;
+        const detectedAt = new Date().toISOString();
+        task.status = "ABORTED";
+        task.interruption = { previousStatus, reason: "PROCESS_INTERRUPTED", detectedAt, recoveryRequired: true };
+        this.saveTask(task);
+        const approvals = this.db.prepare("SELECT payload FROM approvals WHERE task_id=? AND status IN ('PENDING','APPROVED')")
+          .all(task.taskId) as unknown as JsonRow[];
+        for (const row of approvals) {
+          const ticket = JSON.parse(row.payload) as ApprovalTicket;
+          ticket.status = "EXPIRED";
+          this.putApproval(ticket);
+        }
+        this.appendAudit({
+          taskId: task.taskId,
+          event: "task_interrupted_detected",
+          level: "warn",
+          data: { previousStatus, expiredApprovals: approvals.length, detectedAt },
+        });
+      }
+      this.db.exec("COMMIT");
+      return tasks;
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
   }
 
   relocateEvidencePaths(legacyRoots: string[], currentRoot: string): number {
@@ -422,6 +467,29 @@ export class RuntimeStore {
   listActionReceipts(taskId: string): ActionReceipt[] {
     const rows = this.db.prepare("SELECT payload FROM action_receipts WHERE task_id=? ORDER BY updated_at").all(taskId) as unknown as JsonRow[];
     return rows.map((row) => JSON.parse(row.payload) as ActionReceipt);
+  }
+
+  putReport(report: ReportRecord): void {
+    this.db.prepare("INSERT INTO reports(report_id,task_id,version,payload,created_at) VALUES(?,?,?,?,?)")
+      .run(report.reportId, report.taskId, report.version, JSON.stringify(report), report.createdAt);
+  }
+
+  listReports(taskId: string): ReportRecord[] {
+    const rows = this.db.prepare("SELECT payload FROM reports WHERE task_id=? ORDER BY version")
+      .all(taskId) as unknown as JsonRow[];
+    return rows.map((row) => JSON.parse(row.payload) as ReportRecord);
+  }
+
+  getReport(taskId: string, reportId: string): ReportRecord | undefined {
+    const row = this.db.prepare("SELECT payload FROM reports WHERE task_id=? AND report_id=?")
+      .get(taskId, reportId) as JsonRow | undefined;
+    return row ? JSON.parse(row.payload) as ReportRecord : undefined;
+  }
+
+  latestReport(taskId: string): ReportRecord | undefined {
+    const row = this.db.prepare("SELECT payload FROM reports WHERE task_id=? ORDER BY version DESC LIMIT 1")
+      .get(taskId) as JsonRow | undefined;
+    return row ? JSON.parse(row.payload) as ReportRecord : undefined;
   }
 
   enqueueInput(taskId: string, message: AgentMessage): string {

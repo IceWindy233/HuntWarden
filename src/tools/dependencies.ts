@@ -12,4 +12,5 @@ export interface ToolDependencies {
   evidence: EvidenceStore;
   executor: HostExecutor;
   approvals: ApprovalService;
+  checkpoint?: (name: string) => void;
 }

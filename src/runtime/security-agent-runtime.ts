@@ -18,6 +18,7 @@ export interface SecurityAgentRuntimeOptions {
   tools: SecurityToolDefinition[];
   models: Models;
   model: Model<Api>;
+  checkpoint?: (name: string) => void;
 }
 
 export class SecurityAgentRuntime extends EventEmitter {
@@ -134,6 +135,7 @@ export class SecurityAgentRuntime extends EventEmitter {
     }
     this.options.store.saveTask(task);
     this.options.store.startToolRun({ toolCallId, taskId: task.taskId, toolName, risk: tool.risk, replayPolicy: tool.replayPolicy, args });
+    this.options.checkpoint?.("tool_started");
     if (tool.risk !== "WRITE") return undefined;
     if (task.mode !== "REMEDIATE") {
       this.options.store.finishToolRun(toolCallId, "BLOCKED", undefined, "SCAN 模式禁止写操作");
@@ -145,6 +147,7 @@ export class SecurityAgentRuntime extends EventEmitter {
     let approved = this.options.store.findApproval(task.taskId, toolName, this.options.approvals.getArgsDigest(args));
     if (!approved) {
       const ticket = this.options.approvals.request(task, toolName, args);
+      this.options.checkpoint?.("approval_waiting");
       const decision = await this.options.approvals.waitForDecision(ticket, signal);
       if (decision.status !== "APPROVED") {
         this.options.store.finishToolRun(toolCallId, "BLOCKED", undefined, "用户拒绝授权");
@@ -163,6 +166,7 @@ export class SecurityAgentRuntime extends EventEmitter {
       if (message.role === "user") {
         const inputId = this.pendingInputByTimestamp.get(message.timestamp);
         if (inputId) { this.options.store.markInputDelivered(inputId); this.pendingInputByTimestamp.delete(message.timestamp); }
+        this.options.checkpoint?.("model_response_after_user_persisted");
       }
     }
     if (type === "turn_end") {

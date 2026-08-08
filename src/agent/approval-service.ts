@@ -55,6 +55,8 @@ export class ApprovalService extends EventEmitter {
   }
 
   decide(approvalId: string, approved: boolean): ApprovalTicket {
+    const current = this.store.listPendingApprovals().find((item) => item.approvalId === approvalId);
+    if (!current) throw new Error("审批票据不存在、已决定或已失效");
     const ticket = this.store.updateApproval(approvalId, approved ? "APPROVED" : "DENIED");
     this.store.appendAudit({
       taskId: ticket.taskId,

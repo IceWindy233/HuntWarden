@@ -141,20 +141,31 @@ function registerIpc(): void {
   });
   handle(IPC.reportGenerate, async (_event, taskIdValue) => {
     const taskId = text(taskIdValue, "Task ID", 64);
-    return { path: await requireBackend().generateReport(taskId) };
+    return await requireBackend().generateReport(taskId);
   });
-  handle(IPC.reportRead, async (_event, taskId) => await requireBackend().readReport(text(taskId, "Task ID", 64)));
+  handle(IPC.reportList, async (_event, taskId) => await requireBackend().listReports(text(taskId, "Task ID", 64)));
+  handle(IPC.reportRead, async (_event, value) => {
+    const input = exactObject(value, ["taskId", "reportId"], "报告读取参数");
+    return await requireBackend().readReport(
+      text(input.taskId, "Task ID", 64),
+      input.reportId === undefined ? undefined : text(input.reportId, "Report ID", 64),
+    );
+  });
   handle(IPC.evidenceReveal, async (_event, evidenceId) => {
     const evidence = requireBackend().getEvidence(text(evidenceId, "Evidence ID", 64));
     if (!evidence.storagePath || !requireBackend().isManagedPath(evidence.storagePath)) throw new Error("该 Evidence 没有可显示的受管本地文件");
     await access(evidence.storagePath);
     shell.showItemInFolder(evidence.storagePath);
   });
-  handle(IPC.reportReveal, async (_event, taskId) => {
-    const path = requireBackend().getReportPath(text(taskId, "Task ID", 64));
-    if (!requireBackend().isManagedPath(path)) throw new Error("报告路径超出受管目录");
-    await access(path);
-    shell.showItemInFolder(path);
+  handle(IPC.reportReveal, async (_event, value) => {
+    const input = exactObject(value, ["taskId", "reportId"], "报告定位参数");
+    const result = await requireBackend().readReport(
+      text(input.taskId, "Task ID", 64),
+      input.reportId === undefined ? undefined : text(input.reportId, "Report ID", 64),
+    );
+    if (!result || !requireBackend().isManagedPath(result.report.path)) throw new Error("报告不存在或路径超出受管目录");
+    await access(result.report.path);
+    shell.showItemInFolder(result.report.path);
   });
 }
 
@@ -282,11 +293,22 @@ async function bootstrapDesktop(): Promise<void> {
   const cipher = new ElectronSafeStorageCipher();
   const persistent = new EncryptedCredentialStore(join(app.getPath("userData"), "credentials.enc.json"), cipher);
   let modelBundleFactory: DesktopBackendOptions["modelBundleFactory"];
+  let checkpoint: DesktopBackendOptions["checkpoint"];
   const e2eScenario = process.env.HUNTWARDEN_E2E_FAUX_SCENARIO;
   if (!app.isPackaged && process.env.NODE_ENV === "test" && e2eScenario) {
     const { createE2eFauxModelBundle } = await import("../testing/e2e-faux-model.js");
     modelBundleFactory = () => createE2eFauxModelBundle(e2eScenario);
     diagnostic(`E2E Faux scenario enabled: ${e2eScenario}`);
+  }
+  const crashAt = process.env.HUNTWARDEN_E2E_CRASH_AT;
+  if (!app.isPackaged && process.env.NODE_ENV === "test" && crashAt) {
+    let fired = false;
+    checkpoint = (name) => {
+      if (fired || name !== crashAt) return;
+      fired = true;
+      diagnostic(`E2E crash checkpoint reached: ${name}`);
+      process.exit(86);
+    };
   }
   backend = new DesktopBackend({
     userDataDir: app.getPath("userData"),
@@ -296,6 +318,7 @@ async function bootstrapDesktop(): Promise<void> {
     credentials: new DesktopCredentialStore(persistent),
     ...(labStateDir ? { labStateDir } : {}),
     ...(modelBundleFactory ? { modelBundleFactory } : {}),
+    ...(checkpoint ? { checkpoint } : {}),
     ...(migratedFrom ? { legacyRuntimeDirs: [join(migratedFrom, "runtime")] } : {}),
   });
   try { await backend.initialize(); diagnostic("desktop backend initialized"); }

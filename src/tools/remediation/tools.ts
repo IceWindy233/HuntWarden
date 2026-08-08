@@ -30,6 +30,7 @@ export function createRemediationTools(deps: ToolDependencies): SecurityToolDefi
         let result: Record<string, unknown>;
         try {
           result = await deps.executor.invoke({ operation: "quarantine_file", params: { actionId: ticket.actionId, path: evidence.source, expectedSha256: evidence.sha256, quarantineRoot: deps.config.remediation.quarantineRoot }, actionId: ticket.actionId }, signal);
+          deps.checkpoint?.("remote_write_succeeded_before_local_receipt");
         } catch (error) {
           deps.store.putActionReceipt({ ...started, status: failedReceiptStatus(error), result: { error: error instanceof Error ? error.message : String(error) }, finishedAt: new Date().toISOString() });
           throw error;
@@ -54,6 +55,7 @@ export function createRemediationTools(deps: ToolDependencies): SecurityToolDefi
         let result: Record<string, unknown>;
         try {
           result = await deps.executor.invoke({ operation: "disable_account", params: { actionId: ticket.actionId, username: account.value.username, executorUsername: deps.task.target.username }, actionId: ticket.actionId }, signal);
+          deps.checkpoint?.("remote_write_succeeded_before_local_receipt");
         } catch (error) {
           deps.store.putActionReceipt({ ...started, status: failedReceiptStatus(error), result: { error: error instanceof Error ? error.message : String(error) }, finishedAt: new Date().toISOString() });
           throw error;

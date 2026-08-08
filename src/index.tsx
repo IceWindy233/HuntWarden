@@ -14,6 +14,7 @@ function arg(name: string): string | undefined {
 
 const config = await loadConfig();
 const store = await RuntimeStore.open(config.storage.baseDir, config.storage.databaseFile);
+store.reconcileInterruptedTasks();
 const { models, model } = createModelBundle(config);
 const application = new Application(config, store, models, model);
 
