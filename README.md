@@ -1,9 +1,10 @@
 # HuntWarden
 
-HuntWarden（猎卫）是面向安全分析师的 AI 主机安全调查与受控处置 Agent。首期 MVP 通过 SSH 调用目标端白名单辅助程序，完成 WebShell、Tomcat 9/JDK 17 内存马和 Linux 后门账户调查；文件隔离与账户禁用必须逐动作审批。项目同时保留全屏 TUI，供自动化、无桌面环境和故障回退使用。
+HuntWarden（猎卫）是面向安全分析师的 AI 主机安全调查与受控处置 Agent。首期 MVP 通过 SSH 调用目标端白名单辅助程序，完成 WebShell、Tomcat 9/JDK 17 内存马、Linux 后门账户和 Linux 持久化调查；文件隔离与账户禁用必须逐动作审批。项目同时保留全屏 TUI，供自动化、无桌面环境和故障回退使用。
 
 桌面 GUI 的架构、安全边界与验收设计见 [`docs/GUI_MVP_IMPLEMENTATION_PLAN.md`](docs/GUI_MVP_IMPLEMENTATION_PLAN.md)。
 处置闭环的范围、命令和安全验收见 [`docs/REMEDIATION_CLOSURE_SPRINT.md`](docs/REMEDIATION_CLOSURE_SPRINT.md)。
+恢复、报告版本化与 Linux 持久化实现见 [`docs/RECOVERY_PERSISTENCE_SPRINT.md`](docs/RECOVERY_PERSISTENCE_SPRINT.md)。
 
 ## 已实现范围
 
@@ -12,14 +13,15 @@ HuntWarden（猎卫）是面向安全分析师的 AI 主机安全调查与受控
 - 内置 DeepSeek 与 OpenAI Profile；可在 GUI 中切换 Pi 内置 Provider，或配置 OpenAI Responses/Completions、Anthropic Messages 兼容端点。
 - Renderer 启用 Chromium 沙箱、Context Isolation、严格 CSP 和固定 IPC 白名单；不能直接访问 Node.js、文件系统、SQLite、SSH 或凭据明文。
 - Ink 7 + React 19 全屏 TUI：新建、运行、历史任务、Steering、审批、恢复、Finding、Evidence、审计和报告。
-- SQLite WAL/FULL 事件存储、单实例写锁、完整消息持久化、工具幂等与写操作回执恢复。
+- SQLite WAL/FULL 事件存储、单实例写锁、完整消息持久化、人工触发的崩溃恢复、工具幂等与写操作回执恢复；重启前未消费审批一律过期。
 - 严格 SSH 主机指纹校验；无密码配置、无自动接受未知 Host Key。
 - 固定操作名的 Python 辅助程序；不接受任意命令，不使用 Shell 执行参数。
 - WebShell 候选发现、YARA、脚本特征、日志关联、文件证据和受控隔离。
 - Tomcat 运行时 Filter/Servlet/Listener 枚举、ClassLoader/CodeSource/ProtectionDomain、磁盘来源和只读 Class Dump；不清除、不重定义、不重启 JVM。
 - 特权账户、账户状态、SSH Key 指纹、登录历史和受控账户禁用。
-- 中文 Markdown 报告、ID 引用校验、一次模型修复和确定性回退模板。
-- 三套无害 Docker Lab 与 Pi Faux Provider 可重复 Agent 测试。
+- Cron、systemd、SSH Authorized Keys、Shell 启动项，以及基于不透明引用的进程和网络关联调查；仅提供 READ/COLLECT 工具。
+- 不可变版本化中文 Markdown 报告、ID 引用校验、一次模型修复和确定性回退模板；支持历史版本切换与 Finder 定位。
+- 四套无害 Docker Lab 与 Pi Faux Provider 可重复 Agent 测试。
 
 ## 环境
 
@@ -151,7 +153,7 @@ npm run dev -- \
   --user secagent \
   --fingerprint 'SHA256:...' \
   --mode SCAN \
-  --request '排查三类主机安全风险并形成报告' \
+  --request '排查四类主机安全风险并形成报告' \
   --auto-start
 ```
 
@@ -204,7 +206,7 @@ GUI 的活动 Profile、任务事件数据库、Evidence 和报告均位于 Elec
 
 ## Docker Lab
 
-启动脚本会临时生成登录 Key、容器 Host Key 和 `known_hosts`，构建 Java 探针并启动三套环境：
+启动脚本会临时生成登录 Key、容器 Host Key 和 `known_hosts`，构建 Java 探针并启动四套环境：
 
 ```bash
 npm run lab:up
@@ -217,9 +219,11 @@ npm run test:docker
 
 ```bash
 npm run test:gui:remediation
+npm run test:gui:investigation
+npm run test:gui:recovery
 ```
 
-写操作测试会改变容器内的文件或账户状态。重新执行处置场景前，用以下命令删除并重建三个 Lab 容器；本地测试身份 Key 会保留，`known_hosts` 会按当前容器重新生成：
+写操作测试会改变容器内的文件或账户状态。重新执行处置场景前，用以下命令删除并重建四个 Lab 容器；本地测试身份 Key 会保留，`known_hosts` 会按当前容器重新生成：
 
 ```bash
 npm run lab:reset
@@ -230,6 +234,7 @@ npm run lab:reset
 | Lab-Web | `127.0.0.1:2222` | `http://127.0.0.1:8080` | 正常脚本、无害 WebShell 标记样本、关键词误报样本 |
 | Lab-Tomcat | `127.0.0.1:2223` | `http://127.0.0.1:8081/lab/` | Tomcat 9/JDK 17、无害动态 Filter、磁盘类删除后的 Dump 场景 |
 | Lab-Account | `127.0.0.1:2224` | — | 正常执行账户、测试 UID 0 账户、未知 SSH Key 指纹 |
+| Lab-Persistence | `127.0.0.1:2225` | — | 正常项、无害 Cron/systemd/SSH/Shell 持久化模拟及回环监听进程 |
 
 停止环境：
 
@@ -247,6 +252,7 @@ Lab 只允许在隔离开发环境使用。账户禁用与隔离测试会真实�
 - 文件隔离要求已有 Evidence，且远端当前哈希与审批时一致；仅同文件系统原子移动并设置 `000`。
 - 账户禁用永久拒绝 `root` 和当前 SSH 执行用户，保存前态并验证锁定/过期结果。
 - SAFE 工具按原 `toolCallId` 幂等恢复；NEVER 工具先查远端 `actionId` 回执。状态未知时必须重新审批，绝不自动重放。
+- 启动时遗留活动任务会转为 `ABORTED + recoveryRequired`；GUI 仅在分析师点击后恢复。报告以 `v1/v2/...` 不可变保存，旧版单文件报告懒迁移为 LEGACY。
 - 模型只接收脱敏且最多 64 KiB 的文本；原始 Evidence、二进制和 Class Dump 不上传。
 - 数据目录为 `0700`，数据库、Evidence 和报告为 `0600`。首期不提供应用层加密或自动过期删除。
 
@@ -258,7 +264,7 @@ assets/              桌面应用图标
 host-helper/         目标端固定操作辅助程序
 java/tomcat-probe/   Java 17 Attach/Agent 只读探针
 rules/yara/          项目测试规则
-labs/                Web、Tomcat、Account Docker Lab
+labs/                Web、Tomcat、Account、Persistence Docker Lab
 tests/               单元和集成测试
 config/              YAML 配置
 ```

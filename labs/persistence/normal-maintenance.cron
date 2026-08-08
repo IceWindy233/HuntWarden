@@ -1,0 +1,2 @@
+# Normal low-risk fixture
+15 3 * * * root /usr/bin/true

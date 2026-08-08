@@ -36,7 +36,7 @@ export function newTaskInput(value: unknown): NewTaskInput {
   const request = text(record.request, "调查请求", 20_000);
   if (record.mode !== "SCAN" && record.mode !== "REMEDIATE") throw new Error("任务模式无效");
   if (!Array.isArray(record.checks) || record.checks.length < 1) throw new Error("至少选择一个检测项");
-  const allowedChecks = new Set(["webshell", "java_memory_shell", "backdoor_account"]);
+  const allowedChecks = new Set(["webshell", "java_memory_shell", "backdoor_account", "linux_persistence"]);
   if (record.checks.some((item) => typeof item !== "string" || !allowedChecks.has(item))) throw new Error("检测项无效");
   const target = exactObject(record.target, ["host", "port", "username", "hostFingerprint", "privateKeyPath", "knownHostsPath"], "目标");
   const parsed: NewTaskInput = {

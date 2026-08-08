@@ -14,6 +14,7 @@ export function testConfig(baseDir: string): AppConfig {
     webshell: { modifiedWithinHours: 168, maxCandidateFiles: 500, maxFileSizeBytes: 10 * 1024 * 1024, yaraRuleDir: `${baseDir}/rules` },
     java: { supportedContainers: ["tomcat"], allowClassDump: true, allowRuntimeModification: false, probeJar: `${baseDir}/probe.jar` },
     account: { checkAuthorizedKeys: true, checkLoginHistory: true },
+    persistence: { maxItemsPerSource: 500, includeUserScope: true, maxConnections: 500 },
     remediation: { requireApproval: true, allowedTools: ["quarantine_file", "disable_account"], quarantineRoot: "/var/lib/huntwarden/quarantine" },
   };
 }

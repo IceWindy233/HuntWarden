@@ -1,0 +1,11 @@
+[Unit]
+Description=HuntWarden harmless suspicious persistence marker
+
+[Service]
+Type=simple
+User=persistuser
+ExecStart=/usr/bin/python3 /opt/huntwarden-lab/listener.py
+Restart=always
+
+[Install]
+WantedBy=multi-user.target

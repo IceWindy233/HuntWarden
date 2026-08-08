@@ -21,6 +21,14 @@ export interface HostOperationMap {
   inspect_account: { input: { username: string }; output: Record<string, unknown> };
   inspect_authorized_keys: { input: { username: string }; output: Record<string, unknown>[] };
   get_login_history: { input: { username: string; maxEntries: number }; output: Record<string, unknown>[] };
+  list_cron_entries: { input: { maxItems: number; includeUserScope: boolean }; output: { items: Record<string, unknown>[]; partial: boolean; warnings: string[] } };
+  list_systemd_units: { input: { maxItems: number; includeUserScope: boolean }; output: { items: Record<string, unknown>[]; partial: boolean; warnings: string[] } };
+  list_ssh_persistence: { input: { maxItems: number; includeUserScope: boolean }; output: { items: Record<string, unknown>[]; partial: boolean; warnings: string[]; sshdConfig: Record<string, unknown> } };
+  list_shell_startup_files: { input: { maxItems: number; includeUserScope: boolean }; output: { items: Record<string, unknown>[]; partial: boolean; warnings: string[] } };
+  inspect_persistence_item: { input: { kind: string; path: string; username?: string; expectedSha256?: string }; output: Record<string, unknown> };
+  find_related_processes: { input: { kind: string; path: string; commandHint?: string; expectedSha256?: string; maxProcesses: number }; output: Record<string, unknown>[] };
+  list_process_connections: { input: { pid: number; maxConnections: number }; output: { items: Record<string, unknown>[]; partial: boolean; warnings: string[] } };
+  collect_persistence_artifact: { input: { kind: string; path: string; expectedSha256: string; maxBytes: number }; output: { dataBase64: string; sha256: string; size: number } };
   get_action_receipt: { input: { actionId: string }; output: Record<string, unknown> };
   quarantine_file: {
     input: { actionId: string; path: string; expectedSha256: string; quarantineRoot: string };

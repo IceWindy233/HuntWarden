@@ -20,7 +20,7 @@ docker compose -f "$project_dir/labs/docker-compose.yml" up -d --build
 
 known_hosts="$state_dir/known_hosts"
 : > "$known_hosts"
-for port in 2222 2223 2224; do
+for port in 2222 2223 2224 2225; do
   line=""
   for _ in $(seq 1 30); do
     if line=$(ssh-keyscan -p "$port" -t ed25519 127.0.0.1 2>/dev/null) && [[ -n "$line" ]]; then

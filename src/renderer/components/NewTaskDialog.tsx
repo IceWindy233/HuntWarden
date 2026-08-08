@@ -5,9 +5,9 @@ import { Button, Field, Input, Modal, Select, Textarea } from "./ui.js";
 
 export function NewTaskDialog({ profile, onClose, onCreated, notify }: { profile: ConfigProfile; onClose: () => void; onCreated: (task: TaskContext) => void; notify: (message: string, tone?: "success" | "error" | "info") => void }) {
   const [form, setForm] = useState<NewTaskInput>({
-    request: "排查 WebShell、Tomcat Java 内存马和 Linux 后门账户，并形成结构化报告。",
+    request: "排查 WebShell、Tomcat Java 内存马、Linux 后门账户与持久化，并形成结构化报告。",
     mode: profile.config.agent.defaultMode,
-    checks: ["webshell", "java_memory_shell", "backdoor_account"],
+    checks: ["webshell", "java_memory_shell", "backdoor_account", "linux_persistence"],
     target: {
       host: "127.0.0.1", port: 22, username: "secagent", hostFingerprint: "",
       privateKeyPath: profile.config.executor.privateKeyPath,
@@ -48,6 +48,7 @@ export function NewTaskDialog({ profile, onClose, onCreated, notify }: { profile
       <CheckCard active={form.checks.includes("webshell")} title="WebShell" description="近期脚本、YARA、日志关联与文件证据" onClick={() => toggleCheck("webshell")} />
       <CheckCard active={form.checks.includes("java_memory_shell")} title="Java 内存马" description="Tomcat 组件、Class 来源与只读 Dump" onClick={() => toggleCheck("java_memory_shell")} />
       <CheckCard active={form.checks.includes("backdoor_account")} title="后门账户" description="特权账户、SSH Key 与登录历史" onClick={() => toggleCheck("backdoor_account")} />
+      <CheckCard active={form.checks.includes("linux_persistence")} title="Linux 持久化" description="Cron、systemd、SSH Key、Shell 启动项及进程网络关联" onClick={() => toggleCheck("linux_persistence")} />
     </div>
     <Field label="调查请求" wide><Textarea rows={4} value={form.request} onChange={(event) => setForm({ ...form, request: event.target.value })} /></Field>
     {form.mode === "REMEDIATE" ? <div className="warning-callout"><strong>处置模式已启用</strong><span>任何文件隔离或账户禁用仍需在 GUI 中逐动作审批，模型不能自行授权。</span></div> : null}

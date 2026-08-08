@@ -94,6 +94,61 @@ describe.skipIf(!enabled)("Docker Lab 真实 SSH Tool Chain", () => {
     expect(keys[0]).not.toHaveProperty("key");
   });
 
+  it("Lab-Persistence 完成 Cron、systemd、SSH、Shell 与进程网络关联链", async () => {
+    const remote = executor(2225);
+    const request = { maxItems: 500, includeUserScope: true };
+    const cron = await remote.invoke({ operation: "list_cron_entries", params: request });
+    const cronMarker = cron.items.find((item) => item.path === "/etc/cron.d/huntwarden-lab");
+    expect(cronMarker).toMatchObject({ kind: "cron", username: "persistuser" });
+    const limitedCron = await remote.invoke({ operation: "list_cron_entries", params: { maxItems: 1, includeUserScope: true } });
+    expect(limitedCron).toMatchObject({ partial: true });
+    expect(limitedCron.items).toHaveLength(1);
+
+    const systemd = await remote.invoke({ operation: "list_systemd_units", params: request });
+    const unit = systemd.items.find((item) => item.unit === "huntwarden-lab.service");
+    expect(unit).toMatchObject({ kind: "systemd", enabled: true, runAs: "persistuser" });
+    expect(systemd).toMatchObject({ partial: true });
+    expect(systemd.warnings.join(" ")).toContain("管理器未运行");
+
+    const ssh = await remote.invoke({ operation: "list_ssh_persistence", params: request });
+    const unknown = ssh.items.find((item) => item.username === "persistuser");
+    expect(unknown?.fingerprint).toMatch(/^SHA256:/);
+    expect(JSON.stringify(ssh)).not.toContain("ssh-ed25519 AAAA");
+    expect(unknown).not.toHaveProperty("key");
+
+    const shell = await remote.invoke({ operation: "list_shell_startup_files", params: request });
+    const startup = shell.items.find((item) => item.path === "/home/persistuser/.bashrc");
+    expect(startup).toMatchObject({ kind: "shell" });
+    expect(startup?.features).toContain("interpreter_execution");
+
+    const inspected = await remote.invoke({ operation: "inspect_persistence_item", params: {
+      kind: String(unit!.kind), path: String(unit!.path), expectedSha256: String(unit!.sha256),
+    } });
+    expect(inspected.sha256).toBe(unit!.sha256);
+
+    const processes = await remote.invoke({ operation: "find_related_processes", params: {
+      kind: String(unit!.kind), path: String(unit!.path), expectedSha256: String(unit!.sha256),
+      commandHint: (unit!.execStart as string[]).join(" "), maxProcesses: 500,
+    } });
+    const listener = processes.find((item) => String(item.command).includes("listener.py") && String(item.executable).includes("python"));
+    expect(listener).toBeTruthy();
+    const connections = await remote.invoke({ operation: "list_process_connections", params: { pid: Number(listener!.pid), maxConnections: 500 } });
+    expect(connections.items.some((item) => String(item.local).endsWith(":45555") && item.state === "LISTEN")).toBe(true);
+
+    const artifact = await remote.invoke({ operation: "collect_persistence_artifact", params: {
+      kind: String(unit!.kind), path: String(unit!.path), expectedSha256: String(unit!.sha256), maxBytes: 1024 * 1024,
+    } });
+    expect(artifact.sha256).toBe(unit!.sha256);
+    expect(Buffer.from(artifact.dataBase64, "base64").length).toBe(artifact.size);
+
+    await expect(remote.invoke({ operation: "inspect_persistence_item", params: {
+      kind: "shell", path: "/etc/passwd", expectedSha256: "0".repeat(64),
+    } })).rejects.toMatchObject({ code: "PERMISSION_DENIED" });
+    await expect(remote.invoke({ operation: "inspect_persistence_item", params: {
+      kind: "shell", path: "/home/persistuser/../persistuser/.bashrc", expectedSha256: String(startup!.sha256),
+    } })).rejects.toMatchObject({ code: "INVALID_ARGUMENT" });
+  });
+
   it("未知 Host Key 在连接前失败", async () => {
     const target: TargetConfig = {
       host: "127.0.0.1", port: 2222, username: "secagent", hostFingerprint: "SHA256:not-known",

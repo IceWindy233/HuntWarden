@@ -13,6 +13,7 @@ describe("桌面 IPC 参数边界", () => {
     const target = testTask().target;
     const parsed = newTaskInput({ request: "调查", mode: "SCAN", checks: ["webshell", "webshell"], target });
     expect(parsed.checks).toEqual(["webshell"]);
+    expect(newTaskInput({ request: "持久化调查", mode: "SCAN", checks: ["linux_persistence"], target }).checks).toEqual(["linux_persistence"]);
     expect(() => newTaskInput({ request: "调查", mode: "SCAN", checks: ["webshell"], target: { ...target, username: "secagent;id" } })).toThrow(/用户名/);
     expect(() => newTaskInput({ request: "调查", mode: "SCAN", checks: ["webshell"], target: { ...target, privateKeyPath: "relative/key" } })).toThrow(/绝对路径/);
   });

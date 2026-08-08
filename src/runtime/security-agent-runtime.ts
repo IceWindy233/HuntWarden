@@ -160,6 +160,7 @@ export class SecurityAgentRuntime extends EventEmitter {
 
   private persistEvent(event: Record<string, unknown>): void {
     const type = String(event.type ?? "unknown");
+    if (type === "message_update") this.options.checkpoint?.("model_streaming");
     if (type === "message_end" && event.message && typeof event.message === "object") {
       const message = event.message as AgentMessage;
       this.options.store.appendMessage(this.options.task.taskId, message);

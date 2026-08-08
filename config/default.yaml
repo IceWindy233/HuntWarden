@@ -40,6 +40,11 @@ account:
   checkAuthorizedKeys: true
   checkLoginHistory: true
 
+persistence:
+  maxItemsPerSource: 500
+  includeUserScope: true
+  maxConnections: 500
+
 remediation:
   requireApproval: true
   allowedTools: [quarantine_file, disable_account]

@@ -9,6 +9,7 @@ import { ApprovalService } from "../../src/agent/approval-service.js";
 import { EvidenceStore } from "../../src/evidence/evidence-store.js";
 import { FakeExecutor } from "../../src/executor/fake-executor.js";
 import { SecurityAgentRuntime } from "../../src/runtime/security-agent-runtime.js";
+import { Application } from "../../src/runtime/application.js";
 import { RuntimeStore } from "../../src/storage/runtime-store.js";
 import { createRecordFindingTool } from "../../src/tools/local/record-finding.js";
 import { createSecurityTool } from "../../src/tools/tool-factory.js";
@@ -18,6 +19,34 @@ const directories: string[] = [];
 afterEach(async () => { await Promise.all(directories.splice(0).map((path) => rm(path, { recursive: true, force: true }))); });
 
 describe("Pi Faux Provider Agent Loop", () => {
+  it("四类联合任务均固化 FindingStatus 并自动生成版本报告", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "huntwarden-four-checks-"));
+    directories.push(directory);
+    const store = await RuntimeStore.open(directory, "runtime.db");
+    const config = testConfig(directory);
+    const faux = fauxProvider({ tokensPerSecond: 0 });
+    const models = createModels();
+    models.setProvider(faux.provider);
+    const categories = ["webshell", "java_memory_shell", "backdoor_account", "linux_persistence"] as const;
+    faux.setResponses([
+      ...categories.map((category, index) => fauxAssistantMessage(fauxToolCall("record_finding", {
+        category, severity: "INFO", confidence: 0.8, status: category === "linux_persistence" ? "SUSPICIOUS" : "NO_FINDING",
+        title: `${category} 联合测试结论`, summary: "Faux Provider 固定事实链，未执行任何写工具。", evidenceRefs: [],
+      }, { id: `call-four-${index}` }), { stopReason: "toolUse" })),
+      fauxAssistantMessage("四类联合调查已完成。"),
+      fauxAssistantMessage("报告模型输出故意不含引用，以验证确定性回退。"),
+    ]);
+    const application = new Application(config, store, models, faux.getModel());
+    const task = application.createTask({ request: "四类联合 Faux 调查", mode: "SCAN", target: testTask().target });
+    await application.startTask(task.taskId);
+    expect(store.listFindings(task.taskId).map((finding) => [finding.category, finding.status])).toEqual([
+      ["webshell", "NO_FINDING"], ["java_memory_shell", "NO_FINDING"], ["backdoor_account", "NO_FINDING"], ["linux_persistence", "SUSPICIOUS"],
+    ]);
+    expect(store.listReports(task.taskId)).toMatchObject([{ version: 1 }]);
+    expect(store.getTask(task.taskId)?.status).toBe("COMPLETED");
+    await application.close();
+  });
+
   it("执行固定 Tool Call 序列并固化 Finding", async () => {
     const directory = await mkdtemp(join(tmpdir(), "huntwarden-agent-loop-"));
     directories.push(directory);

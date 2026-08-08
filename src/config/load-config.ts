@@ -10,6 +10,15 @@ function resolveConfigPath(configDir: string, value: string): string {
 
 export interface ConfigIssue { path: string; message: string }
 
+function withIncrementalDefaults(input: unknown): unknown {
+  if (!input || typeof input !== "object" || Array.isArray(input)) return input;
+  const migrated = structuredClone(input) as Record<string, unknown>;
+  if (migrated.persistence === undefined) {
+    migrated.persistence = { maxItemsPerSource: 500, includeUserScope: true, maxConnections: 500 };
+  }
+  return migrated;
+}
+
 export function getConfigIssues(input: unknown): ConfigIssue[] {
   return [...Value.Errors(ConfigSchema, input)].map((issue) => ({ path: issue.instancePath || "/", message: issue.message }));
 }
@@ -36,9 +45,10 @@ function validateCustomModelEndpoint(config: AppConfig): void {
 }
 
 export function normalizeConfig(input: unknown, sourcePath: string): AppConfig {
-  const issues = getConfigIssues(input);
+  const migrated = withIncrementalDefaults(input);
+  const issues = getConfigIssues(migrated);
   if (issues.length > 0) throw new Error(`配置校验失败:\n${issues.map((issue) => `${issue.path}: ${issue.message}`).join("\n")}`);
-  const config = structuredClone(input) as AppConfig;
+  const config = structuredClone(migrated) as AppConfig;
   validateCustomModelEndpoint(config);
   const configDir = dirname(resolve(sourcePath));
   config.storage.baseDir = resolveConfigPath(configDir, config.storage.baseDir);

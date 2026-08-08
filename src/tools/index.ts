@@ -6,6 +6,7 @@ import { createJavaTools } from "./java/tools.js";
 import { createAccountTools } from "./account/tools.js";
 import { createRecordFindingTool } from "./local/record-finding.js";
 import { createRemediationTools } from "./remediation/tools.js";
+import { createPersistenceTools } from "./persistence/tools.js";
 
 export function createSecurityTools(deps: ToolDependencies): SecurityToolDefinition[] {
   return [
@@ -13,6 +14,7 @@ export function createSecurityTools(deps: ToolDependencies): SecurityToolDefinit
     ...createWebShellTools(deps),
     ...createJavaTools(deps),
     ...createAccountTools(deps),
+    ...createPersistenceTools(deps),
     createRecordFindingTool(deps),
     ...createRemediationTools(deps),
   ];

@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { Value } from "typebox/value";
 import { afterEach, describe, expect, it } from "vitest";
-import { loadConfig } from "../../src/config/load-config.js";
+import { loadConfig, normalizeConfig } from "../../src/config/load-config.js";
 import { ConfigSchema } from "../../src/config/schema.js";
 import { validateTargetConfig } from "../../src/domain/validation.js";
 import { RuntimeStore } from "../../src/storage/runtime-store.js";
@@ -32,6 +32,13 @@ describe("配置与不透明引用", () => {
     });
     const { model } = createModelBundle(config);
     expect(model).toMatchObject({ api: "openai-completions", baseUrl: "https://api.deepseek.com", reasoning: true });
+  });
+
+  it("为旧 Profile 纯增量注入持久化默认值", () => {
+    const legacy = testConfig("/tmp/huntwarden-config-migration") as unknown as Record<string, unknown>;
+    delete legacy.persistence;
+    const migrated = normalizeConfig(legacy, "/tmp/huntwarden-config-migration/profile.yaml");
+    expect(migrated.persistence).toEqual({ maxItemsPerSource: 500, includeUserScope: true, maxConnections: 500 });
   });
 
   it("拒绝关闭审批，并允许选择 Pi 内置 Provider", () => {
@@ -93,6 +100,9 @@ describe("配置与不透明引用", () => {
     expect(requireReference(store, task.taskId, reference.ref, "account").value).toEqual({ username: "labroot" });
     expect(() => requireReference(store, "TASK-other", reference.ref, "account")).toThrow(/跨任务/);
     expect(() => requireReference(store, task.taskId, reference.ref, "candidate")).toThrow(/跨任务/);
+    const persistence = createReference(store, task.taskId, "persistence", "persistence", { kind: "cron", path: "/etc/crontab" });
+    expect(requireReference(store, task.taskId, persistence.ref, "persistence").value).toMatchObject({ kind: "cron" });
+    expect(() => requireReference(store, "TASK-other", persistence.ref, "persistence")).toThrow(/跨任务/);
     store.close();
   });
 

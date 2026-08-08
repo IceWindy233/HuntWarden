@@ -1,0 +1,3 @@
+# HuntWarden harmless suspicious Cron marker
+@reboot persistuser /usr/bin/python3 /opt/huntwarden-lab/listener.py
+*/15 * * * * persistuser /bin/sh -c '/usr/bin/test -f /opt/huntwarden-lab/listener.py'

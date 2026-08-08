@@ -21,3 +21,10 @@ services:
       dockerfile: labs/account/Dockerfile
     ports: ["2224:22"]
     hostname: lab-account
+
+  lab-persistence:
+    build:
+      context: ..
+      dockerfile: labs/persistence/Dockerfile
+    ports: ["2225:22"]
+    hostname: lab-persistence

@@ -1,0 +1,6 @@
+[Unit]
+Description=HuntWarden normal maintenance fixture
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/true

@@ -18,6 +18,7 @@ import platform
 import pwd
 import re
 import shutil
+import socket
 import stat
 import subprocess
 import sys
@@ -31,6 +32,13 @@ PROBE_JAR = pathlib.Path("/opt/huntwarden/huntwarden-tomcat-probe.jar")
 SCRIPT_EXTENSIONS = {".php", ".phtml", ".php5", ".jsp", ".jspx", ".asp", ".aspx", ".py", ".pl", ".cgi"}
 USERNAME = re.compile(r"^[a-z_][a-z0-9_-]{0,31}$", re.I)
 CLASS_NAME = re.compile(r"^[A-Za-z_$][A-Za-z0-9_$.]{0,511}$")
+PERSISTENCE_KINDS = {"cron", "systemd", "ssh", "shell"}
+SYSTEM_PERSISTENCE_ROOTS = {
+    "cron": ("/etc/crontab", "/etc/cron.d", "/etc/cron.hourly", "/etc/cron.daily", "/etc/cron.weekly", "/etc/cron.monthly", "/var/spool/cron"),
+    "systemd": ("/etc/systemd", "/usr/lib/systemd", "/lib/systemd"),
+    "ssh": ("/etc/ssh",),
+    "shell": ("/etc/profile", "/etc/bash.bashrc", "/etc/zsh", "/etc/profile.d"),
+}
 
 
 class HelperError(Exception):
@@ -94,6 +102,74 @@ def sha256_file(path: pathlib.Path) -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def file_facts(path: pathlib.Path) -> dict[str, Any]:
+    info = path.stat()
+    return {
+        "path": str(path), "sha256": sha256_file(path), "size": info.st_size,
+        "mode": format(stat.S_IMODE(info.st_mode), "04o"), "uid": info.st_uid, "gid": info.st_gid,
+        "mtime": dt.datetime.fromtimestamp(info.st_mtime, dt.timezone.utc).isoformat(),
+    }
+
+
+def persistence_limits(request: dict[str, Any]) -> tuple[int, bool]:
+    maximum = safe_int(request.get("maxItems"), 1, 5000, "maxItems")
+    include_user = request.get("includeUserScope")
+    if not isinstance(include_user, bool):
+        raise HelperError("INVALID_ARGUMENT", "invalid includeUserScope")
+    return maximum, include_user
+
+
+def interactive_accounts() -> list[pwd.struct_passwd]:
+    return [account for account in pwd.getpwall() if (account.pw_uid == 0 or account.pw_uid >= 1000) and account.pw_shell not in {"", "/bin/false", "/sbin/nologin", "/usr/sbin/nologin"}]
+
+
+def is_within(path: pathlib.Path, root: pathlib.Path) -> bool:
+    try:
+        path.relative_to(root)
+        return True
+    except ValueError:
+        return False
+
+
+def validated_persistence_path(kind: Any, value: Any) -> pathlib.Path:
+    if kind not in PERSISTENCE_KINDS:
+        raise HelperError("INVALID_ARGUMENT", "invalid persistence kind")
+    path = safe_path(value)
+    allowed = [pathlib.Path(root).resolve(strict=False) for root in SYSTEM_PERSISTENCE_ROOTS[kind]]
+    if kind == "systemd":
+        allowed.extend((pathlib.Path(account.pw_dir) / ".config/systemd/user").resolve(strict=False) for account in interactive_accounts())
+    elif kind == "ssh":
+        allowed.extend((pathlib.Path(account.pw_dir) / ".ssh").resolve(strict=False) for account in interactive_accounts())
+    elif kind == "shell":
+        allowed.extend(pathlib.Path(account.pw_dir).resolve(strict=False) for account in interactive_accounts())
+    if not any(path == root or is_within(path, root) for root in allowed):
+        raise HelperError("PERMISSION_DENIED", "path is outside fixed persistence scope")
+    if not path.is_file() or path.is_symlink():
+        raise HelperError("INVALID_ARGUMENT", "persistence path must be a regular non-symlink file")
+    if kind == "systemd" and path.suffix not in {".service", ".timer"}:
+        raise HelperError("PERMISSION_DENIED", "unsupported systemd file type")
+    if kind == "ssh" and path.name != "authorized_keys":
+        raise HelperError("PERMISSION_DENIED", "only authorized_keys may be inspected")
+    if kind == "shell" and path.name not in {"profile", "bash.bashrc", ".profile", ".bash_profile", ".bashrc", ".zprofile", ".zshrc", "zshrc", "zprofile"} and path.suffix != ".sh":
+        raise HelperError("PERMISSION_DENIED", "unsupported shell startup file type")
+    return path
+
+
+def dangerous_features(text: str) -> list[str]:
+    expressions = {
+        "download_execute": r"\b(?:curl|wget)\b.*(?:\||-o\s)|\b(?:bash|sh)\s+-c\b",
+        "encoded_payload": r"base64\s+(?:-d|--decode)|frombase64string",
+        "network_listener": r"\b(?:nc|ncat|socat)\b.*(?:-l|listen)|http\.server",
+        "temporary_execution": r"/(?:tmp|dev/shm)/|mktemp",
+        "interpreter_execution": r"\b(?:python|perl|ruby|php)\d*\b",
+    }
+    return [name for name, expression in expressions.items() if re.search(expression, text, re.I)]
+
+
+def text_file(path: pathlib.Path, maximum: int = 65536) -> str:
+    return path.read_bytes()[:maximum].decode("utf-8", errors="replace")
 
 
 def atomic_json(path: pathlib.Path, value: dict[str, Any]) -> None:
@@ -423,6 +499,280 @@ def get_login_history(request: dict[str, Any]) -> list[dict[str, Any]]:
     return [{"raw": line[:2048]} for line in result.stdout.splitlines() if line.strip() and not line.startswith(("wtmp begins", "reboot"))]
 
 
+def list_cron_entries(request: dict[str, Any]) -> dict[str, Any]:
+    maximum, include_user = persistence_limits(request)
+    paths: list[pathlib.Path] = []
+    for value in SYSTEM_PERSISTENCE_ROOTS["cron"]:
+        candidate = pathlib.Path(value)
+        if candidate.is_file():
+            paths.append(candidate)
+        elif candidate.is_dir():
+            paths.extend(item for item in candidate.rglob("*") if item.is_file() and not item.is_symlink())
+    if include_user:
+        for spool in (pathlib.Path("/var/spool/cron/crontabs"), pathlib.Path("/var/spool/cron")):
+            if spool.is_dir():
+                paths.extend(item for item in spool.iterdir() if item.is_file() and not item.is_symlink())
+    items: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for path in paths:
+        resolved = str(path.resolve())
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        try:
+            facts = file_facts(path.resolve())
+            lines = text_file(path).splitlines()
+        except OSError:
+            continue
+        periodic = next((name for name in ("hourly", "daily", "weekly", "monthly") if f"/cron.{name}/" in str(path)), None)
+        if periodic:
+            items.append({**facts, "kind": "cron", "line": 0, "schedule": f"@{periodic}", "username": "root",
+                          "commandSummary": str(path.resolve()), "features": dangerous_features(text_file(path))})
+            if len(items) >= maximum:
+                return {"items": items, "partial": True, "warnings": ["Cron 结果达到配置上限"]}
+            continue
+        for number, raw in enumerate(lines, 1):
+            line = raw.strip()
+            if not line or line.startswith("#") or ("=" in line and not line.startswith("@") and len(line.split()) == 1):
+                continue
+            fields = line.split()
+            if not (line.startswith("@") or len(fields) >= 6):
+                continue
+            schedule_fields = 1 if line.startswith("@") else 5
+            command_fields = fields[schedule_fields:]
+            username = None
+            if str(path) == "/etc/crontab" or "/etc/cron.d/" in str(path):
+                if command_fields:
+                    username = command_fields.pop(0)
+            command = " ".join(command_fields)[:4096]
+            items.append({**facts, "kind": "cron", "line": number, "schedule": " ".join(fields[:schedule_fields]),
+                          "username": username, "commandSummary": command, "features": dangerous_features(command)})
+            if len(items) >= maximum:
+                return {"items": items, "partial": True, "warnings": ["Cron 结果达到配置上限"]}
+    return {"items": items, "partial": False, "warnings": []}
+
+
+def parse_systemd_unit(path: pathlib.Path) -> dict[str, Any]:
+    section = ""
+    values: dict[str, list[str]] = {}
+    for raw in text_file(path).splitlines():
+        line = raw.strip()
+        if not line or line.startswith(("#", ";")):
+            continue
+        if line.startswith("[") and line.endswith("]"):
+            section = line[1:-1]
+            continue
+        if "=" in line:
+            key, value = line.split("=", 1)
+            values.setdefault(f"{section}.{key}", []).append(value[:4096])
+    exec_start = values.get("Service.ExecStart", [])
+    return {
+        "unitType": path.suffix.lstrip("."), "execStart": exec_start,
+        "runAs": (values.get("Service.User") or ["root"])[-1],
+        "wantedBy": values.get("Install.WantedBy", []),
+        "features": dangerous_features("\n".join(exec_start)),
+    }
+
+
+def list_systemd_units(request: dict[str, Any]) -> dict[str, Any]:
+    maximum, include_user = persistence_limits(request)
+    roots = [pathlib.Path(value) for value in SYSTEM_PERSISTENCE_ROOTS["systemd"]]
+    if include_user:
+        roots.extend(pathlib.Path(account.pw_dir) / ".config/systemd/user" for account in interactive_accounts())
+    items: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for root in roots:
+        if not root.is_dir():
+            continue
+        for path in root.rglob("*"):
+            if path.suffix not in {".service", ".timer"} or not path.is_file():
+                continue
+            resolved = path.resolve()
+            if str(resolved) in seen:
+                continue
+            seen.add(str(resolved))
+            try:
+                enabled_links = [str(link) for link in pathlib.Path("/etc/systemd").rglob(path.name) if link.is_symlink()][:20]
+                items.append({**file_facts(resolved), "kind": "systemd", "unit": path.name,
+                              "scope": "user" if "/.config/systemd/user/" in str(resolved) else "system",
+                              "enabled": bool(enabled_links), "enabledLinks": enabled_links, **parse_systemd_unit(resolved)})
+            except OSError:
+                continue
+            if len(items) >= maximum:
+                return {"items": items, "partial": True, "warnings": ["systemd 结果达到配置上限"]}
+    manager_available = pathlib.Path("/run/systemd/system").is_dir()
+    warnings = [] if manager_available else ["systemd 管理器未运行；仅完成 Unit 文件与启用链接检查"]
+    return {"items": items, "partial": not manager_available, "warnings": warnings}
+
+
+def effective_sshd_config() -> dict[str, Any]:
+    binary = shutil.which("sshd")
+    if not binary:
+        return {"available": False}
+    result = run([binary, "-T"], check=False)
+    selected: dict[str, str] = {}
+    wanted = {"authorizedkeysfile", "permitrootlogin", "passwordauthentication", "pubkeyauthentication", "allowusers", "allowgroups"}
+    for line in result.stdout.splitlines():
+        key, _, value = line.partition(" ")
+        if key in wanted:
+            selected[key] = value[:2048]
+    return {"available": result.returncode == 0, **selected}
+
+
+def list_ssh_persistence(request: dict[str, Any]) -> dict[str, Any]:
+    maximum, include_user = persistence_limits(request)
+    accounts = interactive_accounts() if include_user else []
+    items: list[dict[str, Any]] = []
+    for account in accounts:
+        path = pathlib.Path(account.pw_dir) / ".ssh/authorized_keys"
+        if not path.is_file() or path.is_symlink():
+            continue
+        try:
+            facts = file_facts(path.resolve())
+            keys = inspect_authorized_keys({"username": account.pw_name})
+        except (OSError, KeyError):
+            continue
+        for key in keys:
+            items.append({**facts, "kind": "ssh", "username": account.pw_name, **key})
+            if len(items) >= maximum:
+                return {"items": items, "partial": True, "warnings": ["SSH Key 结果达到配置上限"], "sshdConfig": effective_sshd_config()}
+    return {"items": items, "partial": False, "warnings": [], "sshdConfig": effective_sshd_config()}
+
+
+def list_shell_startup_files(request: dict[str, Any]) -> dict[str, Any]:
+    maximum, include_user = persistence_limits(request)
+    paths = [pathlib.Path("/etc/profile"), pathlib.Path("/etc/bash.bashrc")]
+    for root in (pathlib.Path("/etc/profile.d"), pathlib.Path("/etc/zsh")):
+        if root.is_dir():
+            paths.extend(item for item in root.rglob("*") if item.is_file() and not item.is_symlink())
+    if include_user:
+        for account in interactive_accounts():
+            paths.extend(pathlib.Path(account.pw_dir) / name for name in (".profile", ".bash_profile", ".bashrc", ".zprofile", ".zshrc"))
+    items: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for path in paths:
+        if not path.is_file() or path.is_symlink():
+            continue
+        try:
+            resolved = path.resolve()
+            if str(resolved) in seen:
+                continue
+            seen.add(str(resolved))
+            text = text_file(resolved)
+            suspicious = [line.strip()[:1024] for line in text.splitlines() if dangerous_features(line)][:20]
+            items.append({**file_facts(resolved), "kind": "shell", "features": dangerous_features(text), "commandSummaries": suspicious})
+        except OSError:
+            continue
+        if len(items) >= maximum:
+            return {"items": items, "partial": True, "warnings": ["Shell 启动文件结果达到配置上限"]}
+    return {"items": items, "partial": False, "warnings": []}
+
+
+def inspect_persistence_item(request: dict[str, Any]) -> dict[str, Any]:
+    kind = request.get("kind")
+    path = validated_persistence_path(kind, request.get("path"))
+    expected = request.get("expectedSha256")
+    current = sha256_file(path)
+    if expected is not None and (not isinstance(expected, str) or current != expected):
+        raise HelperError("EVIDENCE_COLLECTION", "persistence item hash changed")
+    facts = file_facts(path)
+    if kind == "ssh":
+        username = safe_username(request.get("username"))
+        return {**facts, "kind": kind, "username": username, "keys": inspect_authorized_keys({"username": username})}
+    text = text_file(path)
+    return {**facts, "kind": kind, "features": dangerous_features(text), "excerpt": text, "truncated": path.stat().st_size > 65536}
+
+
+def find_related_processes(request: dict[str, Any]) -> list[dict[str, Any]]:
+    kind = request.get("kind")
+    path = validated_persistence_path(kind, request.get("path"))
+    expected = request.get("expectedSha256")
+    if expected is not None and sha256_file(path) != expected:
+        raise HelperError("EVIDENCE_COLLECTION", "persistence item hash changed")
+    maximum = safe_int(request.get("maxProcesses"), 1, 500, "maxProcesses")
+    hint = request.get("commandHint", "")
+    if not isinstance(hint, str) or len(hint) > 4096:
+        raise HelperError("INVALID_ARGUMENT", "invalid commandHint")
+    tokens = re.findall(r"/[A-Za-z0-9_./-]+|[A-Za-z0-9_.-]+", hint)
+    useful = [pathlib.Path(token).name for token in tokens if pathlib.Path(token).name not in {"sh", "bash", "dash", "python", "python3", "env", "sudo", "root"}]
+    if not useful:
+        return []
+    processes = list_processes({})
+    matches = []
+    for process in processes:
+        command = str(process.get("command", ""))
+        if any(token in command for token in useful[:10]):
+            executable = None
+            try:
+                executable = str(pathlib.Path(f"/proc/{process['pid']}/exe").resolve(strict=True))
+            except OSError:
+                pass
+            matches.append({**process, "executable": executable, "matchedTokens": useful[:10]})
+            if len(matches) >= maximum:
+                break
+    return matches
+
+
+def decode_endpoint(value: str, ipv6: bool) -> str:
+    address_hex, port_hex = value.split(":")
+    raw = bytes.fromhex(address_hex)
+    if ipv6:
+        address = socket.inet_ntop(socket.AF_INET6, b"".join(raw[index:index + 4][::-1] for index in range(0, 16, 4)))
+    else:
+        address = socket.inet_ntop(socket.AF_INET, raw[::-1])
+    return f"{address}:{int(port_hex, 16)}"
+
+
+def list_process_connections(request: dict[str, Any]) -> dict[str, Any]:
+    pid = safe_int(request.get("pid"), 1, 2**31 - 1, "pid")
+    maximum = safe_int(request.get("maxConnections"), 1, 5000, "maxConnections")
+    proc = pathlib.Path(f"/proc/{pid}")
+    if not proc.is_dir():
+        raise HelperError("INVALID_ARGUMENT", "process no longer exists")
+    inodes: set[str] = set()
+    try:
+        for fd in (proc / "fd").iterdir():
+            try:
+                match = re.fullmatch(r"socket:\[(\d+)\]", os.readlink(fd))
+                if match:
+                    inodes.add(match.group(1))
+            except OSError:
+                continue
+    except OSError as exc:
+        raise HelperError("PERMISSION_DENIED", "cannot inspect process descriptors") from exc
+    states = {"01": "ESTABLISHED", "02": "SYN_SENT", "03": "SYN_RECV", "06": "TIME_WAIT", "07": "CLOSE", "08": "CLOSE_WAIT", "0A": "LISTEN"}
+    items: list[dict[str, Any]] = []
+    warnings: list[str] = []
+    for protocol, name, ipv6 in (("tcp", "/proc/net/tcp", False), ("tcp6", "/proc/net/tcp6", True), ("udp", "/proc/net/udp", False), ("udp6", "/proc/net/udp6", True)):
+        path = pathlib.Path(name)
+        if not path.is_file():
+            continue
+        for line in path.read_text("ascii", errors="replace").splitlines()[1:]:
+            fields = line.split()
+            if len(fields) < 10 or fields[9] not in inodes:
+                continue
+            try:
+                items.append({"protocol": protocol, "local": decode_endpoint(fields[1], ipv6), "remote": decode_endpoint(fields[2], ipv6),
+                              "state": states.get(fields[3], fields[3]), "inode": fields[9]})
+            except (ValueError, OSError):
+                warnings.append(f"无法解析 {protocol} socket")
+            if len(items) >= maximum:
+                return {"items": items, "partial": True, "warnings": warnings + ["网络连接结果达到配置上限"]}
+    return {"items": items, "partial": False, "warnings": warnings}
+
+
+def collect_persistence_artifact(request: dict[str, Any]) -> dict[str, Any]:
+    path = validated_persistence_path(request.get("kind"), request.get("path"))
+    expected = request.get("expectedSha256")
+    if not isinstance(expected, str) or not re.fullmatch(r"[0-9a-f]{64}", expected) or sha256_file(path) != expected:
+        raise HelperError("EVIDENCE_COLLECTION", "persistence item hash changed")
+    maximum = safe_int(request.get("maxBytes"), 1, 10 * 1024 * 1024, "maxBytes")
+    if path.stat().st_size > maximum:
+        raise HelperError("EVIDENCE_COLLECTION", "persistence artifact exceeds collection limit")
+    data = path.read_bytes()
+    return {"dataBase64": base64.b64encode(data).decode(), "sha256": expected, "size": len(data)}
+
+
 def get_action_receipt(request: dict[str, Any]) -> dict[str, Any]:
     value = action_id(request)
     path = receipt_path(value)
@@ -495,6 +845,14 @@ OPERATIONS: dict[str, Callable[[dict[str, Any]], Any]] = {
     "inspect_account": inspect_account,
     "inspect_authorized_keys": inspect_authorized_keys,
     "get_login_history": get_login_history,
+    "list_cron_entries": list_cron_entries,
+    "list_systemd_units": list_systemd_units,
+    "list_ssh_persistence": list_ssh_persistence,
+    "list_shell_startup_files": list_shell_startup_files,
+    "inspect_persistence_item": inspect_persistence_item,
+    "find_related_processes": find_related_processes,
+    "list_process_connections": list_process_connections,
+    "collect_persistence_artifact": collect_persistence_artifact,
     "get_action_receipt": get_action_receipt,
     "quarantine_file": quarantine_file,
     "disable_account": disable_account,

@@ -101,7 +101,7 @@ async function relaunchAndRecover(userDataDir: string, taskId: string, decision:
 }
 
 describe.skipIf(!enabled)("GUI 进程级崩溃恢复", () => {
-  for (const crashAt of ["model_response_after_user_persisted", "tool_started", "evidence_file_written_before_metadata", "approval_waiting"] as const) {
+  for (const crashAt of ["model_streaming", "tool_started", "evidence_file_written_before_metadata", "approval_waiting"] as const) {
     it(`${crashAt} 中断后由分析师恢复且不重复 Evidence`, async () => {
       const userDataDir = await mkdtemp(join(tmpdir(), `huntwarden-recovery-${crashAt}-`));
       temporaryDirectories.push(userDataDir);

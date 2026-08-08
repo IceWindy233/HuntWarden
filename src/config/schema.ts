@@ -73,6 +73,11 @@ export const ConfigSchema = Type.Object({
     probeJar: Type.String(),
   }),
   account: Type.Object({ checkAuthorizedKeys: Type.Boolean(), checkLoginHistory: Type.Boolean() }),
+  persistence: Type.Object({
+    maxItemsPerSource: Type.Integer({ minimum: 1, maximum: 5000 }),
+    includeUserScope: Type.Boolean(),
+    maxConnections: Type.Integer({ minimum: 1, maximum: 5000 }),
+  }),
   remediation: Type.Object({
     requireApproval: Type.Literal(true),
     allowedTools: Type.Array(Type.Union([Type.Literal("quarantine_file"), Type.Literal("disable_account")])),

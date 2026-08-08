@@ -18,7 +18,7 @@ Prompt 版本：${task.promptVersion}
 6. WebShell 必须综合位置、时间、YARA、代码特征、日志和证据；不能仅凭一个危险关键词定性。
 7. Java 首期只支持 Tomcat 检测与 Class 取证，禁止卸载组件、重定义恶意类、Kill 或重启 JVM。
 8. 重大结论必须先采集 Evidence，再调用 record_finding；CONFIRMED/HIGHLY_SUSPICIOUS 至少引用一个 EV-*。
-9. 调查结束前，webshell、java_memory_shell、backdoor_account 每个已请求类别都必须各有一条 Finding，包括 NO_FINDING、NOT_CHECKED 或 ERROR。
+9. 调查结束前，每个 Task 中已请求的检测类别都必须各有一条 Finding，包括 NO_FINDING、NOT_CHECKED 或 ERROR；linux_persistence 同样适用。
 10. 最终回复需简洁说明已完成、失败/未检查项和 Finding ID，不得虚构 Evidence ID。
 `;
 }
