@@ -404,6 +404,11 @@ export class RuntimeStore {
     return (rows as unknown as JsonRow[]).map((row) => JSON.parse(row.payload) as ApprovalTicket);
   }
 
+  listApprovals(taskId: string): ApprovalTicket[] {
+    const rows = this.db.prepare("SELECT payload FROM approvals WHERE task_id=? ORDER BY created_at").all(taskId) as unknown as JsonRow[];
+    return rows.map((row) => JSON.parse(row.payload) as ApprovalTicket);
+  }
+
   putActionReceipt(receipt: ActionReceipt): void {
     this.db.prepare("INSERT OR REPLACE INTO action_receipts(action_id,task_id,status,payload,updated_at) VALUES(?,?,?,?,?)")
       .run(receipt.actionId, receipt.taskId, receipt.status, JSON.stringify(receipt), new Date().toISOString());
@@ -412,6 +417,11 @@ export class RuntimeStore {
   getActionReceipt(actionId: string): ActionReceipt | undefined {
     const row = this.db.prepare("SELECT payload FROM action_receipts WHERE action_id=?").get(actionId) as JsonRow | undefined;
     return row ? JSON.parse(row.payload) as ActionReceipt : undefined;
+  }
+
+  listActionReceipts(taskId: string): ActionReceipt[] {
+    const rows = this.db.prepare("SELECT payload FROM action_receipts WHERE task_id=? ORDER BY updated_at").all(taskId) as unknown as JsonRow[];
+    return rows.map((row) => JSON.parse(row.payload) as ActionReceipt);
   }
 
   enqueueInput(taskId: string, message: AgentMessage): string {

@@ -452,7 +452,14 @@ def quarantine_file(request: dict[str, Any]) -> dict[str, Any]:
     metadata = {"originalPath": str(source), "mode": stat.S_IMODE(source.stat().st_mode), "uid": source.stat().st_uid, "gid": source.stat().st_gid, "sha256": expected}
     os.rename(source, target)
     os.chmod(target, 0o000)
-    return finish_receipt(receipt, "SUCCEEDED", {**metadata, "quarantinePath": str(target), "verifiedMissing": not source.exists()})
+    quarantine_mode = stat.S_IMODE(target.stat().st_mode)
+    return finish_receipt(receipt, "SUCCEEDED", {
+        **metadata,
+        "quarantinePath": str(target),
+        "quarantineMode": quarantine_mode,
+        "verifiedMode000": quarantine_mode == 0,
+        "verifiedMissing": not source.exists(),
+    })
 
 
 def disable_account(request: dict[str, Any]) -> dict[str, Any]:

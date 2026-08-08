@@ -88,8 +88,11 @@ function EvidenceList({ snapshot, notify }: { snapshot: TaskSnapshot; notify: (m
 }
 
 function AuditLog({ snapshot }: { snapshot: TaskSnapshot }) {
-  if (snapshot.audit.length === 0) return <EmptyState icon="≡" title="暂无审计事件" description="任务、模型、工具、审批和恢复事件会写入不可省略的审计流。" />;
-  return <div className="audit-log">{[...snapshot.audit].reverse().map((event) => <div className={`audit-line audit-${event.level}`} key={event.eventId}><time>{formatTime(event.createdAt)}</time><span className="audit-level">{event.level}</span><strong>{event.event}</strong><code>{Object.keys(event.data).length ? JSON.stringify(event.data) : ""}</code></div>)}</div>;
+  if (snapshot.audit.length === 0 && snapshot.actionReceipts.length === 0) return <EmptyState icon="≡" title="暂无审计事件" description="任务、模型、工具、审批和恢复事件会写入不可省略的审计流。" />;
+  return <div className="audit-sections">
+    {snapshot.actionReceipts.length ? <section className="receipt-section"><div className="receipt-heading"><strong>远程动作回执</strong><span>{snapshot.actionReceipts.length}</span></div><div className="receipt-grid">{[...snapshot.actionReceipts].reverse().map((receipt) => <article className="receipt-card" key={receipt.actionId}><header><div><strong>{receipt.tool}</strong><span className="mono">{receipt.actionId}</span></div><StatusPill value={receipt.status} /></header><dl><div><dt>目标指纹</dt><dd className="mono">{receipt.targetFingerprint}</dd></div><div><dt>开始</dt><dd>{formatTime(receipt.startedAt)}</dd></div>{receipt.finishedAt ? <div><dt>完成</dt><dd>{formatTime(receipt.finishedAt)}</dd></div> : null}</dl>{receipt.result ? <code>{JSON.stringify(receipt.result)}</code> : null}</article>)}</div></section> : null}
+    <div className="audit-log">{[...snapshot.audit].reverse().map((event) => <div className={`audit-line audit-${event.level}`} key={event.eventId}><time>{formatTime(event.createdAt)}</time><span className="audit-level">{event.level}</span><strong>{event.event}</strong><code>{Object.keys(event.data).length ? JSON.stringify(event.data) : ""}</code></div>)}</div>
+  </div>;
 }
 
 function ReportView({ taskId, report, onGenerate, busy, notify }: { taskId: string; report: string | undefined; onGenerate: () => Promise<void>; busy: boolean; notify: (message: string, tone?: "success" | "error" | "info") => void }) {

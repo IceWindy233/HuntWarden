@@ -4,7 +4,7 @@ import { join, resolve, sep } from "node:path";
 import { builtinModels } from "@earendil-works/pi-ai/providers/all";
 import { getSupportedThinkingLevels } from "@earendil-works/pi-ai";
 import { checkModel, smokeModel } from "../agent/model-health.js";
-import { createModelBundle } from "../agent/model.js";
+import { createModelBundle, type ModelBundle } from "../agent/model.js";
 import { getConfigIssues, loadConfig, normalizeConfig } from "../config/load-config.js";
 import { ConfigProfileService } from "../config/profile-service.js";
 import { isInvalidPackagedLabCredentialPath } from "../config/profile-path-repair.js";
@@ -36,6 +36,7 @@ export interface DesktopBackendOptions {
   platform: string;
   credentials: DesktopCredentialStore;
   labStateDir?: string;
+  modelBundleFactory?: (config: AppConfig) => ModelBundle;
   legacyRuntimeDirs?: string[];
 }
 
@@ -195,7 +196,8 @@ export class DesktopBackend extends EventEmitter {
       task,
       findings: application.store.listFindings(taskId),
       evidence: application.store.listEvidence(taskId),
-      approvals: application.store.listPendingApprovals(taskId),
+      approvals: application.store.listApprovals(taskId),
+      actionReceipts: application.store.listActionReceipts(taskId),
       audit: application.store.listAudit(taskId, 500),
       conversation: application.store.loadMessages(taskId).map((message) => {
         if (message.role === "user") {
@@ -301,7 +303,8 @@ export class DesktopBackend extends EventEmitter {
     if (!this.activeProfile) return;
     const store = await RuntimeStore.open(this.activeProfile.config.storage.baseDir, this.activeProfile.config.storage.databaseFile);
     if (this.options.legacyRuntimeDirs?.length) store.relocateEvidencePaths(this.options.legacyRuntimeDirs, this.activeProfile.config.storage.baseDir);
-    const { models, model } = createModelBundle(this.activeProfile.config, this.options.credentials);
+    const { models, model } = this.options.modelBundleFactory?.(this.activeProfile.config)
+      ?? createModelBundle(this.activeProfile.config, this.options.credentials);
     this.application = new Application(this.activeProfile.config, store, models, model);
     this.application.on("changed", (taskId: string) => this.publishTask(taskId));
     this.application.on("approval_requested", (ticket: ApprovalTicket) => this.emitDesktop({ type: "approval_requested", ticket }));

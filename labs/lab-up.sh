@@ -21,6 +21,7 @@ docker compose -f "$project_dir/labs/docker-compose.yml" up -d --build
 known_hosts="$state_dir/known_hosts"
 : > "$known_hosts"
 for port in 2222 2223 2224; do
+  line=""
   for _ in $(seq 1 30); do
     if line=$(ssh-keyscan -p "$port" -t ed25519 127.0.0.1 2>/dev/null) && [[ -n "$line" ]]; then
       printf '%s\n' "$line" >> "$known_hosts"
@@ -30,6 +31,24 @@ for port in 2222 2223 2224; do
     fi
     sleep 1
   done
+  if [[ -z "$line" ]]; then
+    printf 'Lab SSH port %s did not become ready\n' "$port" >&2
+    exit 1
+  fi
 done
 chmod 600 "$known_hosts"
+
+wait_http() {
+  local name="$1"
+  local url="$2"
+  for _ in $(seq 1 60); do
+    if curl -fsS "$url" >/dev/null 2>&1; then return 0; fi
+    sleep 1
+  done
+  printf '%s did not become ready: %s\n' "$name" "$url" >&2
+  return 1
+}
+
+wait_http "Lab-Web" "http://127.0.0.1:8080/"
+wait_http "Lab-Tomcat" "http://127.0.0.1:8081/lab/"
 printf 'Lab ready. Identity: %s\nKnown hosts: %s\n' "$state_dir/id_ed25519" "$known_hosts"

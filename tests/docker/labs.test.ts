@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { TargetConfig } from "../../src/domain/types.js";
+import { createId } from "../../src/common/ids.js";
 import { ApprovalService } from "../../src/agent/approval-service.js";
 import { EvidenceStore } from "../../src/evidence/evidence-store.js";
 import { SSHExecutor } from "../../src/executor/ssh-executor.js";
@@ -103,6 +104,58 @@ describe.skipIf(!enabled)("Docker Lab 真实 SSH Tool Chain", () => {
     await expect(remote.invoke({ operation: "get_host_info", params: {} })).rejects.toMatchObject({ code: "INVALID_TARGET" });
   });
 
+  it("Lab-Web 写工具无票据和拒绝审批均为零写入，批准后原子隔离并记录回执", async () => {
+    const remote = executor(2222);
+    const source = "/var/www/html/lab-webshell.php";
+    const collected = await remote.invoke({ operation: "collect_file", params: { path: source, maxBytes: 10 * 1024 * 1024 } });
+    const directory = await mkdtemp(resolve(tmpdir(), "huntwarden-docker-quarantine-"));
+    temporaryDirectories.push(directory);
+    const store = await RuntimeStore.open(directory, "runtime.db");
+    const task = testTask("REMEDIATE");
+    task.target = {
+      host: "127.0.0.1", port: 2222, username: "secagent",
+      hostFingerprint: knownHosts.match(/# (SHA256:[A-Za-z0-9+/]+) port=2222/)![1]!,
+      privateKeyPath, knownHostsPath,
+    };
+    store.createTask(task);
+    const approvals = new ApprovalService(store);
+    const evidence = new EvidenceStore(directory, store);
+    const stored = await evidence.putBuffer({
+      taskId: task.taskId, host: task.target.host, type: "file", source, tool: "collect_file",
+      toolCallId: "call-collect-webshell", data: Buffer.from(String(collected.dataBase64), "base64"),
+    });
+    expect(stored.sha256).toBe(collected.sha256);
+    const config = testConfig(directory);
+    config.remediation.quarantineRoot = "/var/lib/huntwarden/quarantine";
+    const tool = createRemediationTools({ task, config, store, approvals, executor: remote, evidence })
+      .find((item) => item.name === "quarantine_file")!;
+    const args = { evidenceRef: stored.evidenceId };
+
+    await expect(tool.execute("call-quarantine-without-approval", args, undefined)).rejects.toThrow(/授权票据/);
+    expect((await remote.invoke({ operation: "inspect_script_file", params: { path: source, maxBytes: 65_536 } })).sha256).toBe(stored.sha256);
+
+    const denied = approvals.request(task, tool.name, args);
+    approvals.decide(denied.approvalId, false);
+    await expect(tool.execute("call-quarantine-denied", args, undefined)).rejects.toThrow(/授权票据/);
+    expect((await remote.invoke({ operation: "get_action_receipt", params: { actionId: denied.actionId }, actionId: denied.actionId })).status).toBe("UNKNOWN");
+    expect((await remote.invoke({ operation: "inspect_script_file", params: { path: source, maxBytes: 65_536 } })).sha256).toBe(stored.sha256);
+
+    const approved = approvals.request(task, tool.name, args);
+    approvals.decide(approved.approvalId, true);
+    await tool.execute("call-quarantine-approved", args, undefined);
+    const localReceipt = store.getActionReceipt(approved.actionId);
+    expect(localReceipt?.status).toBe("SUCCEEDED");
+    expect(store.findLatestApproval(task.taskId, tool.name, approvals.getArgsDigest(args))?.status).toBe("CONSUMED");
+    const remoteReceipt = await remote.invoke({ operation: "get_action_receipt", params: { actionId: approved.actionId }, actionId: approved.actionId });
+    expect(remoteReceipt).toMatchObject({ status: "SUCCEEDED", result: { verifiedMissing: true, verifiedMode000: true, quarantineMode: 0 } });
+    const remaining = await remote.invoke({ operation: "find_recent_web_files", params: {
+      roots: ["/var/www/html"], modifiedWithinHours: 168, maxFiles: 500, maxFileSizeBytes: 10 * 1024 * 1024,
+    } });
+    expect(remaining.some((item) => item.path === source)).toBe(false);
+    await expect(tool.execute("call-quarantine-reuse-consumed-ticket", args, undefined)).rejects.toThrow(/授权票据/);
+    store.close();
+  });
+
   it("Lab-Account 写工具无票据为零成功，单次批准后真实禁用并记录回执", async () => {
     const remote = executor(2224);
     const directory = await mkdtemp(resolve(tmpdir(), "huntwarden-docker-write-"));
@@ -133,5 +186,18 @@ describe.skipIf(!enabled)("Docker Lab 真实 SSH Tool Chain", () => {
     expect(after.passwordLocked).toBe(true);
     expect(String(after.accountExpireDays)).not.toBe("-1");
     store.close();
+  });
+
+  it("Lab-Account 永久拒绝禁用 root 和当前 SSH 执行账户", async () => {
+    const remote = executor(2224);
+    for (const username of ["root", "secagent"]) {
+      const actionId = createId("action");
+      await expect(remote.invoke({
+        operation: "disable_account",
+        params: { actionId, username, executorUsername: "secagent" },
+        actionId,
+      })).rejects.toMatchObject({ code: "PERMISSION_DENIED" });
+      expect((await remote.invoke({ operation: "get_action_receipt", params: { actionId }, actionId })).status).toBe("UNKNOWN");
+    }
   });
 });

@@ -12,7 +12,7 @@ import {
   shell,
   type IpcMainInvokeEvent,
 } from "electron";
-import { DesktopBackend } from "./backend.js";
+import { DesktopBackend, type DesktopBackendOptions } from "./backend.js";
 import { DesktopCredentialStore, EncryptedCredentialStore } from "../credentials/credential-store.js";
 import { ElectronSafeStorageCipher } from "./electron-safe-storage-cipher.js";
 import { IPC } from "../gui/channels.js";
@@ -281,6 +281,13 @@ async function bootstrapDesktop(): Promise<void> {
   if (repairedProfiles > 0) diagnostic(`repaired ${repairedProfiles} stored profile path(s)`);
   const cipher = new ElectronSafeStorageCipher();
   const persistent = new EncryptedCredentialStore(join(app.getPath("userData"), "credentials.enc.json"), cipher);
+  let modelBundleFactory: DesktopBackendOptions["modelBundleFactory"];
+  const e2eScenario = process.env.HUNTWARDEN_E2E_FAUX_SCENARIO;
+  if (!app.isPackaged && process.env.NODE_ENV === "test" && e2eScenario) {
+    const { createE2eFauxModelBundle } = await import("../testing/e2e-faux-model.js");
+    modelBundleFactory = () => createE2eFauxModelBundle(e2eScenario);
+    diagnostic(`E2E Faux scenario enabled: ${e2eScenario}`);
+  }
   backend = new DesktopBackend({
     userDataDir: app.getPath("userData"),
     projectRoot: app.getAppPath(),
@@ -288,6 +295,7 @@ async function bootstrapDesktop(): Promise<void> {
     platform: process.platform,
     credentials: new DesktopCredentialStore(persistent),
     ...(labStateDir ? { labStateDir } : {}),
+    ...(modelBundleFactory ? { modelBundleFactory } : {}),
     ...(migratedFrom ? { legacyRuntimeDirs: [join(migratedFrom, "runtime")] } : {}),
   });
   try { await backend.initialize(); diagnostic("desktop backend initialized"); }

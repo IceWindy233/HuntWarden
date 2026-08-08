@@ -67,6 +67,11 @@ export class SecurityAgentRuntime extends EventEmitter {
     try {
       await this.agent.prompt(text);
       this.options.store.appendAudit({ taskId: task.taskId, event: withoutTools ? "report_model_finished" : "agent_run_finished", level: "info", data: {} });
+      if (!withoutTools) {
+        const completed = this.options.store.getTask(task.taskId) ?? task;
+        completed.status = "COMPLETED";
+        this.options.store.saveTask(completed);
+      }
     } catch (error) {
       task.status = this.agent.signal?.aborted ? "ABORTED" : "FAILED";
       this.options.store.saveTask(task);

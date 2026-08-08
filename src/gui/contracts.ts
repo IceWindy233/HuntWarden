@@ -1,5 +1,5 @@
 import type { AppConfig } from "../config/schema.js";
-import type { ApprovalTicket, AuditEvent, Evidence, Finding, TaskContext, TaskMode, CheckCategory } from "../domain/types.js";
+import type { ActionReceipt, ApprovalTicket, AuditEvent, Evidence, Finding, TaskContext, TaskMode, CheckCategory } from "../domain/types.js";
 
 export const DESKTOP_API_VERSION = 1 as const;
 
@@ -79,6 +79,7 @@ export interface TaskSnapshot {
   findings: Finding[];
   evidence: Evidence[];
   approvals: ApprovalTicket[];
+  actionReceipts: ActionReceipt[];
   audit: AuditEvent[];
   conversation: {
     role: "user" | "assistant" | "tool";

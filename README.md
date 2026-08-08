@@ -3,6 +3,7 @@
 HuntWarden（猎卫）是面向安全分析师的 AI 主机安全调查与受控处置 Agent。首期 MVP 通过 SSH 调用目标端白名单辅助程序，完成 WebShell、Tomcat 9/JDK 17 内存马和 Linux 后门账户调查；文件隔离与账户禁用必须逐动作审批。项目同时保留全屏 TUI，供自动化、无桌面环境和故障回退使用。
 
 桌面 GUI 的架构、安全边界与验收设计见 [`docs/GUI_MVP_IMPLEMENTATION_PLAN.md`](docs/GUI_MVP_IMPLEMENTATION_PLAN.md)。
+处置闭环的范围、命令和安全验收见 [`docs/REMEDIATION_CLOSURE_SPRINT.md`](docs/REMEDIATION_CLOSURE_SPRINT.md)。
 
 ## 已实现范围
 
@@ -208,6 +209,20 @@ GUI 的活动 Profile、任务事件数据库、Evidence 和报告均位于 Elec
 ```bash
 npm run lab:up
 npm run test:docker
+```
+
+`npm run test:docker` 会先自动重置 Lab，再执行包含真实文件隔离和账户禁用的测试；若只想针对已经运行且状态已知的容器执行测试，可使用 `npm run test:docker:running`。
+
+处置闭环的 Electron GUI 自动化会为每个用例重置 Lab，使用仅在测试环境启用的 Pi Faux 脚本模型，并真实点击拒绝、二次确认和审计回执界面：
+
+```bash
+npm run test:gui:remediation
+```
+
+写操作测试会改变容器内的文件或账户状态。重新执行处置场景前，用以下命令删除并重建三个 Lab 容器；本地测试身份 Key 会保留，`known_hosts` 会按当前容器重新生成：
+
+```bash
+npm run lab:reset
 ```
 
 | 场景 | SSH | 应用 | 内容 |

@@ -44,6 +44,7 @@ describe("Pi Faux Provider Agent Loop", () => {
     expect(store.listFindings(task.taskId)).toMatchObject([{ category: "webshell", status: "NO_FINDING" }]);
     expect(store.getToolRun("call-record-webshell")?.status).toBe("SUCCEEDED");
     expect(store.loadMessages(task.taskId).some((message) => message.role === "toolResult")).toBe(true);
+    expect(store.getTask(task.taskId)?.status).toBe("COMPLETED");
     store.close();
   });
 
