@@ -22,6 +22,22 @@ import { createId } from "../common/ids.js";
 interface JsonRow { payload: string }
 interface CountRow { count: number }
 
+const findingStatusPriority: Record<FindingStatus, number> = {
+  NO_FINDING: 0,
+  NOT_CHECKED: 1,
+  ERROR: 2,
+  SUSPICIOUS: 3,
+  HIGHLY_SUSPICIOUS: 4,
+  CONFIRMED: 5,
+};
+
+export function aggregateFindingStatuses(statuses: FindingStatus[]): FindingStatus | undefined {
+  return statuses.reduce<FindingStatus | undefined>((current, candidate) => {
+    if (!current || findingStatusPriority[candidate] > findingStatusPriority[current]) return candidate;
+    return current;
+  }, undefined);
+}
+
 export interface ToolRunRecord {
   toolCallId: string;
   taskId: string;
@@ -380,7 +396,12 @@ export class RuntimeStore {
     if (existing) return JSON.parse(existing.payload) as Finding;
     this.db.prepare("INSERT INTO findings(finding_id,task_id,tool_call_id,payload,created_at) VALUES(?,?,?,?,?)")
       .run(finding.findingId, finding.taskId, finding.toolCallId, JSON.stringify(finding), finding.createdAt);
-    this.updateCoverage(finding.taskId, finding.category, finding.status);
+    const aggregate = aggregateFindingStatuses(
+      this.listFindings(finding.taskId)
+        .filter((item) => item.category === finding.category)
+        .map((item) => item.status),
+    );
+    if (aggregate) this.updateCoverage(finding.taskId, finding.category, aggregate);
     return finding;
   }
 

@@ -9,13 +9,22 @@ import { createRemediationTools } from "./remediation/tools.js";
 import { createPersistenceTools } from "./persistence/tools.js";
 
 export function createSecurityTools(deps: ToolDependencies): SecurityToolDefinition[] {
-  return [
-    ...createHostTools(deps),
-    ...createWebShellTools(deps),
-    ...createJavaTools(deps),
-    ...createAccountTools(deps),
-    ...createPersistenceTools(deps),
-    createRecordFindingTool(deps),
-    ...createRemediationTools(deps),
-  ];
+  const tools: SecurityToolDefinition[] = [...createHostTools(deps)];
+  const selected = new Set(deps.task.checks);
+
+  if (selected.has("webshell")) tools.push(...createWebShellTools(deps));
+  if (selected.has("java_memory_shell")) tools.push(...createJavaTools(deps));
+  if (selected.has("backdoor_account")) tools.push(...createAccountTools(deps));
+  if (selected.has("linux_persistence")) tools.push(...createPersistenceTools(deps));
+
+  tools.push(createRecordFindingTool(deps));
+
+  if (deps.task.mode === "REMEDIATE") {
+    const allowedWriteTools = new Set<string>();
+    if (selected.has("webshell")) allowedWriteTools.add("quarantine_file");
+    if (selected.has("backdoor_account")) allowedWriteTools.add("disable_account");
+    tools.push(...createRemediationTools(deps).filter((tool) => allowedWriteTools.has(tool.name)));
+  }
+
+  return tools;
 }

@@ -23,6 +23,9 @@ export function createRecordFindingTool(deps: ToolDependencies): SecurityToolDef
     }, { additionalProperties: false }),
     risk: "LOCAL", replayPolicy: "SAFE", timeoutMs: 10_000, auditEvent: "finding_created", executionMode: "sequential",
     run: async (toolCallId, params): Promise<SecurityToolResult> => {
+      if (!deps.task.checks.includes(params.category)) {
+        throw new Error(`不能为任务未选择的检测类别记录 Finding: ${params.category}`);
+      }
       for (const evidenceId of params.evidenceRefs) {
         if (!deps.store.getEvidence(deps.task.taskId, evidenceId)) throw new Error(`Finding 引用了不存在或跨任务的 Evidence: ${evidenceId}`);
       }
