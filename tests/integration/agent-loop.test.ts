@@ -8,9 +8,12 @@ import { afterEach, describe, expect, it } from "vitest";
 import { ApprovalService } from "../../src/agent/approval-service.js";
 import { EvidenceStore } from "../../src/evidence/evidence-store.js";
 import { FakeExecutor } from "../../src/executor/fake-executor.js";
+import type { FakeHandler } from "../../src/executor/fake-executor.js";
+import type { HostOperation } from "../../src/executor/operations.js";
 import { SecurityAgentRuntime } from "../../src/runtime/security-agent-runtime.js";
 import { Application } from "../../src/runtime/application.js";
 import { RuntimeStore } from "../../src/storage/runtime-store.js";
+import { createSecurityTools } from "../../src/tools/index.js";
 import { createRecordFindingTool } from "../../src/tools/local/record-finding.js";
 import { createSecurityTool } from "../../src/tools/tool-factory.js";
 import { testConfig, testTask } from "../helpers.js";
@@ -18,6 +21,30 @@ import type { AgentStreamUpdate } from "../../src/domain/types.js";
 
 const directories: string[] = [];
 afterEach(async () => { await Promise.all(directories.splice(0).map((path) => rm(path, { recursive: true, force: true }))); });
+
+function minimumScanExecutor(overrides: Partial<Record<HostOperation, FakeHandler>> = {}): FakeExecutor {
+  return new FakeExecutor({
+    get_capabilities: () => ({
+      protocolVersion: 1,
+      helper: { name: "huntwarden-helper", version: "test" },
+      platform: { system: "Linux", release: "test", architecture: "x64", python: "3.11" },
+      operations: [],
+      artifactTransfer: { supported: true, protocolVersion: 1, maxBytes: 10 * 1024 * 1024 },
+      features: { yara: true, javaAttach: true, tomcatProbe: true },
+      partial: false,
+      warnings: [],
+    }),
+    get_host_info: () => ({ hostname: "faux-target", platform: "Linux" }),
+    discover_web_roots: () => [],
+    list_java_processes: () => [],
+    list_privileged_accounts: () => [],
+    list_cron_entries: () => ({ items: [], partial: false, warnings: [] }),
+    list_systemd_units: () => ({ items: [], partial: false, warnings: [] }),
+    list_ssh_persistence: () => ({ items: [], partial: false, warnings: [], sshdConfig: {} }),
+    list_shell_startup_files: () => ({ items: [], partial: false, warnings: [] }),
+    ...overrides,
+  });
+}
 
 describe("Pi Faux Provider Agent Loop", () => {
   it("四类联合任务先固化 FindingStatus，再由分析师手动生成版本报告", async () => {
@@ -37,9 +64,12 @@ describe("Pi Faux Provider Agent Loop", () => {
       fauxAssistantMessage("四类联合调查已完成。"),
       fauxAssistantMessage("报告模型输出故意不含引用，以验证确定性回退。"),
     ]);
+    const executor = minimumScanExecutor();
     const application = new Application(config, store, models, faux.getModel());
-    const task = application.createTask({ request: "四类联合 Faux 调查", mode: "SCAN", target: testTask().target });
-    await application.startTask(task.taskId);
+    const task = application.createTask({ request: "四类联合 Faux 调查", mode: "SCAN", checks: [...categories], target: testTask().target });
+    const tools = createSecurityTools({ task, config, store, executor, approvals: application.approvals, evidence: new EvidenceStore(directory, store) });
+    const runtime = new SecurityAgentRuntime({ task, config, store, executor, approvals: application.approvals, tools, models, model: faux.getModel() });
+    await runtime.prompt(task.request);
     expect(store.listFindings(task.taskId).map((finding) => [finding.category, finding.status])).toEqual([
       ["webshell", "NO_FINDING"], ["java_memory_shell", "NO_FINDING"], ["backdoor_account", "NO_FINDING"], ["linux_persistence", "SUSPICIOUS"],
     ]);
@@ -60,6 +90,45 @@ describe("Pi Faux Provider Agent Loop", () => {
     expect(application.restoreTask(task.taskId).archivedAt).toBeUndefined();
     expect(store.listAudit(task.taskId).map((event) => event.event)).toEqual(expect.arrayContaining([
       "task_archived", "task_restored_from_archive",
+    ]));
+    await application.close();
+  });
+
+  it("Provider 失败时保留确定性最低覆盖，并为仍无 Finding 的类别固化 ERROR", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "huntwarden-provider-failure-"));
+    directories.push(directory);
+    const store = await RuntimeStore.open(directory, "runtime.db");
+    const config = testConfig(directory);
+    const faux = fauxProvider({ tokensPerSecond: 0 });
+    const models = createModels();
+    models.setProvider(faux.provider);
+    let receivedContext = "";
+    faux.setResponses([
+      (context) => {
+        receivedContext = JSON.stringify(context.messages.at(-1));
+        throw new Error("provider unavailable");
+      },
+    ]);
+    const executor = minimumScanExecutor({
+      discover_web_roots: () => [{ path: "/var/www/html", server: "nginx" }],
+      find_recent_web_files: () => [{ path: "/var/www/html/index.php", size: 12, mtime: "2026-01-01T00:00:00Z", sha256: "b".repeat(64) }],
+    });
+    const application = new Application(config, store, models, faux.getModel());
+    const task = application.createTask({ request: "执行 WebShell 调查", mode: "SCAN", checks: ["webshell"], target: testTask().target });
+    const tools = createSecurityTools({ task, config, store, executor, approvals: application.approvals, evidence: new EvidenceStore(directory, store) });
+    const runtime = new SecurityAgentRuntime({ task, config, store, executor, approvals: application.approvals, tools, models, model: faux.getModel() });
+
+    await expect(runtime.prompt(task.request)).rejects.toThrow(/provider unavailable/);
+
+    expect(executor.calls.map((call) => call.operation)).toEqual([
+      "get_capabilities", "get_host_info", "discover_web_roots", "find_recent_web_files",
+    ]);
+    expect(receivedContext).toContain("deterministic-minimum-scan");
+    expect(receivedContext).toContain("candidateRef");
+    expect(store.listFindings(task.taskId)).toMatchObject([{ category: "webshell", status: "ERROR" }]);
+    expect(store.getTask(task.taskId)).toMatchObject({ status: "FAILED", coverage: { webshell: "ERROR" } });
+    expect(store.listAudit(task.taskId).map((event) => event.event)).toEqual(expect.arrayContaining([
+      "deterministic_scan_completed", "provider_failed_after_minimum_scan",
     ]));
     await application.close();
   });

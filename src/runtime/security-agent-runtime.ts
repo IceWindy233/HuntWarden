@@ -1,3 +1,4 @@
+import { EventEmitter } from "node:events";
 import type { AgentEvent, AgentMessage, AgentToolResult } from "@earendil-works/pi-agent-core";
 import { Agent } from "@earendil-works/pi-agent-core";
 import type { Api, Model, Models, ToolResultMessage } from "@earendil-works/pi-ai";
@@ -8,6 +9,7 @@ import type { AppConfig } from "../config/schema.js";
 import type { AgentStreamUpdate, SecurityToolDefinition, TaskContext } from "../domain/types.js";
 import type { HostExecutor } from "../executor/operations.js";
 import type { RuntimeStore, ToolRunRecord } from "../storage/runtime-store.js";
+import { finalizeUnresolvedChecks, ScanPlanner } from "../checks/scan-planner.js";
 
 export interface SecurityAgentRuntimeOptions {
   task: TaskContext;
@@ -19,6 +21,7 @@ export interface SecurityAgentRuntimeOptions {
   models: Models;
   model: Model<Api>;
   checkpoint?: (name: string) => void;
+  scanPlanner?: ScanPlanner | false;
 }
 
 export class SecurityAgentRuntime extends EventEmitter {
@@ -26,6 +29,8 @@ export class SecurityAgentRuntime extends EventEmitter {
   private readonly pendingInputByTimestamp = new Map<number, string>();
   private activeStream: { streamId: string; timestamp: number } | undefined;
   private streamSequence = 0;
+  private readonly scanPlanner: ScanPlanner | undefined;
+  private scanAbortController: AbortController | undefined;
 
   constructor(private readonly options: SecurityAgentRuntimeOptions) {
     super();
@@ -49,6 +54,11 @@ export class SecurityAgentRuntime extends EventEmitter {
       },
     });
     this.agent.subscribe(async (event) => { this.persistEvent(event); });
+    this.scanPlanner = options.scanPlanner === false
+      ? undefined
+      : options.scanPlanner ?? (tools.some((tool) => tool.name === "get_host_info")
+        ? new ScanPlanner({ task, store, tools, maxLlmBytes: config.llmData.maxTextBytes })
+        : undefined);
   }
 
   async prompt(text: string): Promise<void> {
@@ -68,7 +78,21 @@ export class SecurityAgentRuntime extends EventEmitter {
     if (withoutTools) this.agent.state.tools = [];
     this.options.store.appendAudit({ taskId: task.taskId, event: withoutTools ? "report_model_started" : "agent_started", level: "info", data: {} });
     try {
-      await this.agent.prompt(text);
+      let prompt = text;
+      if (!withoutTools && this.scanPlanner) {
+        this.scanAbortController = new AbortController();
+        const scan = await this.scanPlanner.run(this.scanAbortController.signal);
+        this.agent.state.tools = originalTools.filter((tool) => !scan.minimumToolNames.has(tool.name));
+        prompt = `${text}\n\n<deterministic-minimum-scan>\n${scan.promptContext}\n</deterministic-minimum-scan>`;
+      }
+      await this.agent.prompt(prompt);
+      const lastAssistant = [...this.agent.state.messages].reverse().find((message) => message.role === "assistant");
+      if (lastAssistant?.role === "assistant" && lastAssistant.stopReason === "error") {
+        throw new Error(lastAssistant.errorMessage || "模型 Provider 调用失败");
+      }
+      if (!withoutTools && this.scanPlanner) {
+        finalizeUnresolvedChecks(this.options.store, task.taskId, "NOT_CHECKED", "模型未为该类别固化 Finding，最低只读入口虽已执行，但尚不足以得出安全结论。", "model-missing");
+      }
       this.options.store.appendAudit({ taskId: task.taskId, event: withoutTools ? "report_model_finished" : "agent_run_finished", level: "info", data: {} });
       if (!withoutTools) {
         const completed = this.options.store.getTask(task.taskId) ?? task;
@@ -76,11 +100,29 @@ export class SecurityAgentRuntime extends EventEmitter {
         this.options.store.saveTask(completed);
       }
     } catch (error) {
-      task.status = this.agent.signal?.aborted ? "ABORTED" : "FAILED";
-      this.options.store.saveTask(task);
+      const aborted = Boolean(this.agent.signal?.aborted || this.scanAbortController?.signal.aborted);
+      if (!withoutTools && this.scanPlanner) {
+        finalizeUnresolvedChecks(
+          this.options.store,
+          task.taskId,
+          aborted ? "NOT_CHECKED" : "ERROR",
+          aborted ? "调查在形成完整结论前被中止。" : `模型 Provider 在最低只读覆盖后失败：${error instanceof Error ? error.message : String(error)}`,
+          aborted ? "agent-aborted" : "provider-failed",
+        );
+        this.options.store.appendAudit({
+          taskId: task.taskId,
+          event: aborted ? "deterministic_scan_aborted" : "provider_failed_after_minimum_scan",
+          level: aborted ? "warn" : "error",
+          data: { error: error instanceof Error ? error.message : String(error) },
+        });
+      }
+      const failed = this.options.store.getTask(task.taskId) ?? task;
+      failed.status = aborted ? "ABORTED" : "FAILED";
+      this.options.store.saveTask(failed);
       throw error;
     } finally {
-      if (withoutTools) this.agent.state.tools = originalTools;
+      this.scanAbortController = undefined;
+      this.agent.state.tools = originalTools;
     }
   }
 
@@ -116,7 +158,7 @@ export class SecurityAgentRuntime extends EventEmitter {
     this.options.store.appendAudit({ taskId: this.options.task.taskId, event: "recovery_completed", level: "info", data: {} });
   }
 
-  abort(): void { this.agent.abort(); }
+  abort(): void { this.scanAbortController?.abort(new Error("调查被分析师中止")); this.agent.abort(); }
 
   lastAssistantText(): string {
     const message = [...this.agent.state.messages].reverse().find((item) => item.role === "assistant");
@@ -309,4 +351,3 @@ export class SecurityAgentRuntime extends EventEmitter {
     this.agent.state.messages = [...this.agent.state.messages, message];
   }
 }
-import { EventEmitter } from "node:events";
