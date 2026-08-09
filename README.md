@@ -6,6 +6,7 @@ HuntWarden（猎卫）是面向安全分析师的 AI 主机安全调查与受控
 处置闭环的范围、命令和安全验收见 [`docs/REMEDIATION_CLOSURE_SPRINT.md`](docs/REMEDIATION_CLOSURE_SPRINT.md)。
 恢复、报告版本化与 Linux 持久化实现见 [`docs/RECOVERY_PERSISTENCE_SPRINT.md`](docs/RECOVERY_PERSISTENCE_SPRINT.md)。
 从 Lab MVP 演进到真实主机实战可用版的长期任务基线见 [`docs/TODO_PLAN_REAL_WORLD.md`](docs/TODO_PLAN_REAL_WORLD.md)。
+当前已验证平台、能力降级与真实试用限制见 [`docs/SUPPORT_MATRIX.md`](docs/SUPPORT_MATRIX.md)。
 
 ## 已实现范围
 
@@ -22,7 +23,7 @@ HuntWarden（猎卫）是面向安全分析师的 AI 主机安全调查与受控
 - 特权账户、账户状态、SSH Key 指纹、登录历史和受控账户禁用。
 - Cron、systemd、SSH Authorized Keys、Shell 启动项，以及基于不透明引用的进程和网络关联调查；仅提供 READ/COLLECT 工具。
 - 由分析师确认后手动生成的不可变版本化中文 Markdown 报告、ID 引用校验、一次模型修复和确定性回退模板；支持历史版本切换与 Finder 定位。
-- 四套无害 Docker Lab 与 Pi Faux Provider 可重复 Agent 测试。
+- 五套无害 Docker Lab 与 Pi Faux Provider 可重复 Agent 测试。
 
 ## 环境
 
@@ -32,7 +33,7 @@ HuntWarden（猎卫）是面向安全分析师的 AI 主机安全调查与受控
 - Docker Compose（仅 Lab 集成测试需要）
 - 实时模型运行需要所选供应商的 API 凭据，或本机无认证推理服务
 
-目标 Linux 主机需要 Python 3、YARA、JDK Attach 权限，并安装本项目的 `huntwarden-helper`。Docker Lab 会自动提供这些依赖。
+目标 Linux 主机至少需要 Python 3 并安装本项目的 `huntwarden-helper`。YARA、auditd/journald、root 权限和 JDK Attach 缺失时会按能力返回 `PARTIAL/ERROR`；Docker Lab 会自动提供各场景所需依赖。
 
 ## 安装与验证
 
@@ -207,7 +208,7 @@ GUI 的活动 Profile、任务事件数据库、Evidence 和报告均位于 Elec
 
 ## Docker Lab
 
-启动脚本会临时生成登录 Key、容器 Host Key 和 `known_hosts`，构建 Java 探针并启动四套环境：
+启动脚本会临时生成登录 Key、容器 Host Key 和 `known_hosts`，构建 Java 探针并启动五套环境：
 
 ```bash
 npm run lab:up
@@ -236,6 +237,7 @@ npm run lab:reset
 | Lab-Tomcat | `127.0.0.1:2223` | `http://127.0.0.1:8081/lab/` | Tomcat 9/JDK 17、无害动态 Filter、磁盘类删除后的 Dump 场景 |
 | Lab-Account | `127.0.0.1:2224` | — | 正常执行账户、测试 UID 0 账户、未知 SSH Key 指纹 |
 | Lab-Persistence | `127.0.0.1:2225` | — | 正常项、无害 Cron/systemd/SSH/Shell 持久化模拟及回环监听进程 |
+| Lab-Linux-IR | `127.0.0.1:2226` | — | 删除后运行、临时目录进程、本地模拟 C2、ld.so.preload、软件包变更与认证时间线 |
 
 停止环境：
 
