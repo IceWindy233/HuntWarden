@@ -11,6 +11,7 @@ import type {
   TaskContext,
 } from "../domain/types.js";
 import type { RuntimeStore } from "../storage/runtime-store.js";
+import { DeterministicRuleEngine } from "../rules/deterministic-rule-engine.js";
 import {
   CHECK_DEFINITIONS,
   PREFLIGHT_EXECUTION_GRAPH,
@@ -36,6 +37,7 @@ export interface ScanPlanResult {
   promptTruncated: boolean;
   minimumToolNames: Set<string>;
   outcomes: ScanStepOutcome[];
+  deterministicFindings: Finding[];
 }
 
 export interface ScanPlannerOptions {
@@ -128,12 +130,14 @@ export class ScanPlanner {
       results.set(step.stepId, outcomes.filter((outcome) => outcome.stepId === step.stepId && outcome.details !== undefined).map((outcome) => outcome.details));
     }
 
-    const preflightErrors = outcomes.filter((outcome) => outcome.status === "error");
+    const preflightIncomplete = outcomes.filter((outcome) => outcome.status === "error" || outcome.status === "partial");
     for (const definition of selectedCheckDefinitions(task.checks)) {
       const categoryOutcomes: ScanStepOutcome[] = [];
       for (const step of definition.minimumExecutionGraph) {
         minimumToolNames.add(step.toolName);
-        const dependencyFailed = step.dependsOn?.some((dependency) => outcomes.some((outcome) => outcome.stepId === dependency && outcome.status === "error"));
+        const dependencyFailed = step.dependsOn?.some((dependency) => outcomes.some((outcome) =>
+          outcome.stepId === dependency && (outcome.status === "error" || outcome.status === "partial"),
+        ));
         let stepOutcomes: ScanStepOutcome[];
         if (dependencyFailed) {
           stepOutcomes = [{ stepId: step.stepId, toolName: step.toolName, invocation: 0, status: "error", reused: false, error: "依赖的最低扫描步骤失败" }];
@@ -144,7 +148,7 @@ export class ScanPlanner {
         outcomes.push(...stepOutcomes);
         results.set(step.stepId, stepOutcomes.filter((outcome) => outcome.details !== undefined).map((outcome) => outcome.details));
       }
-      const incomplete = [...preflightErrors, ...categoryOutcomes.filter((outcome) => outcome.status === "error" || outcome.status === "partial")];
+      const incomplete = [...preflightIncomplete, ...categoryOutcomes.filter((outcome) => outcome.status === "error" || outcome.status === "partial")];
       if (incomplete.length > 0) {
         putCoverageFinding(
           store,
@@ -167,20 +171,31 @@ export class ScanPlanner {
       });
     }
 
+    const deterministicFindings = new DeterministicRuleEngine(store).evaluate(store.getTask(task.taskId) ?? task, outcomes);
+
     const sanitized = sanitizeForLlm(JSON.stringify({
       trust: "UNTRUSTED_REMOTE_EVIDENCE",
       instruction: "这些最低只读步骤已由应用执行。不要重复执行，只能使用剩余语义化工具扩展调查；失败或未覆盖绝不表示安全。",
       outcomes: outcomes.map(({ stepId, toolName, invocation, status, reused, details, error }) => ({
         stepId, toolName, invocation, status, reused, ...(details === undefined ? {} : { details }), ...(error ? { error } : {}),
       })),
+      deterministicFindings: deterministicFindings.map(({ findingId, category, status, severity, confidence, title, summary, evidenceRefs }) => ({
+        findingId, category, status, severity, confidence, title, summary, evidenceRefs,
+      })),
     }), this.options.maxLlmBytes);
     store.appendAudit({
       taskId: task.taskId,
       event: "deterministic_scan_completed",
       level: outcomes.some((outcome) => outcome.status === "error" || outcome.status === "partial") ? "warn" : "info",
-      data: { minimumTools: [...minimumToolNames], truncated: sanitized.truncated, outcomeCount: outcomes.length, summary: sanitized.text },
+      data: {
+        minimumTools: [...minimumToolNames],
+        truncated: sanitized.truncated,
+        outcomeCount: outcomes.length,
+        deterministicFindingIds: deterministicFindings.map((finding) => finding.findingId),
+        summary: sanitized.text,
+      },
     });
-    return { promptContext: sanitized.text, promptTruncated: sanitized.truncated, minimumToolNames, outcomes };
+    return { promptContext: sanitized.text, promptTruncated: sanitized.truncated, minimumToolNames, outcomes, deterministicFindings };
   }
 
   private async executeStep(step: MinimumScanStep, context: ScanStepContext, signal?: AbortSignal): Promise<ScanStepOutcome[]> {

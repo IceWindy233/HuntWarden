@@ -80,8 +80,9 @@ export const CHECK_DEFINITIONS: Record<string, CheckDefinition> = {
   linux_intrusion_triage: {
     category: "linux_intrusion_triage" as CheckCategory,
     label: "Linux 入侵分诊",
-    // 能力协商与主机信息由所有类别共享的 preflight 保证；分诊专用入口由后续领域工具补入。
-    minimumExecutionGraph: [],
+    minimumExecutionGraph: [
+      { stepId: "suspicious-processes", toolName: "list_suspicious_processes", buildArguments: noArguments },
+    ],
   },
 };
 

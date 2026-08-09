@@ -70,9 +70,17 @@ describe("Pi Faux Provider Agent Loop", () => {
     const tools = createSecurityTools({ task, config, store, executor, approvals: application.approvals, evidence: new EvidenceStore(directory, store) });
     const runtime = new SecurityAgentRuntime({ task, config, store, executor, approvals: application.approvals, tools, models, model: faux.getModel() });
     await runtime.prompt(task.request);
-    expect(store.listFindings(task.taskId).map((finding) => [finding.category, finding.status])).toEqual([
-      ["webshell", "NO_FINDING"], ["java_memory_shell", "NO_FINDING"], ["backdoor_account", "NO_FINDING"], ["linux_persistence", "SUSPICIOUS"],
-    ]);
+    expect(store.getTask(task.taskId)?.coverage).toMatchObject({
+      webshell: "NO_FINDING",
+      java_memory_shell: "NO_FINDING",
+      backdoor_account: "NO_FINDING",
+      linux_persistence: "SUSPICIOUS",
+    });
+    expect(store.listFindings(task.taskId)).toEqual(expect.arrayContaining([
+      expect.objectContaining({ category: "backdoor_account", status: "NO_FINDING", summary: expect.stringContaining("HW-ACCOUNT-UID0-001@1.0.0") }),
+      expect.objectContaining({ category: "linux_persistence", status: "NO_FINDING", summary: expect.stringContaining("HW-PERSIST-CONTEXT-001@1.0.0") }),
+      expect.objectContaining({ category: "linux_persistence", status: "SUSPICIOUS", title: "linux_persistence 联合测试结论" }),
+    ]));
     expect(store.listReports(task.taskId)).toHaveLength(0);
     expect(store.getTask(task.taskId)?.status).toBe("COMPLETED");
     const generated = await application.generateReport(task.taskId);

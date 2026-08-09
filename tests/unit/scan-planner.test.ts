@@ -107,4 +107,43 @@ describe("ScanPlanner 确定性最低执行图", () => {
     expect(store.getTask(task.taskId)?.coverage.backdoor_account).toBe("ERROR");
     store.close();
   });
+
+  it("最低账户图完成后立即固化规则 Finding，重复运行不会重复写入", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "huntwarden-scan-plan-rule-"));
+    directories.push(directory);
+    const store = await RuntimeStore.open(directory, "runtime.db");
+    const task = testTask();
+    task.checks = ["backdoor_account"];
+    store.createTask(task);
+    const executor = new FakeExecutor({
+      get_capabilities: () => capabilities(),
+      get_host_info: () => ({ hostname: "target" }),
+      list_privileged_accounts: () => [
+        { username: "root", uid: 0, gid: 0, shell: "/bin/bash", home: "/root", sudo: true, interactive: true },
+        { username: "backup-root", uid: 0, gid: 0, shell: "/bin/bash", home: "/srv/backup", sudo: false, interactive: true },
+      ],
+    });
+    const config = testConfig(directory);
+    const tools = createSecurityTools({
+      task,
+      config,
+      store,
+      executor,
+      approvals: new ApprovalService(store),
+      evidence: new EvidenceStore(directory, store),
+    });
+    const planner = new ScanPlanner({ task, store, tools, maxLlmBytes: config.llmData.maxTextBytes });
+
+    const first = await planner.run();
+    const second = await planner.run();
+
+    expect(first.deterministicFindings).toMatchObject([
+      { category: "backdoor_account", status: "SUSPICIOUS", severity: "MEDIUM" },
+    ]);
+    expect(second.deterministicFindings[0]?.findingId).toBe(first.deterministicFindings[0]?.findingId);
+    expect(store.listFindings(task.taskId)).toHaveLength(1);
+    expect(first.promptContext).toContain("HW-ACCOUNT-UID0-001@1.0.0");
+    expect(store.getTask(task.taskId)?.coverage.backdoor_account).toBe("SUSPICIOUS");
+    store.close();
+  });
 });
