@@ -5,6 +5,7 @@ HuntWarden（猎卫）是面向安全分析师的 AI 主机安全调查与受控
 桌面 GUI 的架构、安全边界与验收设计见 [`docs/GUI_MVP_IMPLEMENTATION_PLAN.md`](docs/GUI_MVP_IMPLEMENTATION_PLAN.md)。
 处置闭环的范围、命令和安全验收见 [`docs/REMEDIATION_CLOSURE_SPRINT.md`](docs/REMEDIATION_CLOSURE_SPRINT.md)。
 恢复、报告版本化与 Linux 持久化实现见 [`docs/RECOVERY_PERSISTENCE_SPRINT.md`](docs/RECOVERY_PERSISTENCE_SPRINT.md)。
+从 Lab MVP 演进到真实主机实战可用版的长期任务基线见 [`docs/TODO_PLAN_REAL_WORLD.md`](docs/TODO_PLAN_REAL_WORLD.md)。
 
 ## 已实现范围
 
