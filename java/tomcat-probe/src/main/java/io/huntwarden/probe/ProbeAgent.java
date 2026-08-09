@@ -140,7 +140,7 @@ public final class ProbeAgent {
             collectContextPart("tomcat_filters", resolvedContextName, diagnostics,
                     () -> collectFilters(instrumentation, components, context, resolvedContextName, loader));
             collectContextPart("tomcat_servlets", resolvedContextName, diagnostics,
-                    () -> collectServlets(instrumentation, components, context, resolvedContextName, loader));
+                    () -> collectServlets(instrumentation, components, context, resolvedContextName, loader, diagnostics));
             collectContextPart("tomcat_listeners", resolvedContextName, diagnostics,
                     () -> collectListeners(instrumentation, components, context, resolvedContextName, loader));
             collectContextPart("tomcat_valves", resolvedContextName, diagnostics,
@@ -166,16 +166,40 @@ public final class ProbeAgent {
     }
 
     private static int collectServlets(Instrumentation instrumentation, List<Map<String, Object>> components,
-                                       Object context, String contextName, ClassLoader loader) throws Exception {
+                                       Object context, String contextName, ClassLoader loader, DiagnosticLog diagnostics) throws Exception {
         int count = 0;
+        int springCount = 0;
+        boolean springApplicable = false;
+        List<String> springWarnings = new ArrayList<>();
         for (Object wrapper : array(invoke(context, "findChildren"))) {
             String name = String.valueOf(invoke(wrapper, "getName"));
             String className = stringValue(optionalInvoke(wrapper, "getServletClass"));
             if (className != null && !className.isBlank()) {
-                components.add(component(instrumentation, "servlet", name, className, contextName, "context-child", loader));
+                Map<String, Object> servletComponent = component(instrumentation, "servlet", name, className, contextName, "context-child", loader);
+                Object mappings = optionalInvoke(wrapper, "findMappings");
+                List<Object> mappingValues = array(mappings);
+                if (!mappingValues.isEmpty()) servletComponent.put("mappings", mappingValues.stream().map(String::valueOf).limit(256).toList());
+                components.add(servletComponent);
                 count++;
             }
+            Object servlet = optionalInvoke(wrapper, "getServlet");
+            if (servlet == null) continue;
+            SpringMvcInspector.ScanResult spring = SpringMvcInspector.inspect(servlet);
+            if (!spring.applicable()) continue;
+            springApplicable = true;
+            springWarnings.addAll(spring.warnings());
+            if (spring.truncated()) springWarnings.add("Spring MVC 组件达到安全采集上限");
+            for (SpringMvcInspector.Component value : spring.components()) {
+                Map<String, Object> item = classComponent(instrumentation, value.type(), value.name(),
+                        value.componentClass(), contextName, value.source());
+                if (value.mapping() != null) item.put("mapping", value.mapping());
+                components.add(item);
+                springCount++;
+            }
         }
+        if (!springApplicable) diagnostics.notPresent("spring_mvc_mappings", contextName, "未发现已初始化的 Spring DispatcherServlet");
+        else if (springWarnings.isEmpty()) diagnostics.ok("spring_mvc_mappings", contextName, springCount);
+        else diagnostics.partial("spring_mvc_mappings", contextName, springWarnings);
         return count;
     }
 
