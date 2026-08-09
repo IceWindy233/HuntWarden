@@ -37,7 +37,11 @@ ARTIFACT_TTL_SECONDS = 15 * 60
 LOG_SCAN_MAX_BYTES = 64 * 1024 * 1024
 HELPER_VERSION = "0.3.0"
 PROBE_JAR = pathlib.Path("/opt/huntwarden/huntwarden-tomcat-probe.jar")
-SCRIPT_EXTENSIONS = {".php", ".phtml", ".php5", ".jsp", ".jspx", ".asp", ".aspx", ".py", ".pl", ".cgi"}
+SCRIPT_EXTENSIONS = {
+    ".php", ".phtml", ".php5", ".phar", ".inc", ".jsp", ".jspx", ".asp", ".aspx",
+    ".py", ".pl", ".cgi", ".shtml", ".twig", ".tpl", ".vm", ".ftl", ".war", ".jar", ".class",
+}
+WEB_TEMP_ROOTS = tuple(pathlib.Path(value) for value in ("/tmp", "/var/tmp", "/dev/shm"))
 USERNAME = re.compile(r"^[a-z_][a-z0-9_-]{0,31}$", re.I)
 CLASS_NAME = re.compile(r"^[A-Za-z_$][A-Za-z0-9_$.]{0,511}$")
 PERSISTENCE_KINDS = {"cron", "systemd", "ssh", "shell"}
@@ -582,23 +586,112 @@ def list_processes(request: dict[str, Any]) -> list[dict[str, Any]]:
     return rows[:2000]
 
 
-def discover_web_roots(_: dict[str, Any]) -> list[dict[str, str]]:
-    roots: dict[str, str] = {}
-    config_globs = ["/etc/nginx/**/*.conf", "/etc/apache2/**/*.conf", "/etc/httpd/**/*.conf"]
-    directive = re.compile(r"^\s*(?:root|DocumentRoot)\s+['\"]?([^;'\"\s]+)", re.I)
-    for expression in config_globs:
-        for name in glob.glob(expression, recursive=True)[:1000]:
+def inventory_web_stacks(_: dict[str, Any]) -> dict[str, Any]:
+    signatures = ("nginx", "apache2", "httpd", "php-fpm", "catalina", "tomcat")
+    processes = [item for item in list_processes({}) if any(value in str(item.get("command", "")).lower() for value in signatures)]
+    binaries = {name: shutil.which(name) for name in ("nginx", "apache2", "httpd", "apachectl", "php", "php-fpm")}
+    configs = [path for pattern in ("/etc/nginx/**/*.conf", "/etc/apache2/**/*.conf", "/etc/httpd/**/*.conf", "/etc/php/**/php.ini")
+               for path in glob.glob(pattern, recursive=True)[:1000] if pathlib.Path(path).is_file()]
+    warnings: list[str] = []
+    if len(processes) >= 2000:
+        warnings.append("Web 进程清单达到上限")
+    return {"items": processes[:2000], "processes": processes[:2000], "binaries": binaries, "configPaths": sorted(set(configs))[:2000],
+            "partial": bool(warnings), "warnings": warnings}
+
+
+def web_root_inventory() -> tuple[list[dict[str, Any]], list[str]]:
+    roots: dict[str, dict[str, Any]] = {}
+    warnings: list[str] = []
+    directive = re.compile(r"^\s*(root|alias|DocumentRoot)\s+['\"]?([^;'\"\s]+)", re.I)
+
+    sources: list[tuple[str, str, str]] = []
+    if shutil.which("nginx"):
+        effective = run([shutil.which("nginx") or "nginx", "-T"], timeout=20, check=False)
+        sources.append((effective.stdout + "\n" + effective.stderr, "nginx", "nginx -T"))
+        if effective.returncode != 0:
+            warnings.append("nginx -T 未完整成功，已同时解析固定配置目录")
+    for expression in ("/etc/nginx/**/*.conf", "/etc/apache2/**/*.conf", "/etc/httpd/**/*.conf"):
+        names = glob.glob(expression, recursive=True)
+        if len(names) > 1000:
+            warnings.append(f"{expression} 配置文件超过 1000 个，仅解析前 1000 个")
+        for name in names[:1000]:
             try:
-                for line in pathlib.Path(name).read_text("utf-8", errors="replace").splitlines():
-                    match = directive.search(line)
-                    if match and match.group(1).startswith("/"):
-                        roots[str(pathlib.Path(match.group(1)).resolve())] = "nginx" if "nginx" in name else "apache"
+                sources.append((text_file(pathlib.Path(name), 1024 * 1024), "nginx" if "nginx" in name else "apache", name))
             except OSError:
+                warnings.append(f"无法读取 Web 配置: {name}")
+
+    for text, server, source in sources:
+        for line in text.splitlines():
+            match = directive.search(line)
+            if not match:
                 continue
-    for path, server in [("/var/www/html", "common"), ("/usr/local/tomcat/webapps", "tomcat"), ("/opt/tomcat/webapps", "tomcat")]:
-        if pathlib.Path(path).is_dir():
-            roots[str(pathlib.Path(path).resolve())] = server
-    return [{"path": path, "server": server} for path, server in sorted(roots.items())]
+            value = match.group(2)
+            if not value.startswith("/") or "$" in value:
+                continue
+            candidate = pathlib.Path(value).resolve(strict=False)
+            if not candidate.is_dir():
+                continue
+            roots[str(candidate)] = {"path": str(candidate), "server": server, "directive": match.group(1).lower(), "configSource": source}
+    for path, server in (("/var/www/html", "common"), ("/usr/local/tomcat/webapps", "tomcat"), ("/opt/tomcat/webapps", "tomcat")):
+        candidate = pathlib.Path(path)
+        if candidate.is_dir():
+            resolved = str(candidate.resolve())
+            roots.setdefault(resolved, {"path": resolved, "server": server, "directive": "fallback", "configSource": "fixed common root"})
+    return [roots[path] for path in sorted(roots)], warnings
+
+
+def discover_effective_web_roots(_: dict[str, Any]) -> dict[str, Any]:
+    items, warnings = web_root_inventory()
+    return {"items": items, "partial": bool(warnings), "warnings": warnings[:200]}
+
+
+def discover_web_roots(_: dict[str, Any]) -> list[dict[str, str]]:
+    items, _ = web_root_inventory()
+    return [{"path": str(item["path"]), "server": str(item["server"])} for item in items]
+
+
+def is_web_artifact(path: pathlib.Path) -> bool:
+    if path.suffix.lower() in SCRIPT_EXTENSIONS:
+        return True
+    if path.suffix:
+        return False
+    try:
+        prefix = path.read_bytes()[:512].lower()
+    except OSError:
+        return False
+    return prefix.startswith(b"#!") or b"<?php" in prefix or b"<%@ page" in prefix
+
+
+def scan_recent_web_artifacts(roots: list[pathlib.Path], hours: int, maximum: int, max_size: int) -> dict[str, Any]:
+    cutoff = dt.datetime.now().timestamp() - hours * 3600
+    items: list[dict[str, Any]] = []
+    warnings: list[str] = []
+    visited = 0
+    skipped = 0
+    for root in roots:
+        if not root.is_dir():
+            skipped += 1
+            continue
+        for directory, subdirs, files in os.walk(root, followlinks=False):
+            subdirs[:] = [name for name in subdirs if not (pathlib.Path(directory) / name).is_symlink()]
+            for filename in files:
+                visited += 1
+                path = pathlib.Path(directory) / filename
+                try:
+                    info = path.lstat()
+                    if not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode) or info.st_mtime < cutoff or info.st_size > max_size or not is_web_artifact(path):
+                        skipped += 1
+                        continue
+                    items.append({"path": str(path), "size": info.st_size, "inode": str(info.st_ino),
+                                  "mtime": dt.datetime.fromtimestamp(info.st_mtime, dt.timezone.utc).isoformat(), "sha256": sha256_file(path),
+                                  "extension": path.suffix.lower() or "none"})
+                except (OSError, PermissionError):
+                    skipped += 1
+                    continue
+                if len(items) >= maximum:
+                    warnings.append("Web Artifact 结果达到配置上限")
+                    return {"items": items, "partial": True, "warnings": warnings, "visited": visited, "skipped": skipped}
+    return {"items": items, "partial": False, "warnings": warnings, "visited": visited, "skipped": skipped}
 
 
 def find_recent_web_files(request: dict[str, Any]) -> list[dict[str, Any]]:
@@ -608,27 +701,39 @@ def find_recent_web_files(request: dict[str, Any]) -> list[dict[str, Any]]:
     hours = safe_int(request.get("modifiedWithinHours"), 1, 24 * 365, "modifiedWithinHours")
     maximum = safe_int(request.get("maxFiles"), 1, 5000, "maxFiles")
     max_size = safe_int(request.get("maxFileSizeBytes"), 1024, 1024 * 1024 * 100, "maxFileSizeBytes")
-    cutoff = dt.datetime.now().timestamp() - hours * 3600
-    items: list[dict[str, Any]] = []
-    for raw_root in roots:
-        root = safe_path(raw_root)
-        if not root.is_dir():
+    result = scan_recent_web_artifacts([safe_path(value) for value in roots], hours, maximum, max_size)
+    return result["items"]
+
+
+def list_recent_web_artifacts(request: dict[str, Any]) -> dict[str, Any]:
+    roots = request.get("roots")
+    if not isinstance(roots, list) or not roots or len(roots) > 50:
+        raise HelperError("INVALID_ARGUMENT", "invalid roots")
+    hours = safe_int(request.get("modifiedWithinHours"), 1, 8760, "modifiedWithinHours")
+    maximum = safe_int(request.get("maxFiles"), 1, 5000, "maxFiles")
+    max_size = safe_int(request.get("maxFileSizeBytes"), 1024, ARTIFACT_MAX_BYTES, "maxFileSizeBytes")
+    return scan_recent_web_artifacts([safe_path(value) for value in roots], hours, maximum, max_size)
+
+
+def list_upload_temp_artifacts(request: dict[str, Any]) -> dict[str, Any]:
+    hours = safe_int(request.get("modifiedWithinHours"), 1, 8760, "modifiedWithinHours")
+    maximum = safe_int(request.get("maxFiles"), 1, 5000, "maxFiles")
+    max_size = safe_int(request.get("maxFileSizeBytes"), 1024, ARTIFACT_MAX_BYTES, "maxFileSizeBytes")
+    roots = [root.resolve(strict=False) for root in WEB_TEMP_ROOTS if root.is_dir()]
+    # PHP upload_tmp_dir is parsed only from root-owned fixed php.ini files.
+    for name in glob.glob("/etc/php/**/php.ini", recursive=True)[:100]:
+        try:
+            for line in bounded_tail_lines(pathlib.Path(name), 1024 * 1024):
+                match = re.match(r"^\s*upload_tmp_dir\s*=\s*([^;\s]+)", line)
+                if match and match.group(1).startswith("/"):
+                    candidate = pathlib.Path(match.group(1)).resolve(strict=False)
+                    if candidate.is_dir() and candidate not in roots:
+                        roots.append(candidate)
+        except OSError:
             continue
-        for directory, _, files in os.walk(root, followlinks=False):
-            for filename in files:
-                path = pathlib.Path(directory) / filename
-                if path.suffix.lower() not in SCRIPT_EXTENSIONS:
-                    continue
-                try:
-                    info = path.lstat()
-                    if not stat.S_ISREG(info.st_mode) or info.st_mtime < cutoff or info.st_size > max_size:
-                        continue
-                    items.append({"path": str(path), "size": info.st_size, "mtime": dt.datetime.fromtimestamp(info.st_mtime, dt.timezone.utc).isoformat(), "sha256": sha256_file(path)})
-                except (OSError, PermissionError):
-                    continue
-                if len(items) >= maximum:
-                    return items
-    return items
+    result = scan_recent_web_artifacts(roots[:50], hours, maximum, max_size)
+    result["roots"] = [str(root) for root in roots[:50]]
+    return result
 
 
 def yara_scan_files(request: dict[str, Any]) -> list[dict[str, Any]]:
@@ -692,14 +797,134 @@ def search_web_access_log(request: dict[str, Any]) -> list[dict[str, Any]]:
     for expression in ["/var/log/nginx/access*.log", "/var/log/apache2/access*.log", "/var/log/httpd/access_log*"]:
         for log_name in glob.glob(expression)[:100]:
             try:
-                for line in pathlib.Path(log_name).read_text("utf-8", errors="replace").splitlines():
+                for line in bounded_tail_lines(pathlib.Path(log_name)):
                     if name in line:
-                        matches.append({"log": log_name, "line": line[:8192]})
+                        matches.append({"log": log_name, "line": redact_secret_text(line, 8192)})
                         if len(matches) >= maximum:
                             return matches
             except OSError:
                 continue
     return matches
+
+
+def validated_web_candidate(value: Any, expected_sha256: Any | None = None) -> pathlib.Path:
+    path = safe_path(value)
+    roots, _ = web_root_inventory()
+    allowed = [pathlib.Path(item["path"]).resolve(strict=False) for item in roots]
+    allowed.extend(root.resolve(strict=False) for root in WEB_TEMP_ROOTS)
+    if not any(path == root or is_within(path, root) for root in allowed):
+        raise HelperError("PERMISSION_DENIED", "path is outside discovered Web and fixed upload-temp scope")
+    if expected_sha256 is not None:
+        if not isinstance(expected_sha256, str) or not SHA256.fullmatch(expected_sha256) or sha256_file(path) != expected_sha256:
+            raise HelperError("EVIDENCE_COLLECTION", "Web artifact hash changed")
+    return path
+
+
+def inspect_web_runtime_config(request: dict[str, Any]) -> dict[str, Any]:
+    root = safe_path(request.get("root"))
+    roots, discovery_warnings = web_root_inventory()
+    if str(root) not in {str(item["path"]) for item in roots}:
+        raise HelperError("PERMISSION_DENIED", "root is not in the current effective Web Root inventory")
+    maximum = safe_int(request.get("maxItems"), 1, 1000, "maxItems")
+    items: list[dict[str, Any]] = []
+    warnings = list(discovery_warnings)
+    for directory, subdirs, files in os.walk(root, followlinks=False):
+        subdirs[:] = [name for name in subdirs if not (pathlib.Path(directory) / name).is_symlink()]
+        for filename in files:
+            if filename not in {".user.ini", ".htaccess", "web.config"}:
+                continue
+            path = pathlib.Path(directory) / filename
+            try:
+                text = redact_secret_text(text_file(path), 65536)
+                facts = file_facts(path)
+                items.append({**facts, "name": filename, "features": dangerous_features(text),
+                              "runtimeDirectives": [line.strip()[:2048] for line in text.splitlines()
+                                                    if re.search(r"auto_prepend_file|auto_append_file|AddHandler|SetHandler|php_value|rewrite", line, re.I)][:100]})
+            except OSError:
+                warnings.append(f"无法读取运行时配置: {path}")
+            if len(items) >= maximum:
+                return {"items": items, "partial": True, "warnings": warnings + ["Web 运行时配置达到上限"]}
+    return {"items": items, "partial": bool(warnings), "warnings": warnings[:200]}
+
+
+def correlate_web_requests(request: dict[str, Any]) -> dict[str, Any]:
+    path = validated_web_candidate(request.get("path"), request.get("expectedSha256"))
+    maximum = safe_int(request.get("maxEvents"), 1, 5000, "maxEvents")
+    name = path.name
+    items: list[dict[str, Any]] = []
+    warnings: list[str] = []
+    log_names = [name for expression in ("/var/log/nginx/access*.log", "/var/log/apache2/access*.log", "/var/log/httpd/access_log*")
+                 for name in glob.glob(expression)[:100]]
+    for log_name in log_names:
+        log_path = pathlib.Path(log_name)
+        try:
+            lines = bounded_tail_lines(log_path)
+            if log_path.stat().st_size > LOG_SCAN_MAX_BYTES:
+                warnings.append(f"{log_name} 超过 64 MiB，仅关联最新窗口")
+            for line in lines:
+                if name not in line:
+                    continue
+                request_match = re.search(r'"([A-Z]{3,10})\s+([^\s"]+)\s+HTTP/[0-9.]+"\s+(\d{3})', line)
+                ip_match = re.match(r"([0-9a-fA-F:.]{3,64})\s", line)
+                time_match = re.search(r"\[([^\]]{5,64})\]", line)
+                uri = request_match.group(2)[:4096] if request_match else None
+                if uri:
+                    uri = re.sub(r"(?i)(token|key|secret|password|session)=([^&\s]+)", r"\1=[REDACTED]", uri)
+                items.append({"log": log_name, "sourceIp": ip_match.group(1) if ip_match else None,
+                              "timestamp": time_match.group(1) if time_match else None,
+                              "method": request_match.group(1) if request_match else None, "uri": uri,
+                              "status": int(request_match.group(3)) if request_match else None})
+                if len(items) >= maximum:
+                    return {"items": items, "partial": True, "warnings": warnings + ["Web 请求关联达到上限"]}
+        except (OSError, PermissionError):
+            warnings.append(f"无法读取访问日志: {log_name}")
+    if not log_names:
+        warnings.append("未找到 Nginx/Apache Access Log")
+    return {"items": items, "partial": bool(warnings), "warnings": warnings[:200]}
+
+
+def find_web_related_processes(request: dict[str, Any]) -> dict[str, Any]:
+    path = validated_web_candidate(request.get("path"), request.get("expectedSha256"))
+    maximum = safe_int(request.get("maxProcesses"), 1, 500, "maxProcesses")
+    expected = path.stat()
+    web_signatures = ("nginx", "apache2", "httpd", "php-fpm", "catalina", "tomcat")
+    items: list[dict[str, Any]] = []
+    warnings: list[str] = []
+    digest_cache: dict[tuple[int, int], str] = {}
+    for proc in pathlib.Path("/proc").iterdir():
+        if not proc.name.isdigit():
+            continue
+        pid = int(proc.name)
+        reasons: list[str] = []
+        opened: list[dict[str, Any]] = []
+        try:
+            command = pathlib.Path(f"/proc/{pid}/cmdline").read_bytes()[:65536].replace(b"\0", b" ").decode("utf-8", errors="replace")
+            if any(signature in command.lower() for signature in web_signatures):
+                reasons.append("web_runtime")
+            for fd in (proc / "fd").iterdir():
+                try:
+                    info = fd.stat()
+                    target = os.readlink(fd)
+                    if info.st_dev == expected.st_dev and info.st_ino == expected.st_ino:
+                        reasons.append("candidate_open_fd")
+                        opened.append({"fd": fd.name, "target": target[:4096], "deleted": target.endswith(" (deleted)")})
+                    elif target.endswith(" (deleted)") and any(str(pathlib.Path(root)) in target for root in (path.parent, *WEB_TEMP_ROOTS)):
+                        reasons.append("deleted_web_file_open")
+                        opened.append({"fd": fd.name, "target": target[:4096], "deleted": True})
+                except OSError:
+                    continue
+            if not reasons:
+                continue
+            process = stable_process(pid, digest_cache)
+            items.append({**process, "commandSummary": redact_secret_text(command, 4096),
+                          "relationship": sorted(set(reasons)), "openedFiles": opened[:100]})
+        except HelperError as exc:
+            warnings.append(f"PID {pid}: {exc}")
+        except (OSError, PermissionError):
+            continue
+        if len(items) >= maximum:
+            return {"items": items, "partial": True, "warnings": warnings[:199] + ["Web 相关进程达到上限"]}
+    return {"items": items, "partial": bool(warnings), "warnings": warnings[:200]}
 
 
 def collect_file(request: dict[str, Any]) -> dict[str, Any]:
@@ -1938,8 +2163,15 @@ OPERATIONS: dict[str, Callable[[dict[str, Any]], Any]] = {
     "build_incident_timeline": build_incident_timeline,
     "get_host_info": get_host_info,
     "list_processes": list_processes,
+    "inventory_web_stacks": inventory_web_stacks,
+    "discover_effective_web_roots": discover_effective_web_roots,
     "discover_web_roots": discover_web_roots,
+    "list_recent_web_artifacts": list_recent_web_artifacts,
+    "list_upload_temp_artifacts": list_upload_temp_artifacts,
     "find_recent_web_files": find_recent_web_files,
+    "inspect_web_runtime_config": inspect_web_runtime_config,
+    "correlate_web_requests": correlate_web_requests,
+    "find_web_related_processes": find_web_related_processes,
     "yara_scan_files": yara_scan_files,
     "inspect_script_file": inspect_script_file,
     "search_web_access_log": search_web_access_log,

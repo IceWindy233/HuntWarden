@@ -15,6 +15,8 @@ const ARTIFACT_CHUNK_BYTES = 256 * 1024;
 const SAFE_HELPER_PATH = /^\/[A-Za-z0-9_./-]+$/;
 const HOST_OPERATIONS = new Set<HostOperation>([
   "get_capabilities", "get_host_info", "list_processes", "discover_web_roots", "find_recent_web_files", "yara_scan_files",
+  "inventory_web_stacks", "discover_effective_web_roots", "list_recent_web_artifacts", "list_upload_temp_artifacts",
+  "inspect_web_runtime_config", "correlate_web_requests", "find_web_related_processes",
   "capture_volatile_snapshot", "list_suspicious_processes", "inspect_process_tree", "inspect_process_fds",
   "inspect_process_memory_maps", "collect_process_executable", "list_recent_executables", "list_privileged_files",
   "verify_package_integrity", "inspect_dynamic_loader", "query_auth_events", "query_exec_events", "build_incident_timeline",

@@ -82,11 +82,24 @@ export interface HostOperationMap {
   build_incident_timeline: { input: { sinceHours: number; maxEvents: number }; output: PartialItemsOutput };
   get_host_info: { input: Record<string, never>; output: Record<string, unknown> };
   list_processes: { input: { pattern?: string }; output: Record<string, unknown>[] };
+  inventory_web_stacks: { input: Record<string, never>; output: PartialItemsOutput & { binaries: Record<string, string | null>; configPaths: string[]; processes: Record<string, unknown>[] } };
+  discover_effective_web_roots: { input: Record<string, never>; output: PartialItemsOutput };
   discover_web_roots: { input: Record<string, never>; output: { path: string; server: string }[] };
+  list_recent_web_artifacts: {
+    input: { roots: string[]; modifiedWithinHours: number; maxFiles: number; maxFileSizeBytes: number };
+    output: PartialItemsOutput & { visited: number; skipped: number };
+  };
+  list_upload_temp_artifacts: {
+    input: { modifiedWithinHours: number; maxFiles: number; maxFileSizeBytes: number };
+    output: PartialItemsOutput & { visited: number; skipped: number; roots: string[] };
+  };
   find_recent_web_files: {
     input: { roots: string[]; modifiedWithinHours: number; maxFiles: number; maxFileSizeBytes: number };
     output: Record<string, unknown>[];
   };
+  inspect_web_runtime_config: { input: { root: string; maxItems: number }; output: PartialItemsOutput };
+  correlate_web_requests: { input: { path: string; expectedSha256: string; maxEvents: number }; output: PartialItemsOutput };
+  find_web_related_processes: { input: { path: string; expectedSha256: string; maxProcesses: number }; output: PartialItemsOutput };
   yara_scan_files: { input: { paths: string[]; rulePath: string }; output: Record<string, unknown>[] };
   inspect_script_file: { input: { path: string; maxBytes: number }; output: Record<string, unknown> };
   search_web_access_log: { input: { path: string; fileName: string; maxLines: number }; output: Record<string, unknown>[] };

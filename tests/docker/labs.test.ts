@@ -57,6 +57,10 @@ describe.skipIf(!enabled)("Docker Lab 真实 SSH Tool Chain", () => {
     const capabilities = await remote.invoke({ operation: "get_capabilities", params: {} });
     expect(capabilities).toMatchObject({ protocolVersion: 1, artifactTransfer: { supported: true, protocolVersion: 1 } });
     expect(capabilities.operations).toContain("collect_file");
+    const stacks = await remote.invoke({ operation: "inventory_web_stacks", params: {} });
+    expect(stacks.processes.some((item) => String(item.command).includes("nginx"))).toBe(true);
+    const effective = await remote.invoke({ operation: "discover_effective_web_roots", params: {} });
+    expect(effective.items.some((item) => item.path === "/srv/alternate-app" && item.directive === "alias")).toBe(true);
     const roots = await remote.invoke({ operation: "discover_web_roots", params: {} });
     expect(roots.some((item) => item.path === "/var/www/html")).toBe(true);
     const files = await remote.invoke({ operation: "find_recent_web_files", params: {
@@ -64,6 +68,29 @@ describe.skipIf(!enabled)("Docker Lab 真实 SSH Tool Chain", () => {
     } });
     const sample = files.find((item) => item.path === "/var/www/html/lab-webshell.php");
     expect(sample).toBeTruthy();
+    const artifacts = await remote.invoke({ operation: "list_recent_web_artifacts", params: {
+      roots: ["/var/www/html"], modifiedWithinHours: 168, maxFiles: 500, maxFileSizeBytes: 10 * 1024 * 1024,
+    } });
+    expect(artifacts.items.some((item) => item.path === "/var/www/html/lab-auto-prepend.php")).toBe(true);
+    const uploads = await remote.invoke({ operation: "list_upload_temp_artifacts", params: {
+      modifiedWithinHours: 168, maxFiles: 500, maxFileSizeBytes: 10 * 1024 * 1024,
+    } });
+    expect(uploads.items.some((item) => item.path === "/tmp/lab-upload.php")).toBe(true);
+    const runtimeConfig = await remote.invoke({ operation: "inspect_web_runtime_config", params: { root: "/var/www/html", maxItems: 500 } });
+    expect(runtimeConfig.items.some((item) => item.name === ".user.ini" && JSON.stringify(item).includes("auto_prepend_file"))).toBe(true);
+    const requestChain = await remote.invoke({ operation: "correlate_web_requests", params: {
+      path: String(sample!.path), expectedSha256: String(sample!.sha256), maxEvents: 500,
+    } });
+    expect(requestChain.items.some((item) => item.method === "GET" || item.method === "POST")).toBe(false);
+    const uploadCandidate = uploads.items.find((item) => item.path === "/tmp/lab-upload.php")!;
+    const uploadRequests = await remote.invoke({ operation: "correlate_web_requests", params: {
+      path: String(uploadCandidate.path), expectedSha256: String(uploadCandidate.sha256), maxEvents: 500,
+    } });
+    expect(uploadRequests.items.some((item) => item.method === "POST" && item.sourceIp === "192.0.2.44")).toBe(true);
+    const related = await remote.invoke({ operation: "find_web_related_processes", params: {
+      path: String(sample!.path), expectedSha256: String(sample!.sha256), maxProcesses: 500,
+    } });
+    expect(related.items.some((item) => Array.isArray(item.relationship) && item.relationship.includes("web_runtime"))).toBe(true);
     const yara = await remote.invoke({ operation: "yara_scan_files", params: {
       paths: [String(sample!.path)], rulePath: "/opt/huntwarden/rules/webshell.yar",
     } });
