@@ -38,14 +38,15 @@ public final class ProbeAgent {
         try {
             String decoded = new String(Base64.getUrlDecoder().decode(encodedRequest), StandardCharsets.UTF_8);
             String[] parts = decoded.split("\\n", -1);
-            if (parts.length != 3) throw new IllegalArgumentException("invalid request");
+            if (parts.length != 3 && parts.length != 4) throw new IllegalArgumentException("invalid request");
             String command = parts[0];
             String className = parts[1];
-            output = Path.of(parts[2]);
+            String classLoaderId = parts.length == 4 && !parts[2].isBlank() ? parts[2] : null;
+            output = Path.of(parts[parts.length - 1]);
             response = switch (command) {
                 case "list_components" -> listComponents(instrumentation);
-                case "inspect_class" -> inspectClass(instrumentation, className);
-                case "dump_class" -> dumpClass(instrumentation, className);
+                case "inspect_class" -> inspectClass(instrumentation, className, classLoaderId);
+                case "dump_class" -> dumpClass(instrumentation, className, classLoaderId);
                 default -> throw new IllegalArgumentException("unsupported command");
             };
         } catch (Throwable error) {
@@ -83,7 +84,7 @@ public final class ProbeAgent {
             if (className == null || className.isBlank()) className = attributeFromResource(server, name);
             component.put("className", className == null ? "unknown" : className);
             if (className != null) {
-                Class<?> loaded = findLoaded(instrumentation, className);
+                Class<?> loaded = findUniqueLoaded(instrumentation, className);
                 if (loaded != null) component.putAll(classFacts(instrumentation, loaded));
             }
             component.put("source", "jmx");
@@ -117,13 +118,13 @@ public final class ProbeAgent {
                     Object instance = optionalInvoke(filter, "getFilter");
                     if ((className == null || className.isBlank()) && instance != null) className = instance.getClass().getName();
                     components.add(component(instrumentation, "filter", name, className, contextName,
-                            instance == null ? "descriptor" : "runtime-instance"));
+                            instance == null ? "descriptor" : "runtime-instance", loader));
                 }
                 for (Object wrapper : array(invoke(context, "findChildren"))) {
                     String name = String.valueOf(invoke(wrapper, "getName"));
                     String className = stringValue(optionalInvoke(wrapper, "getServletClass"));
                     if (className != null && !className.isBlank()) {
-                        components.add(component(instrumentation, "servlet", name, className, contextName, "context-child"));
+                        components.add(component(instrumentation, "servlet", name, className, contextName, "context-child", loader));
                     }
                 }
                 Set<String> listenerClasses = new LinkedHashSet<>();
@@ -132,7 +133,7 @@ public final class ProbeAgent {
                     if (listener != null) listenerClasses.add(listener.getClass().getName());
                 }
                 for (String className : listenerClasses) {
-                    components.add(component(instrumentation, "listener", className, className, contextName, "runtime-context"));
+                    components.add(component(instrumentation, "listener", className, className, contextName, "runtime-context", loader));
                 }
             } catch (Throwable error) {
                 warnings.add("无法读取 Webapp ClassLoader 对应 Context: " + error.getClass().getSimpleName() + ": " + error.getMessage());
@@ -142,7 +143,8 @@ public final class ProbeAgent {
     }
 
     private static Map<String, Object> component(Instrumentation instrumentation, String type, String name,
-                                                  String className, String contextName, String source) {
+                                                  String className, String contextName, String source,
+                                                  ClassLoader preferredLoader) {
         Map<String, Object> item = new LinkedHashMap<>();
         item.put("type", type);
         item.put("name", name);
@@ -150,7 +152,7 @@ public final class ProbeAgent {
         item.put("context", contextName);
         item.put("source", source);
         if (className != null) {
-            Class<?> loaded = findLoaded(instrumentation, className);
+            Class<?> loaded = findLoaded(instrumentation, className, loaderId(preferredLoader));
             if (loaded != null) item.putAll(classFacts(instrumentation, loaded));
         }
         return item;
@@ -219,9 +221,17 @@ public final class ProbeAgent {
         }
     }
 
-    private static Map<String, Object> inspectClass(Instrumentation instrumentation, String className) {
-        Class<?> loaded = findLoaded(instrumentation, className);
-        if (loaded == null) return mapOf("className", className, "loaded", false, "partial", true, "warnings", List.of("目标类未加载"));
+    private static Map<String, Object> inspectClass(Instrumentation instrumentation, String className, String classLoaderId) {
+        List<Class<?>> matches = findLoadedClasses(instrumentation, className);
+        Class<?> loaded = selectLoaded(matches, classLoaderId);
+        if (loaded == null) {
+            List<String> warnings = matches.isEmpty()
+                    ? List.of("目标类未加载")
+                    : List.of(classLoaderId == null ? "存在多个同名 Class，必须使用 classLoaderId 精确选择" : "指定 ClassLoader 中未找到目标类");
+            return mapOf("className", className, "loaded", false, "candidateClassLoaderIds",
+                    matches.stream().map(value -> loaderId(value.getClassLoader())).toList(),
+                    "partial", true, "warnings", warnings);
+        }
         Map<String, Object> result = new LinkedHashMap<>();
         result.put("className", className);
         result.put("loaded", true);
@@ -238,6 +248,7 @@ public final class ProbeAgent {
         URL location = source == null ? null : source.getLocation();
         ModuleDescriptor descriptor = loaded.getModule().getDescriptor();
         facts.put("classLoader", loader == null ? "bootstrap" : loader.getClass().getName() + "@" + Integer.toHexString(System.identityHashCode(loader)));
+        facts.put("classLoaderId", loaderId(loader));
         facts.put("codeSource", location == null ? null : location.toString());
         facts.put("protectionDomain", domain == null ? null : domain.toString());
         facts.put("module", descriptor == null ? loaded.getModule().getName() : descriptor.name());
@@ -245,9 +256,17 @@ public final class ProbeAgent {
         return facts;
     }
 
-    private static Map<String, Object> dumpClass(Instrumentation instrumentation, String className) throws Exception {
-        Class<?> target = findLoaded(instrumentation, className);
-        if (target == null) return mapOf("className", className, "partial", true, "warnings", List.of("目标类未加载"));
+    private static Map<String, Object> dumpClass(Instrumentation instrumentation, String className, String classLoaderId) throws Exception {
+        List<Class<?>> matches = findLoadedClasses(instrumentation, className);
+        Class<?> target = selectLoaded(matches, classLoaderId);
+        if (target == null) {
+            List<String> warnings = matches.isEmpty()
+                    ? List.of("目标类未加载")
+                    : List.of(classLoaderId == null ? "存在多个同名 Class，拒绝导出不确定对象" : "指定 ClassLoader 中未找到目标类");
+            return mapOf("className", className, "candidateClassLoaderIds",
+                    matches.stream().map(value -> loaderId(value.getClassLoader())).toList(),
+                    "partial", true, "warnings", warnings);
+        }
         if (!instrumentation.isRetransformClassesSupported() || !instrumentation.isModifiableClass(target)) {
             return mapOf("className", className, "partial", true, "warnings", List.of("目标 JVM 不支持该类的只读 retransformation capture"));
         }
@@ -270,15 +289,40 @@ public final class ProbeAgent {
         if (bytes == null) return mapOf("className", className, "partial", true, "warnings", List.of("未捕获 Class 字节"));
         Map<String, Object> result = new LinkedHashMap<>();
         result.put("className", className);
+        result.put("classLoaderId", loaderId(target.getClassLoader()));
         result.put("size", bytes.length);
         result.put("dataBase64", Base64.getEncoder().encodeToString(bytes));
         result.put("partial", false);
         return result;
     }
 
-    private static Class<?> findLoaded(Instrumentation instrumentation, String className) {
-        for (Class<?> loaded : instrumentation.getAllLoadedClasses()) if (loaded.getName().equals(className)) return loaded;
+    private static List<Class<?>> findLoadedClasses(Instrumentation instrumentation, String className) {
+        List<Class<?>> matches = new ArrayList<>();
+        for (Class<?> loaded : instrumentation.getAllLoadedClasses()) {
+            if (loaded.getName().equals(className)) matches.add(loaded);
+        }
+        return matches;
+    }
+
+    private static Class<?> findUniqueLoaded(Instrumentation instrumentation, String className) {
+        List<Class<?>> matches = findLoadedClasses(instrumentation, className);
+        return matches.size() == 1 ? matches.get(0) : null;
+    }
+
+    private static Class<?> findLoaded(Instrumentation instrumentation, String className, String classLoaderId) {
+        return selectLoaded(findLoadedClasses(instrumentation, className), classLoaderId);
+    }
+
+    private static Class<?> selectLoaded(List<Class<?>> matches, String classLoaderId) {
+        if (classLoaderId == null) return matches.size() == 1 ? matches.get(0) : null;
+        for (Class<?> loaded : matches) {
+            if (loaderId(loaded.getClassLoader()).equals(classLoaderId)) return loaded;
+        }
         return null;
+    }
+
+    private static String loaderId(ClassLoader loader) {
+        return loader == null ? "bootstrap" : loader.getClass().getName() + "@" + Integer.toHexString(System.identityHashCode(loader));
     }
 
     private static Map<String, Object> mapOf(Object... values) {
