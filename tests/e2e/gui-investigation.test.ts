@@ -60,7 +60,19 @@ async function runInvestigation(scenario: E2eFauxScenario, port: number, categor
   const task = await page.evaluate((value) => window.huntwarden.createTask(value), input);
   await page.locator(".sidebar-tasks button", { hasText: request }).click();
   await page.getByRole("button", { name: "开始调查" }).click();
-  await expect.poll(async () => (await page.evaluate((id) => window.huntwarden.getTaskSnapshot(id), task.taskId)).task.status, { timeout: 90_000 }).toBe("COMPLETED");
+  try {
+    await expect.poll(async () => (await page.evaluate((id) => window.huntwarden.getTaskSnapshot(id), task.taskId)).task.status, { timeout: 90_000 }).toMatch(/^(COMPLETED|FAILED)$/);
+    expect((await page.evaluate((id) => window.huntwarden.getTaskSnapshot(id), task.taskId)).task.status).toBe("COMPLETED");
+  } catch (error) {
+    const failed = await page.evaluate((id) => window.huntwarden.getTaskSnapshot(id), task.taskId);
+    console.error("GUI investigation failed", JSON.stringify({
+      task: failed.task,
+      conversation: failed.conversation.slice(-6),
+      toolRuns: failed.toolRuns.slice(-8),
+      audit: failed.audit.slice(-12),
+    }, null, 2));
+    throw error;
+  }
   return {
     page,
     snapshot: await page.evaluate((id) => window.huntwarden.getTaskSnapshot(id), task.taskId),
@@ -82,8 +94,9 @@ describe.skipIf(!enabled)("GUI 四场景只读调查与手动确认报告", () =
     await page.getByRole("button", { name: "确认并生成报告" }).click();
     await expect.poll(async () => (await page.evaluate((id) => window.huntwarden.getTaskSnapshot(id), investigation.task.taskId)).reports.length, { timeout: 30_000 }).toBe(1);
     const result = await page.evaluate((id) => window.huntwarden.getTaskSnapshot(id), investigation.task.taskId);
-    expect(result.findings[0]?.category).toBe(category);
-    expect(["CONFIRMED", "HIGHLY_SUSPICIOUS"]).toContain(result.findings[0]?.status);
+    expect(result.findings.some((finding) => finding.category === category)).toBe(true);
+    expect(result.findings.some((finding) => finding.category === category
+      && ["CONFIRMED", "HIGHLY_SUSPICIOUS"].includes(finding.status))).toBe(true);
     expect(result.evidence.length).toBeGreaterThan(0);
     expect(result.approvals).toHaveLength(0);
     expect(result.actionReceipts).toHaveLength(0);

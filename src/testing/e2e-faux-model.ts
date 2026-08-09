@@ -16,10 +16,39 @@ export type E2eFauxScenario =
   | "account-scan"
   | "persistence-scan";
 
+function userMessageText(message: Context["messages"][number]): string {
+  if (message.role !== "user") return "";
+  if (typeof message.content === "string") return message.content;
+  return message.content
+    .filter((item): item is Extract<(typeof message.content)[number], { type: "text" }> => item.type === "text")
+    .map((item) => item.text)
+    .join("\n");
+}
+
+function minimumToolResult(context: Context, toolName: string): SecurityToolResult<Record<string, unknown>, Record<string, unknown>> | undefined {
+  for (const message of [...context.messages].reverse()) {
+    const text = userMessageText(message);
+    const encoded = text.match(/<deterministic-minimum-scan>\s*([\s\S]*?)\s*<\/deterministic-minimum-scan>/)?.[1];
+    if (!encoded) continue;
+    try {
+      const payload = JSON.parse(encoded) as { outcomes?: { toolName?: string; details?: unknown }[] };
+      const details = payload.outcomes?.find((outcome) => outcome.toolName === toolName)?.details;
+      if (details && typeof details === "object") {
+        return details as SecurityToolResult<Record<string, unknown>, Record<string, unknown>>;
+      }
+    } catch {
+      // 测试 Provider 只消费应用生成的结构化摘要；格式不匹配时按缺失处理。
+    }
+  }
+  return undefined;
+}
+
 function toolResult(context: Context, toolName: string): SecurityToolResult<Record<string, unknown>, Record<string, unknown>> {
   const message = [...context.messages].reverse().find((item) => item.role === "toolResult" && item.toolName === toolName);
-  if (!message || message.role !== "toolResult") throw new Error(`E2E Faux 缺少工具结果: ${toolName}`);
-  return message.details as SecurityToolResult<Record<string, unknown>, Record<string, unknown>>;
+  if (message?.role === "toolResult") return message.details as SecurityToolResult<Record<string, unknown>, Record<string, unknown>>;
+  const minimum = minimumToolResult(context, toolName);
+  if (minimum) return minimum;
+  throw new Error(`E2E Faux 缺少工具结果: ${toolName}`);
 }
 
 function stringField(value: unknown, field: string): string {
@@ -34,7 +63,8 @@ function call(name: string, args: Record<string, unknown>, id: string) {
 }
 
 function hasToolResult(context: Context, toolName: string): boolean {
-  return context.messages.some((item) => item.role === "toolResult" && item.toolName === toolName);
+  return context.messages.some((item) => item.role === "toolResult" && item.toolName === toolName)
+    || Boolean(minimumToolResult(context, toolName));
 }
 
 function nextWebQuarantineResponse(context: Context) {
