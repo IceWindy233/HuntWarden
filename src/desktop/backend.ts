@@ -256,6 +256,8 @@ export class DesktopBackend extends EventEmitter {
   async recoverTask(taskId: string): Promise<void> { await this.runAndNotify(taskId, () => this.requireApplication().recoverTask(taskId)); }
   async steerTask(taskId: string, text: string): Promise<void> { await this.requireApplication().steerTask(taskId, text); }
   abortTask(taskId: string): void { this.requireApplication().abortTask(taskId); }
+  archiveTask(taskId: string): TaskContext { return this.requireApplication().archiveTask(taskId); }
+  restoreTask(taskId: string): TaskContext { return this.requireApplication().restoreTask(taskId); }
   decideApproval(approvalId: string, approved: boolean): void { this.requireApplication().decideApproval(approvalId, approved); }
   async generateReport(taskId: string): Promise<ReportRecord> { return await this.runAndNotify(taskId, () => this.requireApplication().generateReport(taskId)); }
 

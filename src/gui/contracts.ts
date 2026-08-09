@@ -1,7 +1,7 @@
 import type { AppConfig } from "../config/schema.js";
 import type { ActionReceipt, AgentStreamUpdate, ApprovalTicket, AuditEvent, Evidence, Finding, ReportRecord, TaskContext, TaskMode, CheckCategory } from "../domain/types.js";
 
-export const DESKTOP_API_VERSION = 3 as const;
+export const DESKTOP_API_VERSION = 4 as const;
 
 export interface ConfigProfileSummary {
   profileId: string;
@@ -149,6 +149,8 @@ export interface HuntWardenDesktopApi {
   createTask(input: NewTaskInput): Promise<TaskContext>;
   startTask(taskId: string): Promise<void>;
   abortTask(taskId: string): Promise<void>;
+  archiveTask(taskId: string): Promise<TaskContext>;
+  restoreTask(taskId: string): Promise<TaskContext>;
   recoverTask(taskId: string): Promise<void>;
   steerTask(input: { taskId: string; text: string }): Promise<void>;
   decideApproval(input: { approvalId: string; approved: boolean }): Promise<void>;

@@ -46,6 +46,8 @@ export interface TaskContext {
   coverage: Partial<Record<CheckCategory, FindingStatus>>;
   createdAt: string;
   updatedAt: string;
+  /** 归档只影响默认列表可见性，不删除任务关联数据。 */
+  archivedAt?: string;
   turnCount: number;
   toolCallCount: number;
   interruption?: {

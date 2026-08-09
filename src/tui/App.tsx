@@ -17,9 +17,13 @@ const NEW_TASK_FIELDS: { key: NewTaskField; label: string; defaultValue: (applic
 
 export interface AppProps { application: Application; initialTask?: TaskContext; autoStart?: boolean }
 
+function currentTasks(application: Application): TaskContext[] {
+  return application.store.listTasks().filter((task) => !task.archivedAt);
+}
+
 export function App({ application, initialTask, autoStart = false }: AppProps) {
   const { exit } = useApp();
-  const [tasks, setTasks] = useState(() => application.store.listTasks());
+  const [tasks, setTasks] = useState(() => currentTasks(application));
   const [selected, setSelected] = useState(0);
   const [selectedTaskId, setSelectedTaskId] = useState(initialTask?.taskId);
   const [tabIndex, setTabIndex] = useState(0);
@@ -35,7 +39,7 @@ export function App({ application, initialTask, autoStart = false }: AppProps) {
     : tasks[selected];
 
   const refresh = () => {
-    const next = application.store.listTasks();
+    const next = currentTasks(application);
     setTasks(next);
     if (current) setApproval(application.store.listPendingApprovals(current.taskId)[0]);
   };
@@ -97,7 +101,7 @@ export function App({ application, initialTask, autoStart = false }: AppProps) {
           });
           setSelectedTaskId(created.taskId);
           setSelected(0);
-          setTasks(application.store.listTasks());
+          setTasks(currentTasks(application));
           setNewTaskDraft({});
           setStatus(`已创建任务 ${created.taskId}`);
         })().catch((error) => setStatus(`新建失败: ${error instanceof Error ? error.message : String(error)}`));

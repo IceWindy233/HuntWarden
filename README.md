@@ -9,7 +9,7 @@ HuntWarden（猎卫）是面向安全分析师的 AI 主机安全调查与受控
 ## 已实现范围
 
 - Pi 低层 `Agent` Tool Loop；支持 Pi 内置多供应商 Provider 与自定义兼容端点，默认仍为 OpenAI Responses `gpt-5.6-terra` / `medium`。
-- Electron + React 全屏桌面 GUI：仪表盘、结构化配置中心、API Key 安全存储、模型检查、SSH 测试、新建任务、Agent 文本增量流式显示、实时调查、Steering、审批、恢复、Evidence、审计和报告。
+- Electron + React 全屏桌面 GUI：仪表盘、结构化配置中心、API Key 安全存储、模型检查、SSH 测试、新建任务、Agent 文本增量流式显示、任务归档与恢复、实时调查、Steering、审批、恢复、Evidence、审计和报告。
 - 内置 DeepSeek 与 OpenAI Profile；可在 GUI 中切换 Pi 内置 Provider，或配置 OpenAI Responses/Completions、Anthropic Messages 兼容端点。
 - Renderer 启用 Chromium 沙箱、Context Isolation、严格 CSP 和固定 IPC 白名单；不能直接访问 Node.js、文件系统、SQLite、SSH 或凭据明文。
 - Ink 7 + React 19 全屏 TUI：新建、运行、Agent 文本增量流式显示、历史任务、Steering、审批、恢复、Finding、Evidence、审计和报告。
@@ -253,6 +253,7 @@ Lab 只允许在隔离开发环境使用。账户禁用与隔离测试会真实�
 - 账户禁用永久拒绝 `root` 和当前 SSH 执行用户，保存前态并验证锁定/过期结果。
 - SAFE 工具按原 `toolCallId` 幂等恢复；NEVER 工具先查远端 `actionId` 回执。状态未知时必须重新审批，绝不自动重放。
 - 启动时遗留活动任务会转为 `ABORTED + recoveryRequired`；GUI 仅在分析师点击后恢复。报告以 `v1/v2/...` 不可变保存，旧版单文件报告懒迁移为 LEGACY。
+- 已结束任务可归档并恢复到当前列表；归档只改变列表可见性，Finding、Evidence、报告和审计记录不会被删除，活动或待恢复任务禁止归档。
 - 流式半成品只存在于当前进程与界面内存，完整 Assistant 消息仅在 `message_end` 后写入 SQLite；Thinking 和未完成的 Tool Call 参数不会发送到 GUI/TUI。
 - 模型只接收脱敏且最多 64 KiB 的文本；原始 Evidence、二进制和 Class Dump 不上传。
 - 数据目录为 `0700`，数据库、Evidence 和报告为 `0600`。首期不提供应用层加密或自动过期删除。

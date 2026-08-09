@@ -47,7 +47,7 @@ async function launch(scenario: E2eFauxScenario, port: number): Promise<{ page: 
   } };
 }
 
-async function runInvestigation(scenario: E2eFauxScenario, port: number, category: CheckCategory): Promise<{ snapshot: TaskSnapshot; streamEvents: DesktopEvent[] }> {
+async function runInvestigation(scenario: E2eFauxScenario, port: number, category: CheckCategory): Promise<{ page: Page; snapshot: TaskSnapshot; streamEvents: DesktopEvent[] }> {
   const { page, target } = await launch(scenario, port);
   await page.evaluate(() => {
     window.__huntwardenStreamEvents = [];
@@ -62,6 +62,7 @@ async function runInvestigation(scenario: E2eFauxScenario, port: number, categor
   await page.getByRole("button", { name: "开始调查" }).click();
   await expect.poll(async () => (await page.evaluate((id) => window.huntwarden.getTaskSnapshot(id), task.taskId)).task.status, { timeout: 90_000 }).toBe("COMPLETED");
   return {
+    page,
     snapshot: await page.evaluate((id) => window.huntwarden.getTaskSnapshot(id), task.taskId),
     streamEvents: await page.evaluate(() => window.__huntwardenStreamEvents ?? []),
   };
@@ -74,7 +75,7 @@ describe.skipIf(!enabled)("GUI 三场景只读调查与自动报告", () => {
     ["account-scan", 2224, "backdoor_account"],
     ["persistence-scan", 2225, "linux_persistence"],
   ] as const)("%s 完成 Finding、Evidence 与 v1 报告", async (scenario, port, category) => {
-    const { snapshot: result, streamEvents } = await runInvestigation(scenario, port, category);
+    const { page, snapshot: result, streamEvents } = await runInvestigation(scenario, port, category);
     expect(result.findings[0]?.category).toBe(category);
     expect(["CONFIRMED", "HIGHLY_SUSPICIOUS"]).toContain(result.findings[0]?.status);
     expect(result.evidence.length).toBeGreaterThan(0);
@@ -85,5 +86,18 @@ describe.skipIf(!enabled)("GUI 三场景只读调查与自动报告", () => {
     expect(streamEvents.some((event) => event.type === "agent_stream" && event.phase === "start")).toBe(true);
     expect(streamEvents.some((event) => event.type === "agent_stream" && event.phase === "delta" && Boolean(event.delta))).toBe(true);
     expect(streamEvents.some((event) => event.type === "agent_stream" && event.phase === "end")).toBe(true);
+
+    page.once("dialog", async (dialog) => await dialog.accept());
+    await page.getByRole("button", { name: "归档", exact: true }).click();
+    await expect.poll(async () => await page.locator(".sidebar-tasks button", { hasText: result.task.request }).count()).toBe(0);
+    await page.locator(".sidebar-label").getByRole("button", { name: "查看已归档任务" }).click();
+    await expect.poll(async () => await page.locator(".sidebar-tasks button", { hasText: result.task.request }).count()).toBe(1);
+    await page.getByRole("button", { name: "恢复归档" }).click();
+    await expect.poll(async () => await page.locator(".sidebar-tasks button", { hasText: result.task.request }).count()).toBe(0);
+    await page.locator(".sidebar-label").getByRole("button", { name: "返回当前任务" }).click();
+    await expect.poll(async () => await page.locator(".sidebar-tasks button", { hasText: result.task.request }).count()).toBe(1);
+    const restored = await page.evaluate((id) => window.huntwarden.getTaskSnapshot(id), result.task.taskId);
+    expect(restored.task.archivedAt).toBeUndefined();
+    expect(restored.audit.map((event) => event.event)).toEqual(expect.arrayContaining(["task_archived", "task_restored_from_archive"]));
   }, 150_000);
 });

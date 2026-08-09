@@ -23,6 +23,8 @@ export const IPC = {
   taskCreate: "huntwarden:task:create",
   taskStart: "huntwarden:task:start",
   taskAbort: "huntwarden:task:abort",
+  taskArchive: "huntwarden:task:archive",
+  taskRestore: "huntwarden:task:restore",
   taskRecover: "huntwarden:task:recover",
   taskSteer: "huntwarden:task:steer",
   approvalDecide: "huntwarden:approval:decide",

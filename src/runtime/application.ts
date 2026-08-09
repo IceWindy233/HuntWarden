@@ -88,6 +88,7 @@ export class Application extends EventEmitter {
 
   async startTask(taskId: string): Promise<void> {
     const task = this.requireTask(taskId);
+    this.assertNotArchived(task);
     const runtime = this.runtimeFor(task);
     await runtime.prompt(task.request);
     await this.reports.generate(this.requireTask(taskId), runtime);
@@ -96,6 +97,7 @@ export class Application extends EventEmitter {
 
   async recoverTask(taskId: string): Promise<void> {
     const task = this.requireTask(taskId);
+    this.assertNotArchived(task);
     if (!task.interruption?.recoveryRequired) throw new InvalidArgumentError("任务没有需要处理的中断状态");
     const runtime = this.runtimeFor(task);
     if (task.interruption.previousStatus !== "REPORTING") await runtime.recover();
@@ -107,17 +109,44 @@ export class Application extends EventEmitter {
     const normalized = text.trim();
     if (!normalized || normalized.length > 20_000) throw new InvalidArgumentError("Steering 输入不能为空且不能超过 20000 字符");
     const task = this.requireTask(taskId);
+    this.assertNotArchived(task);
     await this.runtimeFor(task).steer(normalized);
     this.emit("changed", taskId);
   }
 
   abortTask(taskId: string): void {
     const task = this.requireTask(taskId);
+    this.assertNotArchived(task);
     if (this.runtimeTaskId === taskId) this.runtime?.abort();
     task.status = "ABORTED";
     this.store.saveTask(task);
     this.store.appendAudit({ taskId, event: "task_aborted_by_analyst", level: "warn", data: {} });
     this.emit("changed", taskId);
+  }
+
+  archiveTask(taskId: string): TaskContext {
+    const task = this.requireTask(taskId);
+    if (task.archivedAt) return task;
+    if (["RUNNING", "WAITING_APPROVAL", "RECOVERING", "REPORTING"].includes(task.status)) {
+      throw new InvalidArgumentError("活动任务不能归档，请等待任务结束或先终止任务");
+    }
+    if (task.interruption?.recoveryRequired) throw new InvalidArgumentError("待恢复任务不能归档，请先完成恢复或明确终止恢复流程");
+    task.archivedAt = new Date().toISOString();
+    this.store.saveTask(task);
+    this.store.appendAudit({ taskId, event: "task_archived", level: "info", data: { archivedAt: task.archivedAt } });
+    this.emit("changed", taskId);
+    return task;
+  }
+
+  restoreTask(taskId: string): TaskContext {
+    const task = this.requireTask(taskId);
+    if (!task.archivedAt) return task;
+    const archivedAt = task.archivedAt;
+    delete task.archivedAt;
+    this.store.saveTask(task);
+    this.store.appendAudit({ taskId, event: "task_restored_from_archive", level: "info", data: { archivedAt } });
+    this.emit("changed", taskId);
+    return task;
   }
 
   decideApproval(approvalId: string, approved: boolean): void {
@@ -127,6 +156,7 @@ export class Application extends EventEmitter {
 
   async generateReport(taskId: string): Promise<ReportRecord> {
     const task = this.requireTask(taskId);
+    this.assertNotArchived(task);
     const report = await this.reports.generate(task, this.runtimeFor(task));
     this.emit("changed", taskId);
     return report;
@@ -145,5 +175,9 @@ export class Application extends EventEmitter {
     const task = this.store.getTask(taskId);
     if (!task) throw new InvalidArgumentError(`任务不存在: ${taskId}`);
     return task;
+  }
+
+  private assertNotArchived(task: TaskContext): void {
+    if (task.archivedAt) throw new InvalidArgumentError("已归档任务为只读，请先恢复归档");
   }
 }

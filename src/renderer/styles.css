@@ -50,6 +50,8 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .sidebar-label { display: flex; justify-content: space-between; align-items: center; padding: 0 9px 9px; color: var(--muted-2); font-size: 10px; font-weight: 700; letter-spacing: .1em; text-transform: uppercase; }
 .sidebar-label button { width: 24px; height: 24px; border: 1px solid transparent; border-radius: 6px; color: var(--muted); background: transparent; cursor: pointer; }
 .sidebar-label button:hover { border-color: var(--line); color: var(--cyan); background: var(--panel-3); }
+.sidebar-label-actions { display: flex; gap: 3px; align-items: center; }
+.sidebar-label button.archive-filter { width: auto; padding: 0 7px; font-size: 9px; letter-spacing: 0; text-transform: none; }
 .sidebar-tasks { display: grid; gap: 3px; min-height: 0; overflow-y: auto; }
 .sidebar-tasks > button { display: grid; grid-template-columns: 10px minmax(0, 1fr) auto; gap: 8px; align-items: start; min-height: 54px; padding: 9px 8px; border: 1px solid transparent; border-radius: 8px; background: transparent; text-align: left; cursor: pointer; }
 .sidebar-tasks > button:hover { background: rgba(255, 255, 255, .025); }
@@ -143,6 +145,8 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .workspace-header { display: flex; justify-content: space-between; align-items: start; padding: 21px 27px 17px; border-bottom: 1px solid var(--line-soft); background: rgba(9, 20, 29, .55); }
 .interruption-banner { display: flex; align-items: center; gap: 14px; padding: 10px 27px; border-bottom: 1px solid rgba(255, 179, 71, .25); background: rgba(255, 179, 71, .08); color: var(--amber); font-size: 9px; }
 .interruption-banner span { color: var(--muted); }
+.archive-banner { display: flex; align-items: center; gap: 14px; padding: 10px 27px; border-bottom: 1px solid rgba(117, 137, 230, .25); background: rgba(117, 137, 230, .08); color: #aebcff; font-size: 9px; }
+.archive-banner span { color: var(--muted); }
 .target-line { display: flex; gap: 8px; align-items: center; }
 .target-host { color: #e9f6f8; font: 700 15px ui-monospace, SFMono-Regular, Menlo, monospace; }
 .target-user { margin-right: 6px; color: var(--muted); font: 10px ui-monospace, monospace; }

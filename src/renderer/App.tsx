@@ -20,12 +20,17 @@ export function App() {
   const [selectedTaskId, setSelectedTaskId] = useState<string>();
   const [snapshot, setSnapshot] = useState<TaskSnapshot>();
   const [newTaskOpen, setNewTaskOpen] = useState(false);
+  const [showArchived, setShowArchived] = useState(false);
   const [toasts, setToasts] = useState<Toast[]>([]);
   const [loading, setLoading] = useState(true);
   const [fatalError, setFatalError] = useState<string>();
   const [liveStream, setLiveStream] = useState<LiveAgentStream>();
   const toastSequence = useRef(0);
   const refreshSequence = useRef(0);
+  const visibleTasks = useMemo(
+    () => tasks.filter((task) => Boolean(task.archivedAt) === showArchived),
+    [showArchived, tasks],
+  );
 
   const notify = useCallback((message: string, tone: ToastTone = "info") => {
     const id = ++toastSequence.current;
@@ -38,9 +43,10 @@ export function App() {
     setProfiles(state.profiles);
     setActiveProfileId(state.activeProfileId);
     setTasks(state.tasks);
-    setSelectedTaskId((current) => current && state.tasks.some((item) => item.taskId === current)
+    const currentTasks = state.tasks.filter((task) => !task.archivedAt);
+    setSelectedTaskId((current) => current && currentTasks.some((item) => item.taskId === current)
       ? current
-      : state.tasks[0]?.taskId);
+      : currentTasks[0]?.taskId);
     return state;
   }, []);
 
@@ -72,6 +78,11 @@ export function App() {
 
   useEffect(() => { void refreshSnapshot(); }, [refreshSnapshot]);
   useEffect(() => { setLiveStream(undefined); }, [selectedTaskId]);
+  useEffect(() => {
+    setSelectedTaskId((current) => current && visibleTasks.some((task) => task.taskId === current)
+      ? current
+      : visibleTasks[0]?.taskId);
+  }, [visibleTasks]);
 
   useEffect(() => {
     const unsubscribe = window.huntwarden.subscribe((event: DesktopEvent) => {
@@ -132,6 +143,7 @@ export function App() {
 
   function onTaskCreated(task: TaskContext): void {
     setTasks((current) => [task, ...current.filter((item) => item.taskId !== task.taskId)]);
+    setShowArchived(false);
     setSelectedTaskId(task.taskId);
     setNewTaskOpen(false);
     setView("tasks");
@@ -144,18 +156,18 @@ export function App() {
     <aside className="app-sidebar">
       <div className="app-brand"><div className="brand-mark">H</div><div><strong>HuntWarden</strong><span>THREAT HUNT &amp; RESPONSE</span></div></div>
       <nav className="main-nav">
-        <button className={view === "tasks" ? "active" : ""} onClick={() => setView("tasks")}><span className="nav-glyph">⌁</span><span>安全调查</span><small>{tasks.filter((task) => ["RUNNING", "RECOVERING", "WAITING_APPROVAL"].includes(task.status)).length || ""}</small></button>
+        <button className={view === "tasks" ? "active" : ""} onClick={() => setView("tasks")}><span className="nav-glyph">⌁</span><span>安全调查</span><small>{tasks.filter((task) => !task.archivedAt && ["RUNNING", "RECOVERING", "WAITING_APPROVAL"].includes(task.status)).length || ""}</small></button>
         <button className={view === "settings" ? "active" : ""} onClick={() => setView("settings")}><span className="nav-glyph">⚙</span><span>配置中心</span></button>
       </nav>
       <div className="sidebar-divider" />
-      <div className="sidebar-label"><span>调查任务</span><button aria-label="新建任务" onClick={() => void openNewTask()}>＋</button></div>
+      <div className="sidebar-label"><span>{showArchived ? "已归档任务" : "调查任务"}</span><div className="sidebar-label-actions"><button className="archive-filter" aria-label={showArchived ? "返回当前任务" : "查看已归档任务"} title={showArchived ? "返回当前任务" : "查看已归档任务"} onClick={() => { setSelectedTaskId(undefined); setShowArchived((current) => !current); }}>{showArchived ? "当前" : `归档 ${tasks.filter((task) => task.archivedAt).length}`}</button>{!showArchived ? <button aria-label="新建任务" onClick={() => void openNewTask()}>＋</button> : null}</div></div>
       <div className="sidebar-tasks">
-        {tasks.map((task) => <button key={task.taskId} className={view === "tasks" && selectedTaskId === task.taskId ? "selected" : ""} onClick={() => { setSelectedTaskId(task.taskId); setView("tasks"); }}>
+        {visibleTasks.map((task) => <button key={task.taskId} className={view === "tasks" && selectedTaskId === task.taskId ? "selected" : ""} onClick={() => { setSelectedTaskId(task.taskId); setView("tasks"); }}>
           <span className={`task-dot status-${task.status.toLowerCase()}`} />
           <span className="sidebar-task-main"><strong>{task.target.host}</strong><small>{task.request}</small></span>
           <time>{formatTime(task.updatedAt).slice(6, 11)}</time>
         </button>)}
-        {tasks.length === 0 ? <span className="sidebar-empty">还没有调查任务</span> : null}
+        {visibleTasks.length === 0 ? <span className="sidebar-empty">{showArchived ? "没有已归档任务" : "还没有调查任务"}</span> : null}
       </div>
       <div className="sidebar-footer">
         <div className="connection-indicator"><span /><div><strong>LOCAL SECURE</strong><small>IPC 隔离已启用</small></div></div>
@@ -169,7 +181,9 @@ export function App() {
         ? <SettingsView profiles={profiles} {...(activeProfileId ? { activeProfileId } : {})} onProfilesChanged={reloadProfiles} notify={notify} />
         : snapshot
           ? <TaskWorkspace snapshot={snapshot} refresh={refreshSnapshot} notify={notify} {...(liveStream?.taskId === snapshot.task.taskId ? { liveStream } : {})} />
-          : <Dashboard tasks={tasks} activeProfile={activeProfile} onNewTask={() => void openNewTask()} onOpenSettings={() => setView("settings")} onSelectTask={(taskId) => setSelectedTaskId(taskId)} />}
+          : showArchived
+            ? <div className="dashboard"><EmptyState icon="▣" title="没有已归档任务" description="完成或终止的调查可以从任务详情归档；Finding、Evidence、报告与审计记录都会保留。" action={<Button onClick={() => setShowArchived(false)}>返回当前任务</Button>} /></div>
+            : <Dashboard tasks={visibleTasks} activeProfile={activeProfile} onNewTask={() => void openNewTask()} onOpenSettings={() => setView("settings")} onSelectTask={(taskId) => setSelectedTaskId(taskId)} />}
     </section>
 
     {newTaskOpen && activeProfileId ? <NewTaskLoader profileId={activeProfileId} onClose={() => setNewTaskOpen(false)} onCreated={onTaskCreated} notify={notify} /> : null}

@@ -45,6 +45,39 @@ describe("Pi Faux Provider Agent Loop", () => {
     ]);
     expect(store.listReports(task.taskId)).toMatchObject([{ version: 1 }]);
     expect(store.getTask(task.taskId)?.status).toBe("COMPLETED");
+    const findingIds = store.listFindings(task.taskId).map((finding) => finding.findingId);
+    const reportIds = store.listReports(task.taskId).map((report) => report.reportId);
+    const archived = application.archiveTask(task.taskId);
+    expect(archived.archivedAt).toBeTruthy();
+    await expect(application.generateReport(task.taskId)).rejects.toThrow(/已归档任务为只读/);
+    expect(store.listFindings(task.taskId).map((finding) => finding.findingId)).toEqual(findingIds);
+    expect(store.listReports(task.taskId).map((report) => report.reportId)).toEqual(reportIds);
+    expect(application.restoreTask(task.taskId).archivedAt).toBeUndefined();
+    expect(store.listAudit(task.taskId).map((event) => event.event)).toEqual(expect.arrayContaining([
+      "task_archived", "task_restored_from_archive",
+    ]));
+    await application.close();
+  });
+
+  it("拒绝归档活动任务和等待人工恢复的任务", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "huntwarden-archive-policy-"));
+    directories.push(directory);
+    const store = await RuntimeStore.open(directory, "runtime.db");
+    const config = testConfig(directory);
+    const faux = fauxProvider({ tokensPerSecond: 0 });
+    const models = createModels();
+    models.setProvider(faux.provider);
+    const application = new Application(config, store, models, faux.getModel());
+    const task = application.createTask({ request: "归档策略测试", mode: "SCAN", target: testTask().target });
+
+    task.status = "RUNNING";
+    store.saveTask(task);
+    expect(() => application.archiveTask(task.taskId)).toThrow(/活动任务不能归档/);
+
+    task.status = "ABORTED";
+    task.interruption = { previousStatus: "RUNNING", reason: "PROCESS_INTERRUPTED", detectedAt: new Date().toISOString(), recoveryRequired: true };
+    store.saveTask(task);
+    expect(() => application.archiveTask(task.taskId)).toThrow(/待恢复任务不能归档/);
     await application.close();
   });
 

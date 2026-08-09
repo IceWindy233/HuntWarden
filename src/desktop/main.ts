@@ -127,6 +127,8 @@ function registerIpc(): void {
     void requireBackend().startTask(taskId).catch(() => undefined);
   });
   handle(IPC.taskAbort, (_event, taskId) => requireBackend().abortTask(text(taskId, "Task ID", 64)));
+  handle(IPC.taskArchive, (_event, taskId) => requireBackend().archiveTask(text(taskId, "Task ID", 64)));
+  handle(IPC.taskRestore, (_event, taskId) => requireBackend().restoreTask(text(taskId, "Task ID", 64)));
   handle(IPC.taskRecover, (_event, taskIdValue) => {
     const taskId = text(taskIdValue, "Task ID", 64);
     void requireBackend().recoverTask(taskId).catch(() => undefined);
