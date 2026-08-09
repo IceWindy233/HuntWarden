@@ -59,7 +59,7 @@ export class ReportService {
     const validationErrors: string[] = [];
 
     try {
-      await runtime.promptWithoutTools(`调查阶段结束。禁止继续调用远程调查或处置工具。请严格依据以下结构化上下文生成完整中文 Markdown 报告，保留所有 Finding/Evidence/Action ID、审批与恢复状态以及 ERROR/NOT_CHECKED，不得发明引用。\n\n${context}`);
+      await runtime.promptWithoutTools(`分析师已确认当前调查结果并请求生成报告。禁止继续调用远程调查或处置工具。请严格依据以下结构化上下文生成完整中文 Markdown 报告，保留所有 Finding/Evidence/Action ID、审批与恢复状态以及 ERROR/NOT_CHECKED，不得发明引用。\n\n${context}`);
       markdown = runtime.lastAssistantText();
       let validation = this.validate(current.taskId, markdown);
       if (!validation.valid) {

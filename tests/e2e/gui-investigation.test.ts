@@ -68,14 +68,20 @@ async function runInvestigation(scenario: E2eFauxScenario, port: number, categor
   };
 }
 
-describe.skipIf(!enabled)("GUI 三场景只读调查与自动报告", () => {
+describe.skipIf(!enabled)("GUI 四场景只读调查与手动确认报告", () => {
   it.each([
     ["web-scan", 2222, "webshell"],
     ["java-scan", 2223, "java_memory_shell"],
     ["account-scan", 2224, "backdoor_account"],
     ["persistence-scan", 2225, "linux_persistence"],
-  ] as const)("%s 完成 Finding、Evidence 与 v1 报告", async (scenario, port, category) => {
-    const { page, snapshot: result, streamEvents } = await runInvestigation(scenario, port, category);
+  ] as const)("%s 完成 Finding、Evidence，并在确认后生成 v1 报告", async (scenario, port, category) => {
+    const { page, snapshot: investigation, streamEvents } = await runInvestigation(scenario, port, category);
+    expect(investigation.reports).toHaveLength(0);
+    expect(await page.locator(".report-pending-banner").innerText()).toContain("报告待确认");
+    page.once("dialog", async (dialog) => await dialog.accept());
+    await page.getByRole("button", { name: "确认并生成报告" }).click();
+    await expect.poll(async () => (await page.evaluate((id) => window.huntwarden.getTaskSnapshot(id), investigation.task.taskId)).reports.length, { timeout: 30_000 }).toBe(1);
+    const result = await page.evaluate((id) => window.huntwarden.getTaskSnapshot(id), investigation.task.taskId);
     expect(result.findings[0]?.category).toBe(category);
     expect(["CONFIRMED", "HIGHLY_SUSPICIOUS"]).toContain(result.findings[0]?.status);
     expect(result.evidence.length).toBeGreaterThan(0);
@@ -83,6 +89,7 @@ describe.skipIf(!enabled)("GUI 三场景只读调查与自动报告", () => {
     expect(result.actionReceipts).toHaveLength(0);
     expect(result.reports).toMatchObject([{ version: 1 }]);
     expect(result.reports[0]?.sha256).toMatch(/^[a-f0-9]{64}$/);
+    expect(result.audit.map((event) => event.event)).toContain("report_generation_requested_by_analyst");
     expect(streamEvents.some((event) => event.type === "agent_stream" && event.phase === "start")).toBe(true);
     expect(streamEvents.some((event) => event.type === "agent_stream" && event.phase === "delta" && Boolean(event.delta))).toBe(true);
     expect(streamEvents.some((event) => event.type === "agent_stream" && event.phase === "end")).toBe(true);

@@ -25,6 +25,8 @@ export function TaskWorkspace({ snapshot, refresh, notify, liveStream }: { snaps
   const { task } = snapshot;
   const archived = Boolean(task.archivedAt);
   const active = !archived && ["RUNNING", "WAITING_APPROVAL", "RECOVERING", "REPORTING"].includes(task.status);
+  const hasReports = snapshot.reports.length > 0;
+  const firstReportLabel = task.status === "COMPLETED" ? "确认并生成报告" : "生成阶段性报告";
 
   useEffect(() => { setTab("调查"); setReports(snapshot.reports); setSelectedReportId(undefined); setReport(undefined); }, [task.taskId]);
   useEffect(() => {
@@ -40,10 +42,10 @@ export function TaskWorkspace({ snapshot, refresh, notify, liveStream }: { snaps
     });
   }, [tab, task.taskId, task.updatedAt, selectedReportId]);
 
-  async function action(name: string, operation: () => Promise<unknown>, success: string): Promise<void> {
+  async function action(name: string, operation: () => Promise<unknown>, success: string): Promise<boolean> {
     setBusy(name);
-    try { await operation(); notify(success, "success"); await refresh(); }
-    catch (error) { notify(error instanceof Error ? error.message : String(error), "error"); }
+    try { await operation(); notify(success, "success"); await refresh(); return true; }
+    catch (error) { notify(error instanceof Error ? error.message : String(error), "error"); return false; }
     finally { setBusy(undefined); }
   }
 
@@ -54,8 +56,15 @@ export function TaskWorkspace({ snapshot, refresh, notify, liveStream }: { snaps
   }
 
   async function generateReport(): Promise<void> {
+    if (!hasReports) {
+      const description = task.status === "COMPLETED"
+        ? "确认基于当前 Finding、Evidence、处置与检测覆盖生成正式报告？生成后仍可创建新版本。"
+        : "当前任务未正常完成。确认生成阶段性报告？报告会保留 ERROR、NOT_CHECKED 和未完成原因。";
+      if (!window.confirm(description)) return;
+    }
     let generated: ReportRecord | undefined;
-    await action("report", async () => { generated = await window.huntwarden.generateReport(task.taskId); }, "新报告版本已生成");
+    const completed = await action("report", async () => { generated = await window.huntwarden.generateReport(task.taskId); }, hasReports ? "新报告版本已生成" : "报告已生成");
+    if (!completed || !generated) return;
     const items = await window.huntwarden.listReports(task.taskId);
     setReports(items);
     if (generated) setSelectedReportId(generated.reportId);
@@ -90,7 +99,7 @@ export function TaskWorkspace({ snapshot, refresh, notify, liveStream }: { snaps
             {task.status === "CREATED" ? <Button variant="primary" onClick={() => action("start", () => window.huntwarden.startTask(task.taskId), "任务已启动")} busy={busy === "start"}>开始调查</Button> : null}
             {active ? <Button variant="danger" onClick={() => action("abort", () => window.huntwarden.abortTask(task.taskId), "终止请求已提交")} busy={busy === "abort"}>终止</Button> : null}
             {task.interruption?.recoveryRequired ? <Button variant="primary" onClick={() => action("recover", () => window.huntwarden.recoverTask(task.taskId), "恢复流程已启动")} busy={busy === "recover"}>恢复任务</Button> : null}
-            {!active && task.status !== "CREATED" && !task.interruption?.recoveryRequired ? <Button onClick={generateReport} busy={busy === "report"}>重新生成报告</Button> : null}
+            {!active && task.status !== "CREATED" && !task.interruption?.recoveryRequired ? <Button variant={hasReports ? "secondary" : "primary"} onClick={generateReport} busy={busy === "report"}>{hasReports ? "重新生成报告" : firstReportLabel}</Button> : null}
             {!active && !task.interruption?.recoveryRequired ? <Button variant="ghost" onClick={archiveTask} busy={busy === "archive"}>归档</Button> : null}
           </>}
       </div>
@@ -98,6 +107,7 @@ export function TaskWorkspace({ snapshot, refresh, notify, liveStream }: { snaps
 
     {task.archivedAt ? <div className="archive-banner"><strong>任务已归档</strong><span>{formatTime(task.archivedAt)} · 当前为只读查看，所有取证与审计数据均保留。</span></div> : null}
     {task.interruption?.recoveryRequired ? <div className="interruption-banner"><strong>检测到任务中断</strong><span>原状态 {task.interruption.previousStatus} · {formatTime(task.interruption.detectedAt)}。旧审批已失效，恢复后会先核对远程回执。</span></div> : null}
+    {!archived && !active && task.status !== "CREATED" && !task.interruption?.recoveryRequired && !hasReports ? <div className="report-pending-banner"><strong>{task.status === "COMPLETED" ? "调查已完成，报告待确认" : "任务未正常完成，可生成阶段性报告"}</strong><span>{task.status === "COMPLETED" ? "请先复核 Finding、Evidence 与检测覆盖，再手动确认生成报告。" : "报告将明确保留未检查项、错误状态和未完成原因。"}</span></div> : null}
 
     <div className="metrics-row">
       <Metric label="轮次" value={`${task.turnCount} / 30`} tone="blue" />
@@ -115,7 +125,7 @@ export function TaskWorkspace({ snapshot, refresh, notify, liveStream }: { snaps
       {tab === "发现" ? <Findings snapshot={snapshot} /> : null}
       {tab === "证据" ? <EvidenceList snapshot={snapshot} notify={notify} /> : null}
       {tab === "审计" ? <AuditLog snapshot={snapshot} /> : null}
-      {tab === "报告" ? <ReportView taskId={task.taskId} reports={reports} selectedReportId={selectedReportId} report={report} onSelect={selectReport} onGenerate={generateReport} busy={busy === "report"} notify={notify} readOnly={archived} /> : null}
+      {tab === "报告" ? <ReportView taskId={task.taskId} reports={reports} selectedReportId={selectedReportId} report={report} onSelect={selectReport} onGenerate={generateReport} busy={busy === "report"} notify={notify} readOnly={archived} firstReportLabel={firstReportLabel} /> : null}
     </main>
 
     <div className="steering-composer"><div className="composer-orb">↗</div><Textarea value={steering} onChange={(event) => setSteering(event.target.value)} placeholder={active ? "向正在运行的 Agent 提交 Steering，例如：优先核实 JAVA Filter 的来源…" : "任务运行时可提交 Steering"} disabled={!active || task.status === "WAITING_APPROVAL"} rows={2} onKeyDown={(event) => { if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) { event.preventDefault(); void steer(); } }} /><Button variant="primary" onClick={steer} busy={busy === "steer"} disabled={!active || !steering.trim()}>提交</Button><span className="composer-hint">⌘↵</span></div>
@@ -152,8 +162,8 @@ function AuditLog({ snapshot }: { snapshot: TaskSnapshot }) {
   </div>;
 }
 
-function ReportView({ taskId, reports, selectedReportId, report, onSelect, onGenerate, busy, notify, readOnly }: { taskId: string; reports: ReportRecord[]; selectedReportId: string | undefined; report: string | undefined; onSelect: (reportId: string) => Promise<void>; onGenerate: () => Promise<void>; busy: boolean; notify: (message: string, tone?: "success" | "error" | "info") => void; readOnly: boolean }) {
-  if (!report) return <EmptyState icon="▤" title="尚未生成报告" description="报告将校验所有 Finding/Evidence 引用，失败时自动修复一次并回退确定性模板。" action={readOnly ? undefined : <Button variant="primary" onClick={onGenerate} busy={busy}>生成 Markdown 报告</Button>} />;
+function ReportView({ taskId, reports, selectedReportId, report, onSelect, onGenerate, busy, notify, readOnly, firstReportLabel }: { taskId: string; reports: ReportRecord[]; selectedReportId: string | undefined; report: string | undefined; onSelect: (reportId: string) => Promise<void>; onGenerate: () => Promise<void>; busy: boolean; notify: (message: string, tone?: "success" | "error" | "info") => void; readOnly: boolean; firstReportLabel: string }) {
+  if (!report) return <EmptyState icon="▤" title="尚未生成报告" description="请先复核调查结果。确认后，报告会校验所有 Finding/Evidence 引用，失败时自动修复一次并回退确定性模板。" action={readOnly ? undefined : <Button variant="primary" onClick={onGenerate} busy={busy}>{firstReportLabel}</Button>} />;
   const selected = reports.find((item) => item.reportId === selectedReportId) ?? reports.at(-1);
   return <div className="report-view"><div className="report-toolbar"><span>Markdown · {taskId}</span><div className="report-version-controls"><select aria-label="报告版本" value={selected?.reportId ?? ""} onChange={(event) => void onSelect(event.target.value)}>{reports.map((item) => <option value={item.reportId} key={item.reportId}>v{item.version} · {item.generationMode}</option>)}</select>{readOnly ? null : <Button variant="ghost" onClick={onGenerate} busy={busy}>重新生成</Button>}<Button variant="ghost" onClick={async () => { try { await window.huntwarden.revealReport({ taskId, ...(selected ? { reportId: selected.reportId } : {}) }); } catch (error) { notify(error instanceof Error ? error.message : String(error), "error"); } }}>在 Finder 显示</Button></div></div>{selected ? <div className="report-meta"><span>SHA-256 {shortId(selected.sha256)}</span><span>{formatTime(selected.createdAt)}</span>{selected.validationErrors.length ? <span>自动修复记录 {selected.validationErrors.length}</span> : null}</div> : null}<pre>{report}</pre></div>;
 }

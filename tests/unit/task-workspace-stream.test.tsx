@@ -63,4 +63,33 @@ describe("TaskWorkspace Agent 流式预览", () => {
     await waitFor(() => expect(restoreTask).toHaveBeenCalledWith(task.taskId));
     confirm.mockRestore();
   });
+
+  it("调查完成后必须由分析师确认才生成首版报告", async () => {
+    const task = { ...testTask(), status: "COMPLETED" as const };
+    const report = {
+      reportId: "REPORT-1", taskId: task.taskId, version: 1, path: "/tmp/v0001.md",
+      sha256: "a".repeat(64), generationMode: "FALLBACK" as const, validationErrors: [], createdAt: new Date().toISOString(),
+    };
+    const generateReport = vi.fn(async () => report);
+    Object.defineProperty(window, "huntwarden", { configurable: true, value: {
+      generateReport,
+      listReports: vi.fn(async () => [report]),
+      readReport: vi.fn(async () => ({ report, markdown: "# 报告" })),
+    } });
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
+    const snapshot: TaskSnapshot = {
+      task,
+      findings: [], evidence: [], approvals: [], actionReceipts: [], reports: [], audit: [],
+      conversation: [], toolRuns: [],
+    };
+    render(<TaskWorkspace snapshot={snapshot} refresh={vi.fn(async () => undefined)} notify={vi.fn()} />);
+
+    expect(screen.getByText("调查已完成，报告待确认")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "确认并生成报告" }));
+    expect(generateReport).not.toHaveBeenCalled();
+    confirm.mockReturnValue(true);
+    fireEvent.click(screen.getByRole("button", { name: "确认并生成报告" }));
+    await waitFor(() => expect(generateReport).toHaveBeenCalledWith(task.taskId));
+    confirm.mockRestore();
+  });
 });

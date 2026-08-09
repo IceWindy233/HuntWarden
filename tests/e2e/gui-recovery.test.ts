@@ -1,7 +1,8 @@
-import { execFile } from "node:child_process";
+import { execFile, type ChildProcess } from "node:child_process";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { promisify } from "node:util";
 import { _electron as electron, type ElectronApplication, type Page } from "@playwright/test";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -11,6 +12,7 @@ const enabled = process.env.HUNTWARDEN_GUI_RECOVERY_TESTS === "1";
 const projectRoot = resolve(".");
 const run = promisify(execFile);
 const applications: ElectronApplication[] = [];
+const applicationProcesses = new WeakMap<ElectronApplication, ChildProcess>();
 const temporaryDirectories: string[] = [];
 declare const window: { huntwarden: HuntWardenDesktopApi };
 
@@ -34,6 +36,7 @@ async function launch(userDataDir: string, crashAt?: string): Promise<{ app: Ele
     }, timeout: 30_000,
   });
   applications.push(app);
+  applicationProcesses.set(app, app.process());
   const page = await app.firstWindow({ timeout: 30_000 });
   await page.waitForLoadState("domcontentloaded");
   return { app, page };
@@ -62,17 +65,39 @@ async function createAndStart(page: Page): Promise<string> {
   const taskButton = page.locator(".sidebar-tasks button", { hasText: "崩溃恢复" });
   await taskButton.waitFor({ state: "visible", timeout: 10_000 });
   await taskButton.click();
-  await page.evaluate((taskId) => window.huntwarden.startTask(taskId), task.taskId);
+  await page.evaluate((taskId) => window.huntwarden.startTask(taskId), task.taskId).catch((error: unknown) => {
+    if (!String(error).includes("Target page, context or browser has been closed")) throw error;
+  });
   return task.taskId;
 }
 
 async function waitForExit(app: ElectronApplication): Promise<void> {
-  if (app.process().exitCode !== null) return;
-  await new Promise<void>((resolveExit) => app.process().once("exit", () => resolveExit()));
+  const childProcess = applicationProcesses.get(app);
+  if (!childProcess) throw new Error("Electron 子进程句柄缺失");
+  if (childProcess.exitCode !== null || childProcess.signalCode !== null) return;
+  await new Promise<void>((resolveExit) => childProcess.once("exit", () => resolveExit()));
 }
 
 async function snapshot(page: Page, taskId: string): Promise<TaskSnapshot> {
   return await page.evaluate((id) => window.huntwarden.getTaskSnapshot(id), taskId);
+}
+
+function persistedTaskState(userDataDir: string, taskId: string): { status?: string; audits: string[]; toolRuns: string[]; receipts: string[] } {
+  const database = new DatabaseSync(join(userDataDir, "runtime", "runtime.db"), { readOnly: true });
+  try {
+    const row = database.prepare("SELECT status FROM tasks WHERE task_id=?").get(taskId) as { status?: string } | undefined;
+    const audits = database.prepare("SELECT event FROM audit_events WHERE task_id=? ORDER BY seq").all(taskId) as unknown as { event: string }[];
+    const toolRuns = database.prepare("SELECT tool_name,status FROM tool_runs WHERE task_id=? ORDER BY started_at").all(taskId) as unknown as { tool_name: string; status: string }[];
+    const receipts = database.prepare("SELECT status FROM action_receipts WHERE task_id=? ORDER BY updated_at").all(taskId) as unknown as { status: string }[];
+    return {
+      ...(row?.status ? { status: row.status } : {}),
+      audits: audits.map((item) => item.event),
+      toolRuns: toolRuns.map((item) => `${item.tool_name}:${item.status}`),
+      receipts: receipts.map((item) => item.status),
+    };
+  } finally {
+    database.close();
+  }
 }
 
 async function relaunchAndRecover(userDataDir: string, taskId: string, decision: "deny" | "approve" | "none"): Promise<{ page: Page; completed: TaskSnapshot }> {
@@ -110,7 +135,7 @@ describe.skipIf(!enabled)("GUI 进程级崩溃恢复", () => {
       await waitForExit(app);
       const { completed } = await relaunchAndRecover(userDataDir, taskId, "deny");
       expect(new Set(completed.evidence.map((item) => item.evidenceId)).size).toBe(completed.evidence.length);
-      expect(completed.reports).toHaveLength(1);
+      expect(completed.reports).toHaveLength(0);
       expect(completed.task.interruption?.recoveryRequired).toBe(false);
     }, 180_000);
   }
@@ -124,6 +149,9 @@ describe.skipIf(!enabled)("GUI 进程级崩溃恢复", () => {
     await page.getByRole("button", { name: "批准一次" }).click();
     await page.getByRole("button", { name: "确认执行" }).click();
     await waitForExit(app);
+    expect(applicationProcesses.get(app)?.signalCode).toBe("SIGKILL");
+    const crashedState = persistedTaskState(userDataDir, taskId);
+    expect(["RUNNING", "WAITING_APPROVAL"], JSON.stringify(crashedState)).toContain(crashedState.status);
     const { completed } = await relaunchAndRecover(userDataDir, taskId, "none");
     expect(completed.actionReceipts).toMatchObject([{ tool: "quarantine_file", status: "SUCCEEDED" }]);
     expect(completed.approvals.filter((item) => item.tool === "quarantine_file")).toHaveLength(1);
@@ -138,6 +166,11 @@ describe.skipIf(!enabled)("GUI 进程级崩溃恢复", () => {
     const taskId = await createAndStart(page);
     await page.getByRole("heading", { name: "高风险写操作审批" }).waitFor({ state: "visible", timeout: 30_000 });
     await page.getByRole("button", { name: "拒绝", exact: true }).click();
+    await expect.poll(async () => (await snapshot(page, taskId)).task.status, { timeout: 30_000 }).toBe("COMPLETED");
+    expect((await snapshot(page, taskId)).reports).toHaveLength(0);
+    await page.evaluate((id) => window.huntwarden.generateReport(id), taskId).catch((error: unknown) => {
+      if (!String(error).includes("Target page, context or browser has been closed")) throw error;
+    });
     await waitForExit(app);
     const { page: recoveredPage, completed } = await relaunchAndRecover(userDataDir, taskId, "none");
     const toolCount = completed.toolRuns.length;

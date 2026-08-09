@@ -4,7 +4,7 @@
 
 - 进程启动时把遗留的活动状态转换为 `ABORTED + recoveryRequired`，保留原状态与中断时间，并使旧的 `PENDING/APPROVED` 审批过期。
 - 恢复必须由分析师在 GUI 中触发。SAFE 工具按原 `toolCallId` 重放；NEVER 工具先查询远端 `actionId` 回执，状态未知时重新审批。
-- 调查结束自动生成不可变 Markdown 报告。路径为 `reports/<taskId>/vNNNN.md`，SQLite `reports` 表保存版本、哈希、模式与校验错误。
+- 调查结束后先停在 `COMPLETED`，由分析师复核 Finding、Evidence 与检测覆盖并手动确认生成不可变 Markdown 报告。路径为 `reports/<taskId>/vNNNN.md`，SQLite `reports` 表保存版本、哈希、模式与校验错误；仅已手动发起的 `REPORTING` 中断会在恢复时续完报告。
 - 报告生成失败或引用校验失败时使用确定性模板；旧 `${taskId}.md` 文件仅懒导入，不覆盖原文件。
 - `tests/e2e/gui-recovery.test.ts` 在六个持久化边界强制退出 Electron，并使用同一 `userData` 重启验证。
 

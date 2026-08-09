@@ -109,6 +109,10 @@ export class SecurityAgentRuntime extends EventEmitter {
     const messages = this.agent.state.messages;
     const last = messages.at(-1);
     if (last?.role === "user" || last?.role === "toolResult") await this.agent.continue();
+    const completed = this.options.store.getTask(this.options.task.taskId) ?? this.options.task;
+    completed.status = "COMPLETED";
+    if (completed.interruption) completed.interruption.recoveryRequired = false;
+    this.options.store.saveTask(completed);
     this.options.store.appendAudit({ taskId: this.options.task.taskId, event: "recovery_completed", level: "info", data: {} });
   }
 

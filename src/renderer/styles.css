@@ -147,6 +147,8 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .interruption-banner span { color: var(--muted); }
 .archive-banner { display: flex; align-items: center; gap: 14px; padding: 10px 27px; border-bottom: 1px solid rgba(117, 137, 230, .25); background: rgba(117, 137, 230, .08); color: #aebcff; font-size: 9px; }
 .archive-banner span { color: var(--muted); }
+.report-pending-banner { display: flex; align-items: center; gap: 14px; padding: 10px 27px; border-bottom: 1px solid rgba(57, 212, 221, .22); background: rgba(57, 212, 221, .065); color: var(--cyan); font-size: 9px; }
+.report-pending-banner span { color: var(--muted); }
 .target-line { display: flex; gap: 8px; align-items: center; }
 .target-host { color: #e9f6f8; font: 700 15px ui-monospace, SFMono-Regular, Menlo, monospace; }
 .target-user { margin-right: 6px; color: var(--muted); font: 10px ui-monospace, monospace; }

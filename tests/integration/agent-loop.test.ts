@@ -20,7 +20,7 @@ const directories: string[] = [];
 afterEach(async () => { await Promise.all(directories.splice(0).map((path) => rm(path, { recursive: true, force: true }))); });
 
 describe("Pi Faux Provider Agent Loop", () => {
-  it("四类联合任务均固化 FindingStatus 并自动生成版本报告", async () => {
+  it("四类联合任务先固化 FindingStatus，再由分析师手动生成版本报告", async () => {
     const directory = await mkdtemp(join(tmpdir(), "huntwarden-four-checks-"));
     directories.push(directory);
     const store = await RuntimeStore.open(directory, "runtime.db");
@@ -43,8 +43,13 @@ describe("Pi Faux Provider Agent Loop", () => {
     expect(store.listFindings(task.taskId).map((finding) => [finding.category, finding.status])).toEqual([
       ["webshell", "NO_FINDING"], ["java_memory_shell", "NO_FINDING"], ["backdoor_account", "NO_FINDING"], ["linux_persistence", "SUSPICIOUS"],
     ]);
+    expect(store.listReports(task.taskId)).toHaveLength(0);
+    expect(store.getTask(task.taskId)?.status).toBe("COMPLETED");
+    const generated = await application.generateReport(task.taskId);
+    expect(generated.version).toBe(1);
     expect(store.listReports(task.taskId)).toMatchObject([{ version: 1 }]);
     expect(store.getTask(task.taskId)?.status).toBe("COMPLETED");
+    expect(store.listAudit(task.taskId).map((event) => event.event)).toContain("report_generation_requested_by_analyst");
     const findingIds = store.listFindings(task.taskId).map((finding) => finding.findingId);
     const reportIds = store.listReports(task.taskId).map((report) => report.reportId);
     const archived = application.archiveTask(task.taskId);
@@ -173,6 +178,7 @@ describe("Pi Faux Provider Agent Loop", () => {
     await runtime.recover();
     expect(store.listFindings(task.taskId)).toHaveLength(1);
     expect(store.getToolRun(call.id)?.status).toBe("SUCCEEDED");
+    expect(store.getTask(task.taskId)?.status).toBe("COMPLETED");
     store.close();
   });
 
@@ -208,6 +214,7 @@ describe("Pi Faux Provider Agent Loop", () => {
     const runtime = new SecurityAgentRuntime({ task, config, store, executor, approvals, tools: [writeTool], models, model: faux.getModel() });
     await runtime.recover();
     expect(writes).toBe(0);
+    expect(store.getTask(task.taskId)?.status).toBe("COMPLETED");
     expect(executor.calls).toEqual([{ operation: "get_action_receipt", params: { actionId: ticket.actionId } }]);
     expect(store.getToolRun(call.id)?.status).toBe("SUCCEEDED");
     expect(store.getActionReceipt(ticket.actionId)?.status).toBe("SUCCEEDED");

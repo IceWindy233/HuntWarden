@@ -20,7 +20,7 @@ HuntWarden（猎卫）是面向安全分析师的 AI 主机安全调查与受控
 - Tomcat 运行时 Filter/Servlet/Listener 枚举、ClassLoader/CodeSource/ProtectionDomain、磁盘来源和只读 Class Dump；不清除、不重定义、不重启 JVM。
 - 特权账户、账户状态、SSH Key 指纹、登录历史和受控账户禁用。
 - Cron、systemd、SSH Authorized Keys、Shell 启动项，以及基于不透明引用的进程和网络关联调查；仅提供 READ/COLLECT 工具。
-- 不可变版本化中文 Markdown 报告、ID 引用校验、一次模型修复和确定性回退模板；支持历史版本切换与 Finder 定位。
+- 由分析师确认后手动生成的不可变版本化中文 Markdown 报告、ID 引用校验、一次模型修复和确定性回退模板；支持历史版本切换与 Finder 定位。
 - 四套无害 Docker Lab 与 Pi Faux Provider 可重复 Agent 测试。
 
 ## 环境

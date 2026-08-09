@@ -91,7 +91,6 @@ export class Application extends EventEmitter {
     this.assertNotArchived(task);
     const runtime = this.runtimeFor(task);
     await runtime.prompt(task.request);
-    await this.reports.generate(this.requireTask(taskId), runtime);
     this.emit("changed", taskId);
   }
 
@@ -100,8 +99,8 @@ export class Application extends EventEmitter {
     this.assertNotArchived(task);
     if (!task.interruption?.recoveryRequired) throw new InvalidArgumentError("任务没有需要处理的中断状态");
     const runtime = this.runtimeFor(task);
-    if (task.interruption.previousStatus !== "REPORTING") await runtime.recover();
-    await this.reports.generate(this.requireTask(taskId), runtime);
+    if (task.interruption.previousStatus === "REPORTING") await this.reports.generate(this.requireTask(taskId), runtime);
+    else await runtime.recover();
     this.emit("changed", taskId);
   }
 
@@ -157,6 +156,11 @@ export class Application extends EventEmitter {
   async generateReport(taskId: string): Promise<ReportRecord> {
     const task = this.requireTask(taskId);
     this.assertNotArchived(task);
+    if (["CREATED", "RUNNING", "WAITING_APPROVAL", "RECOVERING", "REPORTING"].includes(task.status)) {
+      throw new InvalidArgumentError("调查尚未结束，不能生成报告");
+    }
+    if (task.interruption?.recoveryRequired) throw new InvalidArgumentError("任务需要先完成恢复，才能生成报告");
+    this.store.appendAudit({ taskId, event: "report_generation_requested_by_analyst", level: "info", data: { existingVersions: this.store.listReports(taskId).length } });
     const report = await this.reports.generate(task, this.runtimeFor(task));
     this.emit("changed", taskId);
     return report;

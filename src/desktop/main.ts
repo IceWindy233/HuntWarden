@@ -309,7 +309,7 @@ async function bootstrapDesktop(): Promise<void> {
       if (fired || name !== crashAt) return;
       fired = true;
       diagnostic(`E2E crash checkpoint reached: ${name}`);
-      process.exit(86);
+      process.kill(process.pid, "SIGKILL");
     };
   }
   backend = new DesktopBackend({

@@ -132,8 +132,7 @@ export function App({ application, initialTask, autoStart = false }: AppProps) {
       void application.runtimeFor(current).recover().then(() => setStatus("恢复完成")).catch((error) => setStatus(`恢复失败: ${error instanceof Error ? error.message : String(error)}`));
     }
     if (value === "g" && current) {
-      const runtime = application.runtimeFor(current);
-      void application.reports.generate(current, runtime).then((report) => setStatus(`报告已保存: ${report.path}`)).catch((error) => setStatus(`报告失败: ${error instanceof Error ? error.message : String(error)}`));
+      void application.generateReport(current.taskId).then((report) => setStatus(`报告已保存: ${report.path}`)).catch((error) => setStatus(`报告失败: ${error instanceof Error ? error.message : String(error)}`));
     }
   });
 
