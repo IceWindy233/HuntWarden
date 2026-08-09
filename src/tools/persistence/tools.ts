@@ -6,7 +6,7 @@ import { createReference, requireReference } from "../reference-utils.js";
 import { createSecurityTool } from "../tool-factory.js";
 
 interface PersistenceValue {
-  kind: "cron" | "systemd" | "ssh" | "shell";
+  kind: "cron" | "systemd" | "ssh" | "shell" | "extended";
   path: string;
   sha256: string;
   username?: string;
@@ -16,7 +16,7 @@ interface PersistenceValue {
   [key: string]: unknown;
 }
 
-interface ProcessValue { pid: number; command?: string; executable?: string; [key: string]: unknown }
+interface ProcessValue { bootId?: string; pid: number; startTicks?: string; exeInode?: string; exeSha256?: string; command?: string; executable?: string; [key: string]: unknown }
 
 const persistenceRefSchema = Type.String({ pattern: "^PERSIST-" });
 const processRefSchema = Type.String({ pattern: "^PROC-" });
@@ -24,7 +24,7 @@ const processRefSchema = Type.String({ pattern: "^PROC-" });
 export function createPersistenceTools(deps: ToolDependencies): SecurityToolDefinition[] {
   const common = [deps.store, deps.task.taskId, deps.config.llmData.maxTextBytes] as const;
   const listTool = (
-    name: "list_cron_entries" | "list_systemd_units" | "list_ssh_persistence" | "list_shell_startup_files",
+    name: "list_cron_entries" | "list_systemd_units" | "list_extended_persistence" | "list_ssh_persistence" | "list_shell_startup_files",
     label: string,
     description: string,
     operation: HostOperation,
@@ -58,6 +58,7 @@ export function createPersistenceTools(deps: ToolDependencies): SecurityToolDefi
   return [
     listTool("list_cron_entries", "枚举 Cron 持久化", "枚举系统和用户 Cron（MITRE T1053.003），返回只属于当前任务的 persistenceRef。", "list_cron_entries"),
     listTool("list_systemd_units", "枚举 systemd 持久化", "枚举 system/user service 与 timer（MITRE T1543.002）、启用链接和 ExecStart；管理器缺失时返回 PARTIAL。", "list_systemd_units"),
+    listTool("list_extended_persistence", "枚举扩展持久化", "枚举 at/anacron、SysV/rc.local、XDG、PAM、udev、modprobe、cloud-init、包管理 Hook 与 user linger。", "list_extended_persistence"),
     listTool("list_ssh_persistence", "枚举 SSH Key 持久化", "检查有效 sshd 配置与交互账户 Key 指纹（MITRE T1098.004）；不返回完整公钥。", "list_ssh_persistence"),
     listTool("list_shell_startup_files", "枚举 Shell 启动项", "检查系统及用户 Shell 启动文件（MITRE T1546.004）的权限、哈希和危险执行特征。", "list_shell_startup_files"),
     createSecurityTool(...common, {
@@ -105,7 +106,12 @@ export function createPersistenceTools(deps: ToolDependencies): SecurityToolDefi
       risk: "READ", replayPolicy: "SAFE", timeoutMs: 30_000, auditEvent: "process_connections_listed",
       run: async (toolCallId, params, signal): Promise<SecurityToolResult> => {
         const process = requireReference<ProcessValue>(deps.store, deps.task.taskId, params.processRef, "process");
-        const output = await deps.executor.invoke({ operation: "list_process_connections", params: { pid: process.value.pid, maxConnections: deps.config.persistence.maxConnections } }, signal);
+        const stable = process.value.bootId && process.value.startTicks && process.value.exeInode && process.value.exeSha256
+          ? { bootId: process.value.bootId, startTicks: process.value.startTicks, exeInode: process.value.exeInode, exeSha256: process.value.exeSha256 }
+          : {};
+        const output = await deps.executor.invoke({ operation: "list_process_connections", params: {
+          pid: process.value.pid, ...stable, maxConnections: deps.config.persistence.maxConnections,
+        } }, signal);
         const warnings = Array.isArray(output.warnings) ? output.warnings : [];
         const evidence = deps.evidence.putStructured({ taskId: deps.task.taskId, host: deps.task.target.host, type: "process_connections",
           source: `PID:${process.value.pid}`, tool: "list_process_connections", toolCallId,

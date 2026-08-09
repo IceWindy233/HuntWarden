@@ -112,11 +112,14 @@ export interface HostOperationMap {
   };
   search_class_on_disk: { input: { pid: number; className: string }; output: Record<string, unknown> };
   list_privileged_accounts: { input: Record<string, never>; output: Record<string, unknown>[] };
+  inspect_privilege_delegation: { input: { maxItems: number }; output: PartialItemsOutput };
   inspect_account: { input: { username: string }; output: Record<string, unknown> };
+  inspect_ssh_trust_configuration: { input: Record<string, never>; output: PartialItemsOutput & { effective: Record<string, unknown>; trustFiles: Record<string, unknown>[] } };
   inspect_authorized_keys: { input: { username: string }; output: Record<string, unknown>[] };
   get_login_history: { input: { username: string; maxEntries: number }; output: Record<string, unknown>[] };
   list_cron_entries: { input: { maxItems: number; includeUserScope: boolean }; output: { items: Record<string, unknown>[]; partial: boolean; warnings: string[] } };
   list_systemd_units: { input: { maxItems: number; includeUserScope: boolean }; output: { items: Record<string, unknown>[]; partial: boolean; warnings: string[] } };
+  list_extended_persistence: { input: { maxItems: number; includeUserScope: boolean }; output: { items: Record<string, unknown>[]; partial: boolean; warnings: string[] } };
   list_ssh_persistence: { input: { maxItems: number; includeUserScope: boolean }; output: { items: Record<string, unknown>[]; partial: boolean; warnings: string[]; sshdConfig: Record<string, unknown> } };
   list_shell_startup_files: { input: { maxItems: number; includeUserScope: boolean }; output: { items: Record<string, unknown>[]; partial: boolean; warnings: string[] } };
   inspect_persistence_item: { input: { kind: string; path: string; username?: string; expectedSha256?: string }; output: Record<string, unknown> };

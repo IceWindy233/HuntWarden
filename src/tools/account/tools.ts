@@ -9,7 +9,7 @@ interface AccountValue { username: string; uid: number; [key: string]: unknown }
 export function createAccountTools(deps: ToolDependencies): SecurityToolDefinition[] {
   const common = [deps.store, deps.task.taskId, deps.config.llmData.maxTextBytes] as const;
   const accountRef = Type.String({ pattern: "^ACCT-" });
-  return [
+  const tools: SecurityToolDefinition[] = [
     createSecurityTool(...common, {
       name: "list_privileged_accounts", label: "列出特权账户",
       description: "列出 UID 0、sudo/wheel 及异常低 UID 交互账户并返回 accountRef。Linux 后门账户调查应先调用。",
@@ -20,6 +20,33 @@ export function createAccountTools(deps: ToolDependencies): SecurityToolDefiniti
         const refs = accounts.map((value) => createReference(deps.store, deps.task.taskId, "account", "account", value));
         const evidence = deps.evidence.putStructured({ taskId: deps.task.taskId, host: deps.task.target.host, type: "privileged_accounts", source: "/etc/passwd + group database", tool: "list_privileged_accounts", toolCallId, metadata: { accounts: refs.map(({ ref, value }) => ({ accountRef: ref, ...value })) } });
         return { status: "success", summary: { count: refs.length, evidenceId: evidence.evidenceId }, items: refs.map(({ ref, value }) => ({ accountRef: ref, ...value })), artifactRefs: [...refs.map((v) => v.ref), evidence.evidenceId], warnings: [] };
+      },
+    }),
+    createSecurityTool(...common, {
+      name: "inspect_privilege_delegation", label: "检查权限委派配置",
+      description: "检查固定范围的 sudoers/sudoers.d、doas 与 polkit 配置、权限和危险委派信号，不接受路径参数。",
+      parameters: Type.Object({}, { additionalProperties: false }),
+      risk: "READ", replayPolicy: "SAFE", timeoutMs: 45_000, auditEvent: "privilege_delegation_inspected",
+      run: async (toolCallId, _params, signal): Promise<SecurityToolResult> => {
+        const output = await deps.executor.invoke({ operation: "inspect_privilege_delegation", params: { maxItems: 5000 } }, signal);
+        const evidence = deps.evidence.putStructured({ taskId: deps.task.taskId, host: deps.task.target.host, type: "privilege_delegation",
+          source: "fixed sudo/doas/polkit scope", tool: "inspect_privilege_delegation", toolCallId, metadata: { ...output } });
+        return { status: output.partial ? "partial" : "success", summary: { items: output.items.length, evidenceId: evidence.evidenceId },
+          items: output.items, artifactRefs: [evidence.evidenceId], warnings: output.warnings };
+      },
+    }),
+    createSecurityTool(...common, {
+      name: "inspect_ssh_trust_configuration", label: "检查 SSH 信任配置",
+      description: "检查有效 sshd Include/Match、AuthorizedKeysCommand、SSH CA、principals 和 revoked keys；不返回完整 Key。",
+      parameters: Type.Object({}, { additionalProperties: false }),
+      risk: "READ", replayPolicy: "SAFE", timeoutMs: 45_000, auditEvent: "ssh_trust_configuration_inspected",
+      run: async (toolCallId, _params, signal): Promise<SecurityToolResult> => {
+        const output = await deps.executor.invoke({ operation: "inspect_ssh_trust_configuration", params: {} }, signal);
+        const evidence = deps.evidence.putStructured({ taskId: deps.task.taskId, host: deps.task.target.host, type: "ssh_trust_configuration",
+          source: "/etc/ssh fixed scope + sshd -T", tool: "inspect_ssh_trust_configuration", toolCallId, metadata: { ...output } });
+        return { status: output.partial ? "partial" : "success",
+          summary: { configFiles: output.items.length, trustFiles: output.trustFiles.length, effective: output.effective, evidenceId: evidence.evidenceId },
+          items: [...output.items, ...output.trustFiles], artifactRefs: [evidence.evidenceId], warnings: output.warnings };
       },
     }),
     createSecurityTool(...common, {
@@ -59,4 +86,7 @@ export function createAccountTools(deps: ToolDependencies): SecurityToolDefiniti
       },
     }),
   ];
+  return tools.filter((tool) =>
+    (tool.name !== "inspect_authorized_keys" || deps.config.account.checkAuthorizedKeys)
+    && (tool.name !== "get_login_history" || deps.config.account.checkLoginHistory));
 }

@@ -45,6 +45,7 @@ export interface ScanPlannerOptions {
   store: RuntimeStore;
   tools: SecurityToolDefinition[];
   maxLlmBytes: number;
+  accountChecks?: { checkAuthorizedKeys: boolean; checkLoginHistory: boolean };
 }
 
 function errorMessage(error: unknown): string {
@@ -134,6 +135,8 @@ export class ScanPlanner {
     for (const definition of selectedCheckDefinitions(task.checks)) {
       const categoryOutcomes: ScanStepOutcome[] = [];
       for (const step of definition.minimumExecutionGraph) {
+        if ((step.toolName === "inspect_authorized_keys" && this.options.accountChecks?.checkAuthorizedKeys === false)
+          || (step.toolName === "get_login_history" && this.options.accountChecks?.checkLoginHistory === false)) continue;
         minimumToolNames.add(step.toolName);
         const dependencyFailed = step.dependsOn?.some((dependency) => outcomes.some((outcome) =>
           outcome.stepId === dependency && (outcome.status === "error" || outcome.status === "partial"),

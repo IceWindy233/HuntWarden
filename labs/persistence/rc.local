@@ -1,0 +1,4 @@
+#!/bin/sh
+# Inert extended-persistence fixture. It intentionally performs no action.
+python3 /opt/huntwarden-lab/listener.py --lab-marker
+exit 0

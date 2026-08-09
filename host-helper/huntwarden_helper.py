@@ -44,12 +44,16 @@ SCRIPT_EXTENSIONS = {
 WEB_TEMP_ROOTS = tuple(pathlib.Path(value) for value in ("/tmp", "/var/tmp", "/dev/shm"))
 USERNAME = re.compile(r"^[a-z_][a-z0-9_-]{0,31}$", re.I)
 CLASS_NAME = re.compile(r"^[A-Za-z_$][A-Za-z0-9_$.]{0,511}$")
-PERSISTENCE_KINDS = {"cron", "systemd", "ssh", "shell"}
+PERSISTENCE_KINDS = {"cron", "systemd", "ssh", "shell", "extended"}
 SYSTEM_PERSISTENCE_ROOTS = {
     "cron": ("/etc/crontab", "/etc/cron.d", "/etc/cron.hourly", "/etc/cron.daily", "/etc/cron.weekly", "/etc/cron.monthly", "/var/spool/cron"),
-    "systemd": ("/etc/systemd", "/usr/lib/systemd", "/lib/systemd"),
+    "systemd": ("/etc/systemd", "/usr/lib/systemd", "/lib/systemd", "/run/systemd/system", "/run/systemd/transient",
+                "/run/systemd/generator", "/run/systemd/generator.early", "/run/systemd/generator.late"),
     "ssh": ("/etc/ssh",),
     "shell": ("/etc/profile", "/etc/bash.bashrc", "/etc/zsh", "/etc/profile.d"),
+    "extended": ("/etc/anacrontab", "/var/spool/at", "/var/spool/cron/atjobs", "/etc/init.d", "/etc/rc.local",
+                 "/etc/xdg/autostart", "/etc/pam.d", "/etc/udev/rules.d", "/etc/modprobe.d", "/etc/modules-load.d",
+                 "/etc/cloud", "/etc/apt/apt.conf.d", "/etc/yum/pluginconf.d", "/etc/dnf/plugins", "/var/lib/systemd/linger"),
 }
 TRIAGE_ROOTS = tuple(pathlib.Path(value) for value in (
     "/bin", "/sbin", "/usr/bin", "/usr/sbin", "/usr/local/bin", "/usr/local/sbin",
@@ -1007,13 +1011,57 @@ def list_privileged_accounts(_: dict[str, Any]) -> list[dict[str, Any]]:
             fields = result.stdout.strip().split(":")
             if len(fields) >= 4:
                 sudo_users.update(filter(None, fields[3].split(",")))
+    local_accounts: set[str] = set()
+    try:
+        with pathlib.Path("/etc/passwd").open("r", encoding="utf-8", errors="replace") as handle:
+            local_accounts.update(line.split(":", 1)[0] for line in handle if ":" in line)
+    except OSError:
+        pass
     rows = []
     for account in pwd.getpwall():
         privileged = account.pw_uid == 0 or account.pw_name in sudo_users
         interactive = account.pw_shell not in {"/usr/sbin/nologin", "/sbin/nologin", "/bin/false", ""}
         if privileged or (account.pw_uid < 1000 and interactive):
-            rows.append({"username": account.pw_name, "uid": account.pw_uid, "gid": account.pw_gid, "shell": account.pw_shell, "home": account.pw_dir, "sudo": account.pw_name in sudo_users, "interactive": interactive})
+            rows.append({"username": account.pw_name, "uid": account.pw_uid, "gid": account.pw_gid, "shell": account.pw_shell, "home": account.pw_dir,
+                         "sudo": account.pw_name in sudo_users, "interactive": interactive,
+                         "accountSource": "local" if account.pw_name in local_accounts else "nss_directory"})
     return rows
+
+
+def inspect_privilege_delegation(request: dict[str, Any]) -> dict[str, Any]:
+    maximum = safe_int(request.get("maxItems"), 1, 5000, "maxItems")
+    candidates: list[tuple[str, pathlib.Path]] = [("sudoers", pathlib.Path("/etc/sudoers")), ("doas", pathlib.Path("/etc/doas.conf"))]
+    for root, kind, pattern in ((pathlib.Path("/etc/sudoers.d"), "sudoers", "*"),
+                                (pathlib.Path("/etc/polkit-1/rules.d"), "polkit", "*.rules"),
+                                (pathlib.Path("/etc/polkit-1/localauthority"), "polkit", "*.pkla")):
+        if root.is_dir():
+            candidates.extend((kind, path) for path in root.rglob(pattern) if path.is_file() and not path.is_symlink())
+    items: list[dict[str, Any]] = []
+    warnings: list[str] = []
+    seen: set[str] = set()
+    for kind, path in candidates:
+        if not path.is_file() or path.is_symlink():
+            continue
+        try:
+            resolved = path.resolve()
+            if str(resolved) in seen:
+                continue
+            seen.add(str(resolved))
+            text = text_file(resolved, 1024 * 1024)
+            directives = [redact_secret_text(line.strip(), 4096) for line in text.splitlines()
+                          if line.strip() and not line.lstrip().startswith(("#", "//"))][:500]
+            items.append({**file_facts(resolved), "kind": kind, "directives": directives,
+                          "signals": [name for name, expression in {
+                              "passwordless": r"\bNOPASSWD\b|\bnopass\b", "wildcard_command": r"\sALL\s*$|\*",
+                              "shell_command": r"/(?:ba|z|da)?sh\b", "polkit_allow": r"YES|ALLOW|Result\.YES",
+                          }.items() if re.search(expression, text, re.I)]})
+        except PermissionError:
+            warnings.append(f"无权读取权限委派配置: {path}")
+        except OSError:
+            warnings.append(f"无法读取权限委派配置: {path}")
+        if len(items) >= maximum:
+            return {"items": items, "partial": True, "warnings": warnings + ["权限委派配置达到上限"]}
+    return {"items": items, "partial": bool(warnings), "warnings": warnings[:200]}
 
 
 def inspect_account(request: dict[str, Any]) -> dict[str, Any]:
@@ -1134,6 +1182,8 @@ def parse_systemd_unit(path: pathlib.Path) -> dict[str, Any]:
         "unitType": path.suffix.lstrip("."), "execStart": exec_start,
         "runAs": (values.get("Service.User") or ["root"])[-1],
         "wantedBy": values.get("Install.WantedBy", []),
+        "onCalendar": values.get("Timer.OnCalendar", []),
+        "environmentFiles": values.get("Service.EnvironmentFile", []),
         "features": dangerous_features("\n".join(exec_start)),
     }
 
@@ -1157,9 +1207,23 @@ def list_systemd_units(request: dict[str, Any]) -> dict[str, Any]:
             seen.add(str(resolved))
             try:
                 enabled_links = [str(link) for link in pathlib.Path("/etc/systemd").rglob(path.name) if link.is_symlink()][:20]
+                drop_ins: list[dict[str, Any]] = []
+                dropin_dirs = [resolved.parent / f"{path.name}.d"]
+                dropin_dirs.extend(candidate for dropin_root in roots if dropin_root.is_dir()
+                                   for candidate in dropin_root.rglob(f"{path.name}.d") if candidate.is_dir())
+                for dropin_dir in dict.fromkeys(dropin_dirs):
+                    if not dropin_dir.is_dir():
+                        continue
+                    for override in sorted(dropin_dir.glob("*.conf"))[:100]:
+                        try:
+                            drop_ins.append({**file_facts(override.resolve()), **parse_systemd_unit(override.resolve())})
+                        except OSError:
+                            continue
                 items.append({**file_facts(resolved), "kind": "systemd", "unit": path.name,
                               "scope": "user" if "/.config/systemd/user/" in str(resolved) else "system",
-                              "enabled": bool(enabled_links), "enabledLinks": enabled_links, **parse_systemd_unit(resolved)})
+                              "enabled": bool(enabled_links), "enabledLinks": enabled_links, "dropIns": drop_ins,
+                              "generated": str(resolved).startswith("/run/systemd/generator"),
+                              "transient": str(resolved).startswith("/run/systemd/transient"), **parse_systemd_unit(resolved)})
             except OSError:
                 continue
             if len(items) >= maximum:
@@ -1169,18 +1233,108 @@ def list_systemd_units(request: dict[str, Any]) -> dict[str, Any]:
     return {"items": items, "partial": not manager_available, "warnings": warnings}
 
 
+def list_extended_persistence(request: dict[str, Any]) -> dict[str, Any]:
+    maximum, include_user = persistence_limits(request)
+    roots = [pathlib.Path(value) for value in SYSTEM_PERSISTENCE_ROOTS["extended"]]
+    if include_user:
+        for account in interactive_accounts():
+            roots.extend((pathlib.Path(account.pw_dir) / ".config/autostart", pathlib.Path(account.pw_dir) / ".config/systemd/user"))
+    items: list[dict[str, Any]] = []
+    warnings: list[str] = []
+    seen: set[str] = set()
+    for root in roots:
+        candidates = [root] if root.is_file() else (item for item in root.rglob("*") if item.is_file() and not item.is_symlink()) if root.is_dir() else []
+        try:
+            for path in candidates:
+                resolved = path.resolve()
+                if str(resolved) in seen:
+                    continue
+                seen.add(str(resolved))
+                text = text_file(resolved)
+                category = "other"
+                value = str(resolved)
+                for marker, label in (("/init.d/", "sysv"), ("rc.local", "rc_local"), ("autostart", "xdg_autostart"),
+                                      ("/pam.d/", "pam"), ("/udev/", "udev"), ("modprobe", "modprobe"),
+                                      ("modules-load", "kernel_module"), ("/cloud/", "cloud_init"),
+                                      ("apt.conf", "package_hook"), ("yum", "package_hook"), ("dnf", "package_hook"),
+                                      ("/linger/", "user_linger"), ("anacron", "anacron"), ("atjobs", "at")):
+                    if marker in value:
+                        category = label
+                        break
+                items.append({**file_facts(resolved), "kind": "extended", "persistenceType": category,
+                              "features": dangerous_features(text),
+                              "commandSummaries": [redact_secret_text(line.strip(), 2048) for line in text.splitlines()
+                                                   if dangerous_features(line)][:50]})
+                if len(items) >= maximum:
+                    return {"items": items, "partial": True, "warnings": warnings + ["扩展持久化结果达到上限"]}
+        except PermissionError:
+            warnings.append(f"无权读取扩展持久化目录: {root}")
+        except OSError:
+            warnings.append(f"无法读取扩展持久化目录: {root}")
+    return {"items": items, "partial": bool(warnings), "warnings": warnings[:200]}
+
+
 def effective_sshd_config() -> dict[str, Any]:
     binary = shutil.which("sshd")
     if not binary:
         return {"available": False}
     result = run([binary, "-T"], check=False)
     selected: dict[str, str] = {}
-    wanted = {"authorizedkeysfile", "permitrootlogin", "passwordauthentication", "pubkeyauthentication", "allowusers", "allowgroups"}
+    wanted = {"authorizedkeysfile", "authorizedkeyscommand", "authorizedkeyscommanduser", "trustedusercakeys",
+              "authorizedprincipalsfile", "revokedkeys", "permitrootlogin", "passwordauthentication",
+              "pubkeyauthentication", "permituserenvironment", "allowusers", "allowgroups", "denyusers", "denygroups"}
     for line in result.stdout.splitlines():
         key, _, value = line.partition(" ")
         if key in wanted:
             selected[key] = value[:2048]
     return {"available": result.returncode == 0, **selected}
+
+
+def inspect_ssh_trust_configuration(_: dict[str, Any]) -> dict[str, Any]:
+    roots = [pathlib.Path("/etc/ssh/sshd_config"), pathlib.Path("/etc/ssh/sshd_config.d")]
+    files: list[dict[str, Any]] = []
+    warnings: list[str] = []
+    for root in roots:
+        candidates = [root] if root.is_file() else list(root.glob("*.conf"))[:500] if root.is_dir() else []
+        for path in candidates:
+            if not path.is_file() or path.is_symlink():
+                continue
+            try:
+                text = text_file(path, 1024 * 1024)
+                directives = []
+                in_match = False
+                for number, raw in enumerate(text.splitlines(), 1):
+                    line = raw.strip()
+                    if not line or line.startswith("#"):
+                        continue
+                    key, _, value = line.partition(" ")
+                    if key.lower() == "match":
+                        in_match = True
+                    if key.lower() in {"include", "match", "authorizedkeysfile", "authorizedkeyscommand", "authorizedkeyscommanduser",
+                                      "trustedusercakeys", "authorizedprincipalsfile", "revokedkeys", "permitrootlogin",
+                                      "passwordauthentication", "pubkeyauthentication", "permituserenvironment"}:
+                        directives.append({"line": number, "key": key.lower(), "value": redact_secret_text(value.strip(), 2048), "inMatch": in_match})
+                files.append({**file_facts(path.resolve()), "directives": directives})
+            except PermissionError:
+                warnings.append(f"无权读取 sshd 配置: {path}")
+            except OSError:
+                warnings.append(f"无法读取 sshd 配置: {path}")
+    effective = effective_sshd_config()
+    trust_files: list[dict[str, Any]] = []
+    for key in ("trustedusercakeys", "authorizedprincipalsfile", "revokedkeys"):
+        value = effective.get(key)
+        if not isinstance(value, str) or not value.startswith("/") or "%" in value:
+            continue
+        candidate = pathlib.Path(value)
+        try:
+            if candidate.is_file() and not candidate.is_symlink():
+                trust_files.append({"directive": key, **file_facts(candidate.resolve())})
+        except OSError:
+            warnings.append(f"无法核验 sshd 信任文件: {value}")
+    if not effective.get("available"):
+        warnings.append("sshd -T 未成功，effective 字段不完整")
+    return {"items": files, "effective": effective, "trustFiles": trust_files,
+            "partial": bool(warnings), "warnings": warnings[:200]}
 
 
 def list_ssh_persistence(request: dict[str, Any]) -> dict[str, Any]:
@@ -1261,17 +1415,17 @@ def find_related_processes(request: dict[str, Any]) -> list[dict[str, Any]]:
     useful = [pathlib.Path(token).name for token in tokens if pathlib.Path(token).name not in {"sh", "bash", "dash", "python", "python3", "env", "sudo", "root"}]
     if not useful:
         return []
-    processes = list_processes({})
     matches = []
-    for process in processes:
+    digest_cache: dict[tuple[int, int], str] = {}
+    for process in list_processes({}):
         command = str(process.get("command", ""))
         if any(token in command for token in useful[:10]):
-            executable = None
             try:
-                executable = str(pathlib.Path(f"/proc/{process['pid']}/exe").resolve(strict=True))
-            except OSError:
-                pass
-            matches.append({**process, "executable": executable, "matchedTokens": useful[:10]})
+                stable = stable_process(int(process["pid"]), digest_cache)
+            except (HelperError, OSError):
+                continue
+            summary = redact_secret_text(command, 4096)
+            matches.append({**stable, "command": summary, "commandSummary": summary, "executable": stable["exePath"], "matchedTokens": useful[:10]})
             if len(matches) >= maximum:
                 break
     return matches
@@ -2181,11 +2335,14 @@ OPERATIONS: dict[str, Callable[[dict[str, Any]], Any]] = {
     "run_tomcat_probe": run_tomcat_probe,
     "search_class_on_disk": search_class_on_disk,
     "list_privileged_accounts": list_privileged_accounts,
+    "inspect_privilege_delegation": inspect_privilege_delegation,
     "inspect_account": inspect_account,
+    "inspect_ssh_trust_configuration": inspect_ssh_trust_configuration,
     "inspect_authorized_keys": inspect_authorized_keys,
     "get_login_history": get_login_history,
     "list_cron_entries": list_cron_entries,
     "list_systemd_units": list_systemd_units,
+    "list_extended_persistence": list_extended_persistence,
     "list_ssh_persistence": list_ssh_persistence,
     "list_shell_startup_files": list_shell_startup_files,
     "inspect_persistence_item": inspect_persistence_item,

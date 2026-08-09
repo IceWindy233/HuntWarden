@@ -135,7 +135,11 @@ describe.skipIf(!enabled)("Docker Lab 真实 SSH Tool Chain", () => {
     const remote = executor(2224);
     const accounts = await remote.invoke({ operation: "list_privileged_accounts", params: {} });
     const account = accounts.find((item) => item.username === "labroot");
-    expect(account).toMatchObject({ uid: 0 });
+    expect(account).toMatchObject({ uid: 0, accountSource: "local" });
+    const delegation = await remote.invoke({ operation: "inspect_privilege_delegation", params: { maxItems: 500 } });
+    expect(delegation.items.some((item) => item.kind === "sudoers" && Array.isArray(item.signals) && item.signals.includes("passwordless"))).toBe(true);
+    const sshTrust = await remote.invoke({ operation: "inspect_ssh_trust_configuration", params: {} });
+    expect(sshTrust.items.some((item) => item.path === "/etc/ssh/sshd_config")).toBe(true);
     const detail = await remote.invoke({ operation: "inspect_account", params: { username: "labroot" } });
     expect(detail).toMatchObject({ username: "labroot", uid: 0 });
     const keys = await remote.invoke({ operation: "inspect_authorized_keys", params: { username: "labroot" } });
@@ -157,8 +161,11 @@ describe.skipIf(!enabled)("Docker Lab 真实 SSH Tool Chain", () => {
     const systemd = await remote.invoke({ operation: "list_systemd_units", params: request });
     const unit = systemd.items.find((item) => item.unit === "huntwarden-lab.service");
     expect(unit).toMatchObject({ kind: "systemd", enabled: true, runAs: "persistuser" });
+    expect(unit?.dropIns).toEqual(expect.arrayContaining([expect.objectContaining({ path: "/etc/systemd/system/huntwarden-lab.service.d/override.conf" })]));
     expect(systemd).toMatchObject({ partial: true });
     expect(systemd.warnings.join(" ")).toContain("管理器未运行");
+    const extended = await remote.invoke({ operation: "list_extended_persistence", params: request });
+    expect(extended.items.some((item) => item.path === "/etc/rc.local" && item.persistenceType === "rc_local")).toBe(true);
 
     const ssh = await remote.invoke({ operation: "list_ssh_persistence", params: request });
     const unknown = ssh.items.find((item) => item.username === "persistuser");

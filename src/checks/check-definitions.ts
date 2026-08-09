@@ -25,6 +25,17 @@ function chunks<T>(items: readonly T[], size: number): T[][] {
   return result;
 }
 
+function referenceArguments(stepId: string, field: string, prefix: string) {
+  return (context: ScanStepContext): readonly Record<string, unknown>[] => context.results(stepId)
+    .flatMap((result) => {
+      if (!result || typeof result !== "object" || !("items" in result) || !Array.isArray(result.items)) return [];
+      return result.items;
+    })
+    .map((item) => item && typeof item === "object" && field in item ? item[field as keyof typeof item] : undefined)
+    .filter((ref): ref is string => typeof ref === "string" && ref.startsWith(prefix))
+    .map((ref) => ({ [field]: ref }));
+}
+
 export const PREFLIGHT_EXECUTION_GRAPH: readonly MinimumScanStep[] = [
   { stepId: "capabilities", toolName: "get_capabilities", buildArguments: noArguments },
   { stepId: "host-info", toolName: "get_host_info", buildArguments: noArguments },
@@ -65,6 +76,14 @@ export const CHECK_DEFINITIONS: Record<string, CheckDefinition> = {
     label: "后门账户",
     minimumExecutionGraph: [
       { stepId: "privileged-accounts", toolName: "list_privileged_accounts", buildArguments: noArguments },
+      { stepId: "privilege-delegation", toolName: "inspect_privilege_delegation", buildArguments: noArguments },
+      { stepId: "ssh-trust", toolName: "inspect_ssh_trust_configuration", buildArguments: noArguments },
+      { stepId: "account-details", toolName: "inspect_account", dependsOn: ["privileged-accounts"],
+        buildArguments: referenceArguments("privileged-accounts", "accountRef", "ACCT-") },
+      { stepId: "authorized-keys", toolName: "inspect_authorized_keys", dependsOn: ["privileged-accounts"],
+        buildArguments: referenceArguments("privileged-accounts", "accountRef", "ACCT-") },
+      { stepId: "login-history", toolName: "get_login_history", dependsOn: ["privileged-accounts"],
+        buildArguments: referenceArguments("privileged-accounts", "accountRef", "ACCT-") },
     ],
   },
   linux_persistence: {
@@ -73,6 +92,7 @@ export const CHECK_DEFINITIONS: Record<string, CheckDefinition> = {
     minimumExecutionGraph: [
       { stepId: "cron", toolName: "list_cron_entries", buildArguments: noArguments },
       { stepId: "systemd", toolName: "list_systemd_units", buildArguments: noArguments },
+      { stepId: "extended-persistence", toolName: "list_extended_persistence", buildArguments: noArguments },
       { stepId: "ssh-persistence", toolName: "list_ssh_persistence", buildArguments: noArguments },
       { stepId: "shell-startup", toolName: "list_shell_startup_files", buildArguments: noArguments },
     ],

@@ -128,6 +128,25 @@ describe("任务检测包边界", () => {
     store.close();
   });
 
+  it("按账户配置关闭 SSH Key 与登录历史工具", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "huntwarden-account-config-scope-"));
+    directories.push(directory);
+    const store = await RuntimeStore.open(directory, "runtime.db");
+    const task = testTask("SCAN");
+    task.checks = ["backdoor_account"];
+    store.createTask(task);
+    const config = testConfig(directory);
+    config.account.checkAuthorizedKeys = false;
+    config.account.checkLoginHistory = false;
+    const names = createSecurityTools({ task, config, store, executor: new FakeExecutor(),
+      approvals: new ApprovalService(store), evidence: new EvidenceStore(directory, store) }).map((tool) => tool.name);
+
+    expect(names).toEqual(expect.arrayContaining(["inspect_privilege_delegation", "inspect_ssh_trust_configuration", "inspect_account"]));
+    expect(names).not.toContain("inspect_authorized_keys");
+    expect(names).not.toContain("get_login_history");
+    store.close();
+  });
+
   it("record_finding 拒绝写入任务未选择的类别", async () => {
     const directory = await mkdtemp(join(tmpdir(), "huntwarden-finding-scope-"));
     directories.push(directory);

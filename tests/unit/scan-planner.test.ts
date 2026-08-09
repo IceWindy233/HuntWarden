@@ -122,6 +122,11 @@ describe("ScanPlanner 确定性最低执行图", () => {
         { username: "root", uid: 0, gid: 0, shell: "/bin/bash", home: "/root", sudo: true, interactive: true },
         { username: "backup-root", uid: 0, gid: 0, shell: "/bin/bash", home: "/srv/backup", sudo: false, interactive: true },
       ],
+      inspect_privilege_delegation: () => ({ items: [], partial: false, warnings: [] }),
+      inspect_ssh_trust_configuration: () => ({ items: [], effective: { available: true }, trustFiles: [], partial: false, warnings: [] }),
+      inspect_account: (params) => ({ ...(params as { username: string }), uid: 0, groups: [] }),
+      inspect_authorized_keys: () => [],
+      get_login_history: () => [],
     });
     const config = testConfig(directory);
     const tools = createSecurityTools({

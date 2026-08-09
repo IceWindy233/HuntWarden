@@ -22,8 +22,9 @@ const HOST_OPERATIONS = new Set<HostOperation>([
   "verify_package_integrity", "inspect_dynamic_loader", "query_auth_events", "query_exec_events", "build_incident_timeline",
   "inspect_script_file", "search_web_access_log", "collect_file", "list_java_processes", "detect_java_container",
   "run_tomcat_probe", "search_class_on_disk", "list_privileged_accounts", "inspect_account",
+  "inspect_privilege_delegation", "inspect_ssh_trust_configuration",
   "inspect_authorized_keys", "get_login_history", "get_action_receipt", "quarantine_file", "disable_account",
-  "list_cron_entries", "list_systemd_units", "list_ssh_persistence", "list_shell_startup_files",
+  "list_cron_entries", "list_systemd_units", "list_extended_persistence", "list_ssh_persistence", "list_shell_startup_files",
   "inspect_persistence_item", "find_related_processes", "list_process_connections",
   "collect_persistence_artifact", "release_artifact",
 ]);
