@@ -28,3 +28,10 @@ services:
       dockerfile: labs/persistence/Dockerfile
     ports: ["2225:22"]
     hostname: lab-persistence
+
+  lab-linux-ir:
+    build:
+      context: ..
+      dockerfile: labs/linux-ir/Dockerfile
+    ports: ["2226:22"]
+    hostname: lab-linux-ir
