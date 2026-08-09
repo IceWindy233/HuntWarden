@@ -1,7 +1,7 @@
 import type { AppConfig } from "../config/schema.js";
-import type { ActionReceipt, ApprovalTicket, AuditEvent, Evidence, Finding, ReportRecord, TaskContext, TaskMode, CheckCategory } from "../domain/types.js";
+import type { ActionReceipt, AgentStreamUpdate, ApprovalTicket, AuditEvent, Evidence, Finding, ReportRecord, TaskContext, TaskMode, CheckCategory } from "../domain/types.js";
 
-export const DESKTOP_API_VERSION = 2 as const;
+export const DESKTOP_API_VERSION = 3 as const;
 
 export interface ConfigProfileSummary {
   profileId: string;
@@ -102,6 +102,7 @@ export interface TaskSnapshot {
 
 export type DesktopEvent =
   | { type: "task_updated"; task: TaskContext }
+  | ({ type: "agent_stream" } & AgentStreamUpdate)
   | { type: "approval_requested"; ticket: ApprovalTicket }
   | { type: "finding_recorded"; finding: Finding }
   | { type: "evidence_recorded"; evidence: Evidence }

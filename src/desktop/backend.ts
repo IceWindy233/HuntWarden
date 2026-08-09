@@ -11,7 +11,7 @@ import { isInvalidPackagedLabCredentialPath } from "../config/profile-path-repai
 import type { AppConfig } from "../config/schema.js";
 import type { DesktopCredentialStore } from "../credentials/credential-store.js";
 import { validateTargetConfig } from "../domain/validation.js";
-import type { ApprovalTicket, AuditEvent, Evidence, Finding, ReportRecord, TaskContext } from "../domain/types.js";
+import type { AgentStreamUpdate, ApprovalTicket, AuditEvent, Evidence, Finding, ReportRecord, TaskContext } from "../domain/types.js";
 import { SSHExecutor } from "../executor/ssh-executor.js";
 import type {
   ConfigProfile,
@@ -47,6 +47,7 @@ export class DesktopBackend extends EventEmitter {
   private activeProfile: ConfigProfile | undefined;
   private closePromise: Promise<void> | undefined;
   private readonly emitted = new Map<string, { findingIds: Set<string>; evidenceIds: Set<string>; auditIds: Set<string> }>();
+  private readonly streamBuffers = new Map<string, { update: AgentStreamUpdate; delta: string; timer: ReturnType<typeof setTimeout> }>();
 
   constructor(private readonly options: DesktopBackendOptions) {
     super();
@@ -64,7 +65,11 @@ export class DesktopBackend extends EventEmitter {
     if (!this.closePromise) {
       const application = this.application;
       this.application = undefined;
-      this.closePromise = application?.close() ?? Promise.resolve();
+      this.closePromise = (async () => {
+        this.clearStreamBuffers();
+        await application?.close();
+        this.clearStreamBuffers();
+      })();
     }
     await this.closePromise;
   }
@@ -308,11 +313,14 @@ export class DesktopBackend extends EventEmitter {
       ?? createModelBundle(this.activeProfile.config, this.options.credentials);
     this.application = new Application(this.activeProfile.config, store, models, model, this.options.checkpoint);
     this.application.on("changed", (taskId: string) => this.publishTask(taskId));
+    this.application.on("stream", (update: AgentStreamUpdate) => this.publishStream(update));
     this.application.on("approval_requested", (ticket: ApprovalTicket) => this.emitDesktop({ type: "approval_requested", ticket }));
   }
 
   private async reloadApplication(): Promise<void> {
+    this.clearStreamBuffers();
     await this.application?.close();
+    this.clearStreamBuffers();
     this.application = undefined;
     this.activeProfile = undefined;
     this.emitted.clear();
@@ -352,6 +360,34 @@ export class DesktopBackend extends EventEmitter {
   }
 
   private emitDesktop(event: DesktopEvent): void { this.emit("event", event); }
+
+  private publishStream(update: AgentStreamUpdate): void {
+    if (update.phase !== "delta") {
+      this.flushStream(update.streamId);
+      this.emitDesktop({ type: "agent_stream", ...update });
+      return;
+    }
+    const existing = this.streamBuffers.get(update.streamId);
+    if (existing) {
+      existing.delta += update.delta ?? "";
+      return;
+    }
+    const timer = setTimeout(() => this.flushStream(update.streamId), 32);
+    this.streamBuffers.set(update.streamId, { update, delta: update.delta ?? "", timer });
+  }
+
+  private flushStream(streamId: string): void {
+    const buffered = this.streamBuffers.get(streamId);
+    if (!buffered) return;
+    clearTimeout(buffered.timer);
+    this.streamBuffers.delete(streamId);
+    if (buffered.delta) this.emitDesktop({ type: "agent_stream", ...buffered.update, delta: buffered.delta });
+  }
+
+  private clearStreamBuffers(): void {
+    for (const buffered of this.streamBuffers.values()) clearTimeout(buffered.timer);
+    this.streamBuffers.clear();
+  }
 
   private async runAndNotify<T>(taskId: string, operation: () => Promise<T>): Promise<T> {
     try { return await operation(); }

@@ -4,12 +4,13 @@ import type { ConfigProfileSummary, DesktopEvent, TaskSnapshot } from "../gui/co
 import { ApprovalDialog } from "./components/ApprovalDialog.js";
 import { NewTaskDialog } from "./components/NewTaskDialog.js";
 import { SettingsView } from "./components/SettingsView.js";
-import { TaskWorkspace } from "./components/TaskWorkspace.js";
+import { TaskWorkspace, type LiveAgentStream } from "./components/TaskWorkspace.js";
 import { Button, EmptyState, formatTime, StatusPill } from "./components/ui.js";
 
 type View = "tasks" | "settings";
 type ToastTone = "success" | "error" | "info";
 interface Toast { id: number; message: string; tone: ToastTone }
+const MAX_LIVE_OUTPUT_CHARS = 512 * 1024;
 
 export function App() {
   const [view, setView] = useState<View>("tasks");
@@ -22,6 +23,7 @@ export function App() {
   const [toasts, setToasts] = useState<Toast[]>([]);
   const [loading, setLoading] = useState(true);
   const [fatalError, setFatalError] = useState<string>();
+  const [liveStream, setLiveStream] = useState<LiveAgentStream>();
   const toastSequence = useRef(0);
   const refreshSequence = useRef(0);
 
@@ -69,9 +71,30 @@ export function App() {
   }, [loadBootstrap]);
 
   useEffect(() => { void refreshSnapshot(); }, [refreshSnapshot]);
+  useEffect(() => { setLiveStream(undefined); }, [selectedTaskId]);
 
   useEffect(() => {
     const unsubscribe = window.huntwarden.subscribe((event: DesktopEvent) => {
+      if (event.type === "agent_stream") {
+        if (event.taskId !== selectedTaskId) return;
+        if (event.phase === "start") {
+          setLiveStream({ taskId: event.taskId, streamId: event.streamId, text: "", timestamp: event.timestamp, phase: "streaming", truncated: false });
+        } else if (event.phase === "delta") {
+          setLiveStream((current) => {
+            const previous = current?.streamId === event.streamId ? current.text : "";
+            const incoming = event.delta ?? "";
+            const available = Math.max(0, MAX_LIVE_OUTPUT_CHARS - previous.length);
+            return {
+              taskId: event.taskId, streamId: event.streamId, timestamp: event.timestamp, phase: "streaming",
+              text: previous + incoming.slice(0, available), truncated: Boolean(current?.truncated) || incoming.length > available,
+            };
+          });
+        } else {
+          setLiveStream((current) => current?.streamId === event.streamId ? { ...current, phase: event.phase === "error" ? "error" : "complete" } : current);
+          void refreshSnapshot().finally(() => setLiveStream((current) => current?.streamId === event.streamId ? undefined : current));
+        }
+        return;
+      }
       if (event.type === "runtime_error") notify(event.message, "error");
       if (event.type === "approval_requested") notify("Agent 正在等待高风险写操作审批", "info");
       if (event.type === "finding_recorded") notify(`新增 Finding：${event.finding.title}`, event.finding.severity === "CRITICAL" ? "error" : "info");
@@ -145,7 +168,7 @@ export function App() {
       {view === "settings"
         ? <SettingsView profiles={profiles} {...(activeProfileId ? { activeProfileId } : {})} onProfilesChanged={reloadProfiles} notify={notify} />
         : snapshot
-          ? <TaskWorkspace snapshot={snapshot} refresh={refreshSnapshot} notify={notify} />
+          ? <TaskWorkspace snapshot={snapshot} refresh={refreshSnapshot} notify={notify} {...(liveStream?.taskId === snapshot.task.taskId ? { liveStream } : {})} />
           : <Dashboard tasks={tasks} activeProfile={activeProfile} onNewTask={() => void openNewTask()} onOpenSettings={() => setView("settings")} onSelectTask={(taskId) => setSelectedTaskId(taskId)} />}
     </section>
 

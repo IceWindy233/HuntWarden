@@ -14,6 +14,7 @@ import { RuntimeStore } from "../../src/storage/runtime-store.js";
 import { createRecordFindingTool } from "../../src/tools/local/record-finding.js";
 import { createSecurityTool } from "../../src/tools/tool-factory.js";
 import { testConfig, testTask } from "../helpers.js";
+import type { AgentStreamUpdate } from "../../src/domain/types.js";
 
 const directories: string[] = [];
 afterEach(async () => { await Promise.all(directories.splice(0).map((path) => rm(path, { recursive: true, force: true }))); });
@@ -69,10 +70,15 @@ describe("Pi Faux Provider Agent Loop", () => {
       fauxAssistantMessage("WebShell 检测完成。"),
     ]);
     const runtime = new SecurityAgentRuntime({ task, config, store, executor, approvals, tools: [tool], models, model: faux.getModel() });
+    const stream: AgentStreamUpdate[] = [];
+    runtime.on("stream", (update: AgentStreamUpdate) => stream.push(update));
     await runtime.prompt("执行 WebShell 检测");
     expect(store.listFindings(task.taskId)).toMatchObject([{ category: "webshell", status: "NO_FINDING" }]);
     expect(store.getToolRun("call-record-webshell")?.status).toBe("SUCCEEDED");
     expect(store.loadMessages(task.taskId).some((message) => message.role === "toolResult")).toBe(true);
+    expect(stream.some((update) => update.phase === "start")).toBe(true);
+    expect(stream.some((update) => update.phase === "end")).toBe(true);
+    expect(stream.filter((update) => update.phase === "delta").map((update) => update.delta).join("")).toContain("WebShell 检测完成");
     expect(store.getTask(task.taskId)?.status).toBe("COMPLETED");
     store.close();
   });

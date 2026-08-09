@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { Box, Text, useApp, useInput } from "ink";
-import type { ApprovalTicket, TaskContext } from "../domain/types.js";
+import type { AgentStreamUpdate, ApprovalTicket, TaskContext } from "../domain/types.js";
 import type { Application } from "../runtime/application.js";
 
 type Tab = "任务" | "事件" | "发现" | "证据";
@@ -12,7 +12,7 @@ const NEW_TASK_FIELDS: { key: NewTaskField; label: string; defaultValue: (applic
   { key: "username", label: "SSH 用户", defaultValue: () => "secagent" },
   { key: "fingerprint", label: "SHA-256 主机指纹（留空从 known_hosts 读取）", defaultValue: () => "" },
   { key: "mode", label: "模式 SCAN/REMEDIATE", defaultValue: (application) => application.config.agent.defaultMode },
-  { key: "request", label: "调查请求", defaultValue: () => "排查 WebShell、Tomcat Java 内存马和 Linux 后门账户，并形成结构化报告。" },
+  { key: "request", label: "调查请求", defaultValue: () => "排查 WebShell、Tomcat Java 内存马、Linux 后门账户和持久化，并形成结构化报告。" },
 ];
 
 export interface AppProps { application: Application; initialTask?: TaskContext; autoStart?: boolean }
@@ -29,6 +29,7 @@ export function App({ application, initialTask, autoStart = false }: AppProps) {
   const [input, setInput] = useState("");
   const [newTaskStep, setNewTaskStep] = useState<number | undefined>();
   const [newTaskDraft, setNewTaskDraft] = useState<Partial<Record<NewTaskField, string>>>({});
+  const [liveOutput, setLiveOutput] = useState<{ streamId: string; text: string; active: boolean; error: boolean }>();
   const current = selectedTaskId
     ? tasks.find((task) => task.taskId === selectedTaskId) ?? (initialTask?.taskId === selectedTaskId ? initialTask : undefined)
     : tasks[selected];
@@ -42,12 +43,23 @@ export function App({ application, initialTask, autoStart = false }: AppProps) {
   useEffect(() => {
     const timer = setInterval(refresh, 500);
     const onApproval = (ticket: ApprovalTicket) => setApproval(ticket);
+    const onStream = (update: AgentStreamUpdate) => {
+      if (update.phase === "start") setLiveOutput({ streamId: update.streamId, text: "", active: true, error: false });
+      else if (update.phase === "delta") setLiveOutput((current) => ({
+        streamId: update.streamId,
+        text: `${current?.streamId === update.streamId ? current.text : ""}${update.delta ?? ""}`.slice(-65_536),
+        active: true,
+        error: false,
+      }));
+      else setLiveOutput((current) => current?.streamId === update.streamId ? { ...current, active: false, error: update.phase === "error" } : current);
+    };
     application.approvals.on("requested", onApproval);
+    application.on("stream", onStream);
     if (initialTask && autoStart) {
       const runtime = application.runtimeFor(initialTask);
       void runtime.prompt(initialTask.request).then(() => setStatus("调查阶段完成，可按 g 生成报告")).catch((error) => setStatus(`失败: ${error instanceof Error ? error.message : String(error)}`));
     }
-    return () => { clearInterval(timer); application.approvals.off("requested", onApproval); };
+    return () => { clearInterval(timer); application.approvals.off("requested", onApproval); application.off("stream", onStream); };
   }, []);
 
   useInput((value, key) => {
@@ -117,7 +129,7 @@ export function App({ application, initialTask, autoStart = false }: AppProps) {
     }
     if (value === "g" && current) {
       const runtime = application.runtimeFor(current);
-      void application.reports.generate(current, runtime).then((path) => setStatus(`报告已保存: ${path}`)).catch((error) => setStatus(`报告失败: ${error instanceof Error ? error.message : String(error)}`));
+      void application.reports.generate(current, runtime).then((report) => setStatus(`报告已保存: ${report.path}`)).catch((error) => setStatus(`报告失败: ${error instanceof Error ? error.message : String(error)}`));
     }
   });
 
@@ -138,6 +150,7 @@ export function App({ application, initialTask, autoStart = false }: AppProps) {
     <Box justifyContent="space-between"><Text bold color="cyan">HuntWarden</Text><Text>{TABS.map((item, i) => i === tabIndex ? `[${item}]` : item).join("  ")}</Text></Box>
     <Box height={1}><Text dimColor>单任务主机专项检测与受控查杀</Text></Box>
     <Box flexDirection="column" minHeight={12}>{body.slice(-18).map((line, index) => <Text key={`${index}-${line}`}>{line}</Text>)}</Box>
+    {liveOutput ? <Box borderStyle="round" borderColor={liveOutput.error ? "red" : "cyan"} flexDirection="column" paddingX={1}><Text bold color={liveOutput.error ? "red" : "cyan"}>SEC AGENT {liveOutput.active ? "· LIVE" : "· 完成"}</Text><Text>{liveOutput.text.split("\n").slice(-6).join("\n") || "正在生成响应…"}{liveOutput.active ? "▌" : ""}</Text></Box> : null}
     {approval ? <Box borderStyle="double" borderColor="yellow" flexDirection="column"><Text bold color="yellow">写操作审批</Text><Text>工具: {approval.tool}</Text><Text>动作: {approval.actionSummary}</Text><Text>目标指纹: {approval.targetFingerprint}</Text><Text>参数摘要: {approval.argsDigest}</Text><Text>Action: {approval.actionId}</Text><Text>按 y 单次批准 / n 拒绝</Text></Box> : null}
     {newTaskStep !== undefined ? <Text color="cyan">新建任务 {newTaskStep + 1}/{NEW_TASK_FIELDS.length} · {NEW_TASK_FIELDS[newTaskStep]?.label} [默认: {NEW_TASK_FIELDS[newTaskStep]?.defaultValue(application) || "自动"}] &gt; {input}_</Text>
       : inputMode ? <Text color="green">Steering&gt; {input}_</Text>

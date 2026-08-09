@@ -6,7 +6,7 @@ import { promisify } from "node:util";
 import { _electron as electron, type ElectronApplication, type Page } from "@playwright/test";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { CheckCategory } from "../../src/domain/types.js";
-import type { HuntWardenDesktopApi, NewTaskInput, TaskSnapshot } from "../../src/gui/contracts.js";
+import type { DesktopEvent, HuntWardenDesktopApi, NewTaskInput, TaskSnapshot } from "../../src/gui/contracts.js";
 import type { E2eFauxScenario } from "../../src/testing/e2e-faux-model.js";
 
 const enabled = process.env.HUNTWARDEN_GUI_INVESTIGATION_TESTS === "1";
@@ -14,7 +14,7 @@ const projectRoot = resolve(".");
 const run = promisify(execFile);
 const applications: ElectronApplication[] = [];
 const temporaryDirectories: string[] = [];
-declare const window: { huntwarden: HuntWardenDesktopApi };
+declare const window: { huntwarden: HuntWardenDesktopApi; __huntwardenStreamEvents?: DesktopEvent[] };
 
 beforeEach(async () => {
   if (!enabled) return;
@@ -47,15 +47,24 @@ async function launch(scenario: E2eFauxScenario, port: number): Promise<{ page: 
   } };
 }
 
-async function runInvestigation(scenario: E2eFauxScenario, port: number, category: CheckCategory): Promise<TaskSnapshot> {
+async function runInvestigation(scenario: E2eFauxScenario, port: number, category: CheckCategory): Promise<{ snapshot: TaskSnapshot; streamEvents: DesktopEvent[] }> {
   const { page, target } = await launch(scenario, port);
+  await page.evaluate(() => {
+    window.__huntwardenStreamEvents = [];
+    window.huntwarden.subscribe((event) => {
+      if (event.type === "agent_stream") window.__huntwardenStreamEvents?.push(event);
+    });
+  });
   const request = `E2E：${category} 只读调查`;
   const input: NewTaskInput = { request, mode: "SCAN", checks: [category], target };
   const task = await page.evaluate((value) => window.huntwarden.createTask(value), input);
   await page.locator(".sidebar-tasks button", { hasText: request }).click();
   await page.getByRole("button", { name: "开始调查" }).click();
   await expect.poll(async () => (await page.evaluate((id) => window.huntwarden.getTaskSnapshot(id), task.taskId)).task.status, { timeout: 90_000 }).toBe("COMPLETED");
-  return await page.evaluate((id) => window.huntwarden.getTaskSnapshot(id), task.taskId);
+  return {
+    snapshot: await page.evaluate((id) => window.huntwarden.getTaskSnapshot(id), task.taskId),
+    streamEvents: await page.evaluate(() => window.__huntwardenStreamEvents ?? []),
+  };
 }
 
 describe.skipIf(!enabled)("GUI 三场景只读调查与自动报告", () => {
@@ -65,7 +74,7 @@ describe.skipIf(!enabled)("GUI 三场景只读调查与自动报告", () => {
     ["account-scan", 2224, "backdoor_account"],
     ["persistence-scan", 2225, "linux_persistence"],
   ] as const)("%s 完成 Finding、Evidence 与 v1 报告", async (scenario, port, category) => {
-    const result = await runInvestigation(scenario, port, category);
+    const { snapshot: result, streamEvents } = await runInvestigation(scenario, port, category);
     expect(result.findings[0]?.category).toBe(category);
     expect(["CONFIRMED", "HIGHLY_SUSPICIOUS"]).toContain(result.findings[0]?.status);
     expect(result.evidence.length).toBeGreaterThan(0);
@@ -73,5 +82,8 @@ describe.skipIf(!enabled)("GUI 三场景只读调查与自动报告", () => {
     expect(result.actionReceipts).toHaveLength(0);
     expect(result.reports).toMatchObject([{ version: 1 }]);
     expect(result.reports[0]?.sha256).toMatch(/^[a-f0-9]{64}$/);
+    expect(streamEvents.some((event) => event.type === "agent_stream" && event.phase === "start")).toBe(true);
+    expect(streamEvents.some((event) => event.type === "agent_stream" && event.phase === "delta" && Boolean(event.delta))).toBe(true);
+    expect(streamEvents.some((event) => event.type === "agent_stream" && event.phase === "end")).toBe(true);
   }, 150_000);
 });

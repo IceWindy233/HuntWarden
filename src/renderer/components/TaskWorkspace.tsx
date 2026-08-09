@@ -6,7 +6,16 @@ import { Button, EmptyState, formatTime, shortId, StatusPill, Textarea } from ".
 type TaskTab = "调查" | "工具" | "发现" | "证据" | "审计" | "报告";
 const TABS: TaskTab[] = ["调查", "工具", "发现", "证据", "审计", "报告"];
 
-export function TaskWorkspace({ snapshot, refresh, notify }: { snapshot: TaskSnapshot; refresh: () => Promise<void>; notify: (message: string, tone?: "success" | "error" | "info") => void }) {
+export interface LiveAgentStream {
+  taskId: string;
+  streamId: string;
+  text: string;
+  timestamp: number;
+  phase: "streaming" | "complete" | "error";
+  truncated: boolean;
+}
+
+export function TaskWorkspace({ snapshot, refresh, notify, liveStream }: { snapshot: TaskSnapshot; refresh: () => Promise<void>; notify: (message: string, tone?: "success" | "error" | "info") => void; liveStream?: LiveAgentStream }) {
   const [tab, setTab] = useState<TaskTab>("调查");
   const [steering, setSteering] = useState("");
   const [busy, setBusy] = useState<string>();
@@ -80,7 +89,7 @@ export function TaskWorkspace({ snapshot, refresh, notify }: { snapshot: TaskSna
     <nav className="task-tabs">{TABS.map((item) => <button key={item} className={tab === item ? "active" : ""} onClick={() => setTab(item)}>{item}{item === "发现" && snapshot.findings.length ? <span>{snapshot.findings.length}</span> : item === "证据" && snapshot.evidence.length ? <span>{snapshot.evidence.length}</span> : null}</button>)}</nav>
 
     <main className="task-content">
-      {tab === "调查" ? <Investigation snapshot={snapshot} /> : null}
+      {tab === "调查" ? <Investigation snapshot={snapshot} {...(liveStream ? { liveStream } : {})} /> : null}
       {tab === "工具" ? <ToolTimeline snapshot={snapshot} /> : null}
       {tab === "发现" ? <Findings snapshot={snapshot} /> : null}
       {tab === "证据" ? <EvidenceList snapshot={snapshot} notify={notify} /> : null}
@@ -94,9 +103,9 @@ export function TaskWorkspace({ snapshot, refresh, notify }: { snapshot: TaskSna
 
 function Metric({ label, value, tone }: { label: string; value: string; tone: string }) { return <div className={`metric metric-${tone}`}><span>{label}</span><strong>{value}</strong></div>; }
 
-function Investigation({ snapshot }: { snapshot: TaskSnapshot }) {
-  if (snapshot.conversation.length === 0) return <EmptyState icon="⌁" title="调查尚未开始" description="启动任务后，模型消息、工具请求和脱敏结果会显示在这里。" />;
-  return <div className="conversation">{snapshot.conversation.map((message, index) => <article key={`${message.timestamp}-${index}`} className={`message message-${message.role} ${message.isError ? "message-error" : ""}`}><div className="message-meta"><span>{message.role === "assistant" ? "SEC AGENT" : message.role === "tool" ? `TOOL · ${message.toolName}` : "ANALYST"}</span><time>{formatTime(message.timestamp)}</time></div><div className="message-body">{message.text || <span className="muted">（无文本输出）</span>}</div></article>)}</div>;
+function Investigation({ snapshot, liveStream }: { snapshot: TaskSnapshot; liveStream?: LiveAgentStream }) {
+  if (snapshot.conversation.length === 0 && !liveStream) return <EmptyState icon="⌁" title="调查尚未开始" description="启动任务后，模型消息、工具请求和脱敏结果会显示在这里。" />;
+  return <div className="conversation">{snapshot.conversation.map((message, index) => <article key={`${message.timestamp}-${index}`} className={`message message-${message.role} ${message.isError ? "message-error" : ""}`}><div className="message-meta"><span>{message.role === "assistant" ? "SEC AGENT" : message.role === "tool" ? `TOOL · ${message.toolName}` : "ANALYST"}</span><time>{formatTime(message.timestamp)}</time></div><div className="message-body">{message.text || <span className="muted">（无文本输出）</span>}</div></article>)}{liveStream ? <article key={liveStream.streamId} className={`message message-assistant message-streaming ${liveStream.phase === "error" ? "message-error" : ""}`} aria-live="polite"><div className="message-meta"><span>SEC AGENT · LIVE</span><time>{formatTime(liveStream.timestamp)}</time></div><div className="message-body">{liveStream.text || <span className="muted">正在生成响应…</span>}{liveStream.truncated ? <span className="stream-truncated">实时预览已达 512K 字符，完整消息将在生成结束后显示。</span> : null}<span className="stream-cursor" aria-hidden="true" /></div></article> : null}</div>;
 }
 
 function ToolTimeline({ snapshot }: { snapshot: TaskSnapshot }) {

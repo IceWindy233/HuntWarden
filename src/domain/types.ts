@@ -146,6 +146,15 @@ export interface ReportRecord {
   createdAt: string;
 }
 
+/** 仅存在于当前进程内的模型文本流；不会写入任务消息历史。 */
+export interface AgentStreamUpdate {
+  taskId: string;
+  streamId: string;
+  phase: "start" | "delta" | "end" | "error";
+  timestamp: number;
+  delta?: string;
+}
+
 export interface CandidateReference<T = Record<string, unknown>> {
   ref: string;
   taskId: string;

@@ -5,7 +5,7 @@ import { ApprovalService } from "../agent/approval-service.js";
 import type { AppConfig } from "../config/schema.js";
 import { createId } from "../common/ids.js";
 import { InvalidArgumentError } from "../common/errors.js";
-import type { CheckCategory, ReportRecord, TargetConfig, TaskContext, TaskMode } from "../domain/types.js";
+import type { AgentStreamUpdate, CheckCategory, ReportRecord, TargetConfig, TaskContext, TaskMode } from "../domain/types.js";
 import { validateTargetConfig } from "../domain/validation.js";
 import { EvidenceStore } from "../evidence/evidence-store.js";
 import { SSHExecutor } from "../executor/ssh-executor.js";
@@ -66,7 +66,10 @@ export class Application extends EventEmitter {
     const deps = { task, config: this.config, store: this.store, evidence, executor: this.executor, approvals: this.approvals, ...(this.checkpoint ? { checkpoint: this.checkpoint } : {}) };
     const tools = createSecurityTools(deps);
     this.runtime = new SecurityAgentRuntime({ task, config: this.config, store: this.store, executor: this.executor, approvals: this.approvals, tools, models: this.models, model: this.model, ...(this.checkpoint ? { checkpoint: this.checkpoint } : {}) });
-    this.runtime.on("event", () => this.emit("changed", task.taskId));
+    this.runtime.on("event", (event: { type: string }) => {
+      if (event.type !== "message_update") this.emit("changed", task.taskId);
+    });
+    this.runtime.on("stream", (update: AgentStreamUpdate) => this.emit("stream", update));
     this.runtimeTaskId = task.taskId;
     return this.runtime;
   }

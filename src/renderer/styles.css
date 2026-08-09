@@ -183,6 +183,10 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .message-meta { display: flex; justify-content: space-between; padding: 8px 11px; border-bottom: 1px solid var(--line-soft); color: var(--cyan); font: 700 8px ui-monospace, monospace; letter-spacing: .08em; }
 .message-meta time { color: var(--muted-2); font-weight: 400; }
 .message-body { padding: 12px; color: #bbcad0; font: 11px/1.7 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; word-break: break-word; }
+.message-streaming { border-color: rgba(57, 212, 221, .28); box-shadow: inset 2px 0 0 rgba(57, 212, 221, .55); }
+.stream-cursor { display: inline-block; width: 6px; height: 12px; margin-left: 3px; vertical-align: -2px; background: var(--cyan); animation: stream-blink .8s steps(1) infinite; }
+.stream-truncated { display: block; margin-top: 8px; color: var(--amber); font-size: 8px; }
+@keyframes stream-blink { 50% { opacity: 0; } }
 .tool-table { overflow: hidden; border: 1px solid var(--line-soft); border-radius: 8px; }
 .table-head, .table-row { display: grid; grid-template-columns: 2fr .7fr .8fr 1fr .7fr; gap: 12px; align-items: center; }
 .table-head { padding: 9px 13px; color: var(--muted-2); background: #0a1821; font-size: 9px; text-transform: uppercase; }

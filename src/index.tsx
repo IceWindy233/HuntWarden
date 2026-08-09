@@ -23,7 +23,7 @@ if (!task && arg("--host")) {
   const port = Number(arg("--port") ?? 22);
   const fingerprint = arg("--fingerprint") ?? await application.inferLabFingerprint(config.executor.knownHostsPath, port);
   task = application.createTask({
-    request: arg("--request") ?? "排查 WebShell、Tomcat Java 内存马和 Linux 后门账户，并形成结构化报告。",
+    request: arg("--request") ?? "排查 WebShell、Tomcat Java 内存马、Linux 后门账户和持久化，并形成结构化报告。",
     mode: (arg("--mode") ?? config.agent.defaultMode) as TaskMode,
     target: {
       host: arg("--host")!,

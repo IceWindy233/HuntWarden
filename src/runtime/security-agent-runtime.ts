@@ -1,11 +1,11 @@
-import type { AgentMessage, AgentToolResult } from "@earendil-works/pi-agent-core";
+import type { AgentEvent, AgentMessage, AgentToolResult } from "@earendil-works/pi-agent-core";
 import { Agent } from "@earendil-works/pi-agent-core";
 import type { Api, Model, Models, ToolResultMessage } from "@earendil-works/pi-ai";
 import type { ApprovalService } from "../agent/approval-service.js";
 import { buildSystemPrompt } from "../agent/system-prompt.js";
 import { sanitizeForLlm } from "../agent/data-sanitizer.js";
 import type { AppConfig } from "../config/schema.js";
-import type { SecurityToolDefinition, TaskContext } from "../domain/types.js";
+import type { AgentStreamUpdate, SecurityToolDefinition, TaskContext } from "../domain/types.js";
 import type { HostExecutor } from "../executor/operations.js";
 import type { RuntimeStore, ToolRunRecord } from "../storage/runtime-store.js";
 
@@ -24,6 +24,8 @@ export interface SecurityAgentRuntimeOptions {
 export class SecurityAgentRuntime extends EventEmitter {
   readonly agent: Agent;
   private readonly pendingInputByTimestamp = new Map<number, string>();
+  private activeStream: { streamId: string; timestamp: number } | undefined;
+  private streamSequence = 0;
 
   constructor(private readonly options: SecurityAgentRuntimeOptions) {
     super();
@@ -46,7 +48,7 @@ export class SecurityAgentRuntime extends EventEmitter {
         return current.turnCount >= config.agent.maxTurns || current.toolCallCount >= config.agent.maxToolCalls;
       },
     });
-    this.agent.subscribe(async (event) => { this.persistEvent(event as unknown as Record<string, unknown>); });
+    this.agent.subscribe(async (event) => { this.persistEvent(event); });
   }
 
   async prompt(text: string): Promise<void> {
@@ -158,9 +160,29 @@ export class SecurityAgentRuntime extends EventEmitter {
     return undefined;
   }
 
-  private persistEvent(event: Record<string, unknown>): void {
-    const type = String(event.type ?? "unknown");
-    if (type === "message_update") this.options.checkpoint?.("model_streaming");
+  private persistEvent(event: AgentEvent): void {
+    const type = event.type;
+    if (type === "message_start" && event.message.role === "assistant") {
+      this.activeStream = {
+        streamId: `${this.options.task.taskId}:${event.message.timestamp}:${++this.streamSequence}`,
+        timestamp: event.message.timestamp,
+      };
+      this.emitStream({ phase: "start" });
+    }
+    if (type === "message_update") {
+      this.options.checkpoint?.("model_streaming");
+      if (event.assistantMessageEvent.type === "text_delta" && event.assistantMessageEvent.delta) {
+        if (!this.activeStream) {
+          this.activeStream = {
+            streamId: `${this.options.task.taskId}:${event.message.timestamp}:${++this.streamSequence}`,
+            timestamp: event.message.timestamp,
+          };
+          this.emitStream({ phase: "start" });
+        }
+        this.emitStream({ phase: "delta", delta: event.assistantMessageEvent.delta });
+      }
+      return;
+    }
     if (type === "message_end" && event.message && typeof event.message === "object") {
       const message = event.message as AgentMessage;
       this.options.store.appendMessage(this.options.task.taskId, message);
@@ -168,6 +190,11 @@ export class SecurityAgentRuntime extends EventEmitter {
         const inputId = this.pendingInputByTimestamp.get(message.timestamp);
         if (inputId) { this.options.store.markInputDelivered(inputId); this.pendingInputByTimestamp.delete(message.timestamp); }
         this.options.checkpoint?.("model_response_after_user_persisted");
+      }
+      if (message.role === "assistant") {
+        const stopReason = "stopReason" in message ? message.stopReason : "stop";
+        this.emitStream({ phase: stopReason === "error" || stopReason === "aborted" ? "error" : "end" });
+        this.activeStream = undefined;
       }
     }
     if (type === "turn_end") {
@@ -185,6 +212,18 @@ export class SecurityAgentRuntime extends EventEmitter {
     }
     this.options.store.appendAudit({ taskId: this.options.task.taskId, event: type, level: type.includes("failed") ? "error" : "debug", data: {} });
     this.emit("event", { taskId: this.options.task.taskId, type });
+  }
+
+  private emitStream(input: { phase: AgentStreamUpdate["phase"]; delta?: string }): void {
+    if (!this.activeStream) return;
+    const update: AgentStreamUpdate = {
+      taskId: this.options.task.taskId,
+      streamId: this.activeStream.streamId,
+      phase: input.phase,
+      timestamp: this.activeStream.timestamp,
+      ...(input.delta === undefined ? {} : { delta: input.delta }),
+    };
+    this.emit("stream", update);
   }
 
   private async recoverToolRun(record: ToolRunRecord): Promise<void> {
