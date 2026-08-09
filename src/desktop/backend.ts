@@ -314,6 +314,7 @@ export class DesktopBackend extends EventEmitter {
     const { models, model } = this.options.modelBundleFactory?.(this.activeProfile.config)
       ?? createModelBundle(this.activeProfile.config, this.options.credentials);
     this.application = new Application(this.activeProfile.config, store, models, model, this.options.checkpoint);
+    this.seedNotificationBaseline(this.application);
     this.application.on("changed", (taskId: string) => this.publishTask(taskId));
     this.application.on("stream", (update: AgentStreamUpdate) => this.publishStream(update));
     this.application.on("approval_requested", (ticket: ApprovalTicket) => this.emitDesktop({ type: "approval_requested", ticket }));
@@ -359,6 +360,17 @@ export class DesktopBackend extends EventEmitter {
       state.auditIds.add(event.eventId); this.emitDesktop({ type: "audit_recorded", event });
     }
     this.emitted.set(taskId, state);
+  }
+
+  private seedNotificationBaseline(application: Application): void {
+    this.emitted.clear();
+    for (const task of application.store.listTasks()) {
+      this.emitted.set(task.taskId, {
+        findingIds: new Set(application.store.listFindings(task.taskId).map((finding) => finding.findingId)),
+        evidenceIds: new Set(application.store.listEvidence(task.taskId).map((evidence) => evidence.evidenceId)),
+        auditIds: new Set(application.store.listAudit(task.taskId, 50).map((event) => event.eventId)),
+      });
+    }
   }
 
   private emitDesktop(event: DesktopEvent): void { this.emit("event", event); }
