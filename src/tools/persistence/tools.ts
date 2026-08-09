@@ -124,9 +124,14 @@ export function createPersistenceTools(deps: ToolDependencies): SecurityToolDefi
         const result = await deps.executor.invoke({ operation: "collect_persistence_artifact", params: {
           kind: item.value.kind, path: item.value.path, expectedSha256: item.value.sha256, maxBytes: 10 * 1024 * 1024,
         } }, signal);
-        const evidence = await deps.evidence.putBuffer({ taskId: deps.task.taskId, host: deps.task.target.host, type: "persistence_artifact",
+        const commonInput = { taskId: deps.task.taskId, host: deps.task.target.host, type: "persistence_artifact",
           source: item.value.path, tool: "collect_persistence_artifact", toolCallId,
-          data: Buffer.from(result.dataBase64, "base64"), metadata: { persistenceRef: params.persistenceRef, kind: item.value.kind } });
+          metadata: { persistenceRef: params.persistenceRef, kind: item.value.kind } };
+        const evidence = result.artifact
+          ? await deps.evidence.putStream({ ...commonInput, transfer: async (onChunk) => deps.executor.downloadArtifact(result.artifact!, onChunk, signal, 120_000) })
+          : typeof result.dataBase64 === "string"
+            ? await deps.evidence.putBuffer({ ...commonInput, data: Buffer.from(result.dataBase64, "base64") })
+            : (() => { throw new Error("持久化 Evidence 未返回可采集内容"); })();
         return { status: "success", summary: { evidenceId: evidence.evidenceId, sha256: evidence.sha256, size: result.size },
           items: [{ persistenceRef: params.persistenceRef, evidenceId: evidence.evidenceId }], artifactRefs: [params.persistenceRef, evidence.evidenceId], warnings: [] };
       },

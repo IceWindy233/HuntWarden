@@ -7,6 +7,7 @@ import { createAccountTools } from "./account/tools.js";
 import { createRecordFindingTool } from "./local/record-finding.js";
 import { createRemediationTools } from "./remediation/tools.js";
 import { createPersistenceTools } from "./persistence/tools.js";
+import { createTriageTools } from "./triage/tools.js";
 
 export function createSecurityTools(deps: ToolDependencies): SecurityToolDefinition[] {
   const tools: SecurityToolDefinition[] = [...createHostTools(deps)];
@@ -16,7 +17,7 @@ export function createSecurityTools(deps: ToolDependencies): SecurityToolDefinit
   if (selected.has("java_memory_shell")) tools.push(...createJavaTools(deps));
   if (selected.has("backdoor_account")) tools.push(...createAccountTools(deps));
   if (selected.has("linux_persistence")) tools.push(...createPersistenceTools(deps));
-  // linux_intrusion_triage 已进入领域与任务边界；专用只读 Tool Pack 在后续切片接入此注册点。
+  if (selected.has("linux_intrusion_triage")) tools.push(...createTriageTools(deps));
 
   tools.push(createRecordFindingTool(deps));
 

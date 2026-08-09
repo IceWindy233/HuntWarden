@@ -21,8 +21,17 @@ describe("目标辅助程序边界", () => {
       protocolVersion: 1,
       helper: { name: "huntwarden-helper" },
       artifactTransfer: { supported: true, protocolVersion: 1 },
+      runtime: { euid: expect.any(Number), currentUser: expect.any(String), rootHelper: expect.any(Boolean) },
+      securityContext: { hidepid: expect.any(String), pidNamespace: expect.any(String) },
+      featureStatus: { linuxProc: { status: expect.stringMatching(/^(SUPPORTED|PARTIAL|UNSUPPORTED|PERMISSION_DENIED)$/), reason: expect.any(String) } },
     } });
     expect((result.envelope.result as { operations: string[] }).operations).toContain("collect_file");
+    expect((result.envelope.result as { operations: string[] }).operations).toEqual(expect.arrayContaining([
+      "capture_volatile_snapshot", "list_suspicious_processes", "inspect_process_tree",
+      "inspect_process_fds", "inspect_process_memory_maps", "collect_process_executable",
+      "list_recent_executables", "list_privileged_files", "verify_package_integrity",
+      "inspect_dynamic_loader", "query_auth_events", "query_exec_events", "build_incident_timeline",
+    ]));
   });
 
   it("采集文件只返回 Artifact Token，并可一次性释放", async () => {
@@ -54,5 +63,25 @@ describe("目标辅助程序边界", () => {
     const result = invoke("inspect_account", { username: "root;id" });
     expect(result.status).toBe(1);
     expect(result.envelope).toMatchObject({ ok: false, error: { code: "INVALID_ARGUMENT" } });
+  });
+
+  it("拒绝越界分诊预算和不完整的稳定进程身份", () => {
+    const limit = invoke("capture_volatile_snapshot", { maxProcesses: 10001, maxConnections: 10 });
+    expect(limit.envelope).toMatchObject({ ok: false, error: { code: "INVALID_ARGUMENT" } });
+
+    const identity = invoke("inspect_process_fds", { pid: 1, bootId: "invalid", maxItems: 10 });
+    expect(identity.envelope).toMatchObject({ ok: false, error: { code: "INVALID_ARGUMENT" } });
+  });
+
+  it("包完整性核验拒绝目录穿越和非固定目录", () => {
+    const traversal = invoke("verify_package_integrity", {
+      path: "/tmp/../etc/passwd", expectedInode: "1", expectedSha256: "0".repeat(64),
+    });
+    expect(traversal.envelope).toMatchObject({ ok: false, error: { code: "INVALID_ARGUMENT" } });
+
+    const outside = invoke("verify_package_integrity", {
+      path: "/etc/passwd", expectedInode: "1", expectedSha256: "0".repeat(64),
+    });
+    expect(outside.envelope).toMatchObject({ ok: false, error: { code: "PERMISSION_DENIED" } });
   });
 });

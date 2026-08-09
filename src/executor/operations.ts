@@ -5,6 +5,26 @@ export interface HostCapabilities {
   operations: string[];
   artifactTransfer: { supported: boolean; protocolVersion: number; maxBytes: number };
   features: { yara: boolean; javaAttach: boolean; tomcatProbe: boolean };
+  /** Backward-compatible booleans above are retained for existing planners. */
+  featureStatus?: Record<string, {
+    status: "SUPPORTED" | "PARTIAL" | "UNSUPPORTED" | "PERMISSION_DENIED";
+    reason: string;
+  }>;
+  runtime?: {
+    bootId?: string;
+    initSystem: string;
+    container: string;
+    euid: number;
+    currentUser: string;
+    rootHelper: boolean;
+  };
+  securityContext?: {
+    hidepid: string;
+    pidNamespace: string;
+    mountNamespace: string;
+    selinux: string;
+    apparmor: string;
+  };
   partial: boolean;
   warnings: string[];
 }
@@ -29,8 +49,37 @@ export interface ArtifactTransferResult {
   size: number;
 }
 
+export interface StableProcessIdentity {
+  bootId: string;
+  pid: number;
+  startTicks: string;
+  exeInode: string;
+  exeSha256: string;
+}
+
+export interface PartialItemsOutput {
+  items: Record<string, unknown>[];
+  partial: boolean;
+  warnings: string[];
+}
+
+export type StableProcessRequest = StableProcessIdentity;
+
 export interface HostOperationMap {
   get_capabilities: { input: Record<string, never>; output: HostCapabilities };
+  capture_volatile_snapshot: { input: { maxProcesses: number; maxConnections: number }; output: Record<string, unknown> & { processes: Record<string, unknown>[]; partial: boolean; warnings: string[] } };
+  list_suspicious_processes: { input: { maxProcesses: number }; output: PartialItemsOutput };
+  inspect_process_tree: { input: StableProcessRequest & { maxDepth: number; maxNodes: number }; output: PartialItemsOutput };
+  inspect_process_fds: { input: StableProcessRequest & { maxItems: number }; output: PartialItemsOutput };
+  inspect_process_memory_maps: { input: StableProcessRequest & { maxItems: number }; output: PartialItemsOutput };
+  collect_process_executable: { input: StableProcessRequest & { maxBytes: number }; output: CollectedArtifactOutput & { process: StableProcessIdentity } };
+  list_recent_executables: { input: { modifiedWithinHours: number; maxItems: number; maxFileSizeBytes: number }; output: PartialItemsOutput };
+  list_privileged_files: { input: { maxItems: number }; output: PartialItemsOutput };
+  verify_package_integrity: { input: { path: string; expectedInode: string; expectedSha256: string }; output: Record<string, unknown> & { partial: boolean; warnings: string[] } };
+  inspect_dynamic_loader: { input: { maxItems: number }; output: PartialItemsOutput };
+  query_auth_events: { input: { sinceHours: number; maxEvents: number }; output: PartialItemsOutput };
+  query_exec_events: { input: { sinceHours: number; maxEvents: number }; output: PartialItemsOutput };
+  build_incident_timeline: { input: { sinceHours: number; maxEvents: number }; output: PartialItemsOutput };
   get_host_info: { input: Record<string, never>; output: Record<string, unknown> };
   list_processes: { input: { pattern?: string }; output: Record<string, unknown>[] };
   discover_web_roots: { input: Record<string, never>; output: { path: string; server: string }[] };
@@ -46,7 +95,7 @@ export interface HostOperationMap {
   detect_java_container: { input: { pid: number }; output: Record<string, unknown> };
   run_tomcat_probe: {
     input: { pid: number; command: "list_components" | "inspect_class" | "dump_class"; className?: string };
-    output: Record<string, unknown>;
+    output: Record<string, unknown> & Partial<CollectedArtifactOutput>;
   };
   search_class_on_disk: { input: { pid: number; className: string }; output: Record<string, unknown> };
   list_privileged_accounts: { input: Record<string, never>; output: Record<string, unknown>[] };
@@ -59,8 +108,11 @@ export interface HostOperationMap {
   list_shell_startup_files: { input: { maxItems: number; includeUserScope: boolean }; output: { items: Record<string, unknown>[]; partial: boolean; warnings: string[] } };
   inspect_persistence_item: { input: { kind: string; path: string; username?: string; expectedSha256?: string }; output: Record<string, unknown> };
   find_related_processes: { input: { kind: string; path: string; commandHint?: string; expectedSha256?: string; maxProcesses: number }; output: Record<string, unknown>[] };
-  list_process_connections: { input: { pid: number; maxConnections: number }; output: { items: Record<string, unknown>[]; partial: boolean; warnings: string[] } };
-  collect_persistence_artifact: { input: { kind: string; path: string; expectedSha256: string; maxBytes: number }; output: { dataBase64: string; sha256: string; size: number } };
+  list_process_connections: {
+    input: { pid: number; maxConnections: number } & Partial<StableProcessRequest>;
+    output: { items: Record<string, unknown>[]; partial: boolean; warnings: string[] };
+  };
+  collect_persistence_artifact: { input: { kind: string; path: string; expectedSha256: string; maxBytes: number }; output: CollectedArtifactOutput };
   release_artifact: { input: { artifactToken: string }; output: { released: boolean } };
   get_action_receipt: { input: { actionId: string }; output: Record<string, unknown> };
   quarantine_file: {

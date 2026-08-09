@@ -100,7 +100,8 @@ describe.skipIf(!enabled)("Docker Lab 真实 SSH Tool Chain", () => {
     expect(disk.found).toBe(false);
     const dumped = await remote.invoke({ operation: "run_tomcat_probe", params: { pid, command: "dump_class", className: "lab.DynamicMarkerFilter" }, timeoutMs: 60_000 });
     expect(dumped.partial).toBe(false);
-    expect(Buffer.from(String(dumped.dataBase64), "base64").subarray(0, 4).toString("hex")).toBe("cafebabe");
+    const dumpedBytes = await artifactBytes(remote, dumped as CollectedArtifactOutput);
+    expect(dumpedBytes.subarray(0, 4).toString("hex")).toBe("cafebabe");
   }, 120_000);
 
   it("Lab-Account 识别 UID 0 测试账户和未知 Key 指纹", async () => {
@@ -161,7 +162,7 @@ describe.skipIf(!enabled)("Docker Lab 真实 SSH Tool Chain", () => {
       kind: String(unit!.kind), path: String(unit!.path), expectedSha256: String(unit!.sha256), maxBytes: 1024 * 1024,
     } });
     expect(artifact.sha256).toBe(unit!.sha256);
-    expect(Buffer.from(artifact.dataBase64, "base64").length).toBe(artifact.size);
+    expect((await artifactBytes(remote, artifact)).length).toBe(artifact.size);
 
     await expect(remote.invoke({ operation: "inspect_persistence_item", params: {
       kind: "shell", path: "/etc/passwd", expectedSha256: "0".repeat(64),

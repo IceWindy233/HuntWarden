@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import socket
+import time
 
 server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -9,4 +10,7 @@ while True:
     connection, _ = server.accept()
     connection.recv(64)
     connection.sendall(b"huntwarden-lab-ok")
-    connection.close()
+    # This harmless fixture intentionally keeps one connection open so the
+    # process-to-socket correlation is deterministic during Docker tests.
+    while True:
+        time.sleep(60)

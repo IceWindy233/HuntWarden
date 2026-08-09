@@ -68,6 +68,42 @@ describe("任务检测包边界", () => {
     store.close();
   });
 
+  it("仅在选择 Linux 入侵分诊时注册分诊工具包", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "huntwarden-tool-scope-triage-"));
+    directories.push(directory);
+    const store = await RuntimeStore.open(directory, "runtime.db");
+    const task = testTask("SCAN");
+    task.checks = ["linux_intrusion_triage"];
+    store.createTask(task);
+    const names = createSecurityTools({
+      task,
+      config: testConfig(directory),
+      store,
+      executor: new FakeExecutor(),
+      approvals: new ApprovalService(store),
+      evidence: new EvidenceStore(directory, store),
+    }).map((tool) => tool.name);
+
+    expect(names).toEqual(expect.arrayContaining([
+      "list_suspicious_processes",
+      "inspect_process_tree",
+      "inspect_process_fds",
+      "list_process_connections",
+      "list_recent_executables",
+      "query_auth_events",
+      "record_finding",
+    ]));
+    expect(names).not.toEqual(expect.arrayContaining([
+      "discover_web_roots",
+      "list_java_processes",
+      "list_privileged_accounts",
+      "list_cron_entries",
+      "quarantine_file",
+      "disable_account",
+    ]));
+    store.close();
+  });
+
   it("REMEDIATE 模式也只暴露所选检测包对应的写工具", async () => {
     const directory = await mkdtemp(join(tmpdir(), "huntwarden-write-tool-scope-"));
     directories.push(directory);
