@@ -1,5 +1,6 @@
 import React, { useState } from "react";
 import type { ConfigProfile, NewTaskInput } from "../../gui/contracts.js";
+import type { SshHostKeyDiscovery } from "../../executor/ssh-host-key-service.js";
 import type { TaskContext } from "../../domain/types.js";
 import { Button, Field, Input, Modal, Select, Textarea } from "./ui.js";
 
@@ -15,14 +16,60 @@ export function NewTaskDialog({ profile, onClose, onCreated, notify }: { profile
     },
   });
   const [busy, setBusy] = useState<string>();
+  const [hostKey, setHostKey] = useState<SshHostKeyDiscovery>();
 
-  const updateTarget = (patch: Partial<NewTaskInput["target"]>) => setForm((old) => ({ ...old, target: { ...old.target, ...patch } }));
+  const updateTarget = (patch: Partial<NewTaskInput["target"]>) => {
+    const identityChanged = patch.host !== undefined || patch.port !== undefined || patch.knownHostsPath !== undefined;
+    if (identityChanged) setHostKey(undefined);
+    setForm((old) => ({ ...old, target: { ...old.target, ...(identityChanged ? { hostFingerprint: "" } : {}), ...patch } }));
+  };
   const toggleCheck = (check: NewTaskInput["checks"][number]) => setForm((old) => ({ ...old, checks: old.checks.includes(check) ? old.checks.filter((item) => item !== check) : [...old.checks, check] }));
 
   async function testSsh(): Promise<void> {
     setBusy("test");
     try { const result = await window.huntwarden.testSshTarget(form.target); notify(result.message, result.ok ? "success" : "error"); }
     catch (error) { notify(error instanceof Error ? error.message : String(error), "error"); }
+    finally { setBusy(undefined); }
+  }
+
+  async function discoverHostKey(): Promise<void> {
+    setBusy("host-key");
+    try {
+      const result = await window.huntwarden.discoverSshHostKey({
+        host: form.target.host, port: form.target.port, knownHostsPath: form.target.knownHostsPath,
+      });
+      setHostKey(result);
+      if (result.trustStatus === "TRUSTED") {
+        updateTarget({ hostFingerprint: result.fingerprint });
+        setHostKey(result);
+        notify("Host Key 已与 known_hosts 核验一致", "success");
+      } else if (result.trustStatus === "UNKNOWN") {
+        updateTarget({ hostFingerprint: "" });
+        setHostKey(result);
+        notify("发现未知 Host Key，请核对后显式确认信任", "info");
+      } else {
+        updateTarget({ hostFingerprint: "" });
+        setHostKey(result);
+        notify(result.trustStatus === "REVOKED" ? "Host Key 已被撤销，连接已阻断" : "Host Key 与 known_hosts 冲突，连接已阻断", "error");
+      }
+    } catch (error) { notify(error instanceof Error ? error.message : String(error), "error"); }
+    finally { setBusy(undefined); }
+  }
+
+  async function confirmHostKey(): Promise<void> {
+    if (!hostKey || hostKey.trustStatus !== "UNKNOWN") return;
+    if (!window.confirm(`确认信任 ${hostKey.host}:${hostKey.port} 的 ${hostKey.algorithm} Host Key？\n\n${hostKey.fingerprint}\n\n确认后将原子写入所选 known_hosts。`)) return;
+    setBusy("host-key-confirm");
+    try {
+      const trusted = await window.huntwarden.confirmSshHostKey({
+        host: hostKey.host, port: hostKey.port, knownHostsPath: hostKey.knownHostsPath,
+        expectedFingerprint: hostKey.fingerprint,
+      });
+      setHostKey(trusted);
+      updateTarget({ hostFingerprint: trusted.fingerprint });
+      setHostKey(trusted);
+      notify("Host Key 已确认并安全写入 known_hosts", "success");
+    } catch (error) { notify(error instanceof Error ? error.message : String(error), "error"); }
     finally { setBusy(undefined); }
   }
 
@@ -40,10 +87,17 @@ export function NewTaskDialog({ profile, onClose, onCreated, notify }: { profile
       <Field label="SSH 端口"><Input type="number" min={1} max={65535} value={form.target.port} onChange={(event) => updateTarget({ port: Number(event.target.value) })} /></Field>
       <Field label="SSH 用户"><Input value={form.target.username} onChange={(event) => updateTarget({ username: event.target.value })} /></Field>
       <Field label="任务模式"><Select value={form.mode} onChange={(event) => setForm({ ...form, mode: event.target.value as NewTaskInput["mode"] })}><option value="SCAN">SCAN · 只读调查</option><option value="REMEDIATE">REMEDIATE · 允许逐动作审批处置</option></Select></Field>
-      <Field label="SHA-256 Host Key 指纹" wide hint="必须与 known_hosts 中的已知指纹完全一致，不会自动接受未知主机。"><Input value={form.target.hostFingerprint} onChange={(event) => updateTarget({ hostFingerprint: event.target.value })} placeholder="SHA256:..." /></Field>
+      <Field label="SHA-256 Host Key 指纹" wide hint="先按 host + port 无凭据发现；未知 Key 必须显式确认，冲突或撤销 Key 会被阻断。"><div className="input-action"><Input value={form.target.hostFingerprint} onChange={(event) => updateTarget({ hostFingerprint: event.target.value })} placeholder="SHA256:..." /><Button variant="ghost" onClick={discoverHostKey} busy={busy === "host-key"}>解析 Host Key</Button></div></Field>
       <Field label="SSH 私钥" wide><div className="input-action"><Input value={form.target.privateKeyPath} onChange={(event) => updateTarget({ privateKeyPath: event.target.value })} /><Button variant="ghost" onClick={async () => { const path = await window.huntwarden.selectPrivateKey(); if (path) updateTarget({ privateKeyPath: path }); }}>选择</Button></div></Field>
       <Field label="known_hosts" wide><div className="input-action"><Input value={form.target.knownHostsPath} onChange={(event) => updateTarget({ knownHostsPath: event.target.value })} /><Button variant="ghost" onClick={async () => { const path = await window.huntwarden.selectKnownHosts(); if (path) updateTarget({ knownHostsPath: path }); }}>选择</Button></div></Field>
     </div>
+    {hostKey ? <div className={`host-key-card host-key-${hostKey.trustStatus.toLowerCase()}`}>
+      <div><strong>{hostKey.trustStatus === "TRUSTED" ? "已信任" : hostKey.trustStatus === "UNKNOWN" ? "未知 Host Key" : hostKey.trustStatus === "CHANGED" ? "Host Key 已变化" : "Host Key 已撤销"}</strong><span>{hostKey.host}:{hostKey.port} · {hostKey.algorithm}</span></div>
+      <code>{hostKey.fingerprint}</code>
+      <small>解析地址：{hostKey.resolvedAddresses.map((item) => item.address).join("、") || "--"} · Key 摘要：{hostKey.keySummary}</small>
+      {hostKey.existingFingerprints.length ? <small>known_hosts 现有：{hostKey.existingFingerprints.join("、")}</small> : null}
+      {hostKey.trustStatus === "UNKNOWN" ? <Button variant="primary" onClick={confirmHostKey} busy={busy === "host-key-confirm"}>确认信任并写入</Button> : null}
+    </div> : null}
     <div className="check-grid">
       <CheckCard active={form.checks.includes("webshell")} title="WebShell" description="近期脚本、YARA、日志关联与文件证据" onClick={() => toggleCheck("webshell")} />
       <CheckCard active={form.checks.includes("java_memory_shell")} title="Java 内存马" description="Tomcat 组件、Class 来源与只读 Dump" onClick={() => toggleCheck("java_memory_shell")} />

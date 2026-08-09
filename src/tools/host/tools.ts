@@ -8,6 +8,21 @@ export function createHostTools(deps: ToolDependencies): SecurityToolDefinition[
   const common = [deps.store, deps.task.taskId, deps.config.llmData.maxTextBytes] as const;
   return [
     createSecurityTool(...common, {
+      name: "get_capabilities",
+      label: "协商目标能力",
+      description: "读取当前任务绑定 Helper 的协议版本、固定操作和运行时依赖能力。缺失能力必须按 PARTIAL 处理，不得表述为已安全检查。",
+      parameters: Type.Object({}, { additionalProperties: false }),
+      risk: "READ", replayPolicy: "SAFE", timeoutMs: 15_000, auditEvent: "host_capabilities_collected",
+      run: async (_id, _params, signal): Promise<SecurityToolResult> => {
+        const capabilities = await deps.executor.invoke({ operation: "get_capabilities", params: {} }, signal);
+        return {
+          status: capabilities.partial ? "partial" : "success",
+          summary: { protocolVersion: capabilities.protocolVersion, helper: capabilities.helper, features: capabilities.features },
+          items: [capabilities], artifactRefs: [], warnings: capabilities.warnings,
+        };
+      },
+    }),
+    createSecurityTool(...common, {
       name: "get_host_info",
       label: "获取主机信息",
       description: "获取当前任务绑定主机的操作系统、内核、架构、Java 与 YARA 可用性。应在调查开始时调用。本工具只读且不接受目标参数。",

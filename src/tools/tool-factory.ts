@@ -4,6 +4,7 @@ import { sanitizeForLlm } from "../agent/data-sanitizer.js";
 import { SecurityError } from "../common/errors.js";
 import type { SecurityToolDefinition } from "../domain/types.js";
 import type { RuntimeStore } from "../storage/runtime-store.js";
+import { withHostOperationTimeout } from "../executor/timeout-context.js";
 
 export interface SecurityToolMeta<TParameters extends TSchema, TDetails> {
   name: string;
@@ -55,7 +56,7 @@ export function createSecurityTool<TParameters extends TSchema, TDetails>(
       store.appendAudit({ taskId, event: "tool_started", level: "info", data: { toolCallId, tool: meta.name, risk: meta.risk } });
       try {
         onUpdate?.({ content: [{ type: "text", text: `${meta.label} 正在执行` }], details: {} as TDetails });
-        const details = await meta.run(toolCallId, params, signal, onUpdate);
+        const details = await withHostOperationTimeout(meta.timeoutMs, async () => await meta.run(toolCallId, params, signal, onUpdate));
         const sanitized = sanitizeForLlm(JSON.stringify(details), maxLlmBytes);
         const result: AgentToolResult<TDetails> = {
           content: [{ type: "text", text: sanitized.text }],

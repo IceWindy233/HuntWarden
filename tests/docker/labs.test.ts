@@ -7,6 +7,7 @@ import { createId } from "../../src/common/ids.js";
 import { ApprovalService } from "../../src/agent/approval-service.js";
 import { EvidenceStore } from "../../src/evidence/evidence-store.js";
 import { SSHExecutor } from "../../src/executor/ssh-executor.js";
+import type { CollectedArtifactOutput } from "../../src/executor/operations.js";
 import { RuntimeStore } from "../../src/storage/runtime-store.js";
 import { createReference } from "../../src/tools/reference-utils.js";
 import { createRemediationTools } from "../../src/tools/remediation/tools.js";
@@ -41,8 +42,21 @@ describe.skipIf(!enabled)("Docker Lab 真实 SSH Tool Chain", () => {
     return value;
   }
 
+  async function artifactBytes(remote: SSHExecutor, output: CollectedArtifactOutput): Promise<Buffer> {
+    if (output.artifact) {
+      const chunks: Buffer[] = [];
+      await remote.downloadArtifact(output.artifact, (chunk) => { chunks.push(Buffer.from(chunk)); });
+      return Buffer.concat(chunks);
+    }
+    if (typeof output.dataBase64 === "string") return Buffer.from(output.dataBase64, "base64");
+    throw new Error("采集结果没有 Artifact Token 或兼容字节数据");
+  }
+
   it("Lab-Web 完成候选、YARA、特征和采集链", async () => {
     const remote = executor(2222);
+    const capabilities = await remote.invoke({ operation: "get_capabilities", params: {} });
+    expect(capabilities).toMatchObject({ protocolVersion: 1, artifactTransfer: { supported: true, protocolVersion: 1 } });
+    expect(capabilities.operations).toContain("collect_file");
     const roots = await remote.invoke({ operation: "discover_web_roots", params: {} });
     expect(roots.some((item) => item.path === "/var/www/html")).toBe(true);
     const files = await remote.invoke({ operation: "find_recent_web_files", params: {
@@ -58,7 +72,15 @@ describe.skipIf(!enabled)("Docker Lab 真实 SSH Tool Chain", () => {
     expect(inspection.sha256).toBe(sample!.sha256);
     const evidence = await remote.invoke({ operation: "collect_file", params: { path: String(sample!.path), maxBytes: 10 * 1024 * 1024 } });
     expect(evidence.sha256).toBe(sample!.sha256);
-    expect(Buffer.from(evidence.dataBase64, "base64").length).toBe(evidence.size);
+    expect((await artifactBytes(remote, evidence)).length).toBe(evidence.size);
+
+    const large = await remote.invoke({ operation: "collect_file", params: { path: "/usr/bin/python3", maxBytes: 10 * 1024 * 1024 } });
+    expect(large.artifact).toBeTruthy();
+    let chunks = 0;
+    let transferred = 0;
+    await remote.downloadArtifact(large.artifact!, (chunk) => { chunks += 1; transferred += chunk.length; });
+    expect(transferred).toBe(large.size);
+    expect(chunks).toBeGreaterThan(1);
   });
 
   it("Lab-Tomcat 枚举动态 Filter 并完成 Class Dump", async () => {
@@ -177,7 +199,7 @@ describe.skipIf(!enabled)("Docker Lab 真实 SSH Tool Chain", () => {
     const evidence = new EvidenceStore(directory, store);
     const stored = await evidence.putBuffer({
       taskId: task.taskId, host: task.target.host, type: "file", source, tool: "collect_file",
-      toolCallId: "call-collect-webshell", data: Buffer.from(String(collected.dataBase64), "base64"),
+      toolCallId: "call-collect-webshell", data: await artifactBytes(remote, collected),
     });
     expect(stored.sha256).toBe(collected.sha256);
     const config = testConfig(directory);

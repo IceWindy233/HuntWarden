@@ -17,6 +17,7 @@ import pathlib
 import platform
 import pwd
 import re
+import secrets
 import shutil
 import socket
 import stat
@@ -28,6 +29,11 @@ from typing import Any, Callable
 MAX_INPUT = 1024 * 1024
 MAX_TEXT = 2 * 1024 * 1024
 RECEIPT_DIR = pathlib.Path("/var/lib/huntwarden/actions")
+ARTIFACT_DIR = pathlib.Path("/var/lib/huntwarden/artifacts") if os.geteuid() == 0 else pathlib.Path(tempfile.gettempdir()) / "huntwarden-artifacts"
+ARTIFACT_TOKEN = re.compile(r"^[a-f0-9]{64}$")
+ARTIFACT_MAX_BYTES = 100 * 1024 * 1024
+ARTIFACT_TTL_SECONDS = 15 * 60
+HELPER_VERSION = "0.2.0"
 PROBE_JAR = pathlib.Path("/opt/huntwarden/huntwarden-tomcat-probe.jar")
 SCRIPT_EXTENSIONS = {".php", ".phtml", ".php5", ".jsp", ".jspx", ".asp", ".aspx", ".py", ".pl", ".cgi"}
 USERNAME = re.compile(r"^[a-z_][a-z0-9_-]{0,31}$", re.I)
@@ -102,6 +108,100 @@ def sha256_file(path: pathlib.Path) -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def artifact_path(token: str) -> pathlib.Path:
+    if not isinstance(token, str) or not ARTIFACT_TOKEN.fullmatch(token):
+        raise HelperError("INVALID_ARGUMENT", "invalid artifactToken")
+    return ARTIFACT_DIR / f"{token}.artifact"
+
+
+def prepare_artifact_dir() -> None:
+    ARTIFACT_DIR.mkdir(parents=True, exist_ok=True, mode=0o711)
+    info = ARTIFACT_DIR.lstat()
+    if not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode):
+        raise HelperError("EVIDENCE_COLLECTION", "artifact spool is not a real directory")
+    os.chmod(ARTIFACT_DIR, 0o711)
+    cutoff = dt.datetime.now(dt.timezone.utc).timestamp() - ARTIFACT_TTL_SECONDS
+    for candidate in ARTIFACT_DIR.glob("*.artifact"):
+        try:
+            if candidate.stat().st_mtime < cutoff:
+                candidate.unlink()
+        except OSError:
+            continue
+
+
+def stage_artifact(source: pathlib.Path, maximum: int) -> dict[str, Any]:
+    prepare_artifact_dir()
+    info = source.stat()
+    if not stat.S_ISREG(info.st_mode) or info.st_size > maximum or info.st_size > ARTIFACT_MAX_BYTES:
+        raise HelperError("EVIDENCE_COLLECTION", "file is not regular or exceeds collection limit")
+    token = secrets.token_hex(32)
+    destination = artifact_path(token)
+    digest = hashlib.sha256()
+    size = 0
+    try:
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        descriptor = os.open(destination, flags, 0o400)
+        with source.open("rb") as reader, os.fdopen(descriptor, "wb") as writer:
+            for chunk in iter(lambda: reader.read(256 * 1024), b""):
+                size += len(chunk)
+                if size > maximum or size > ARTIFACT_MAX_BYTES:
+                    raise HelperError("EVIDENCE_COLLECTION", "file grew beyond collection limit")
+                digest.update(chunk)
+                writer.write(chunk)
+            writer.flush()
+            os.fsync(writer.fileno())
+        sudo_uid = int(os.environ.get("SUDO_UID", os.getuid()))
+        sudo_gid = int(os.environ.get("SUDO_GID", os.getgid()))
+        if os.geteuid() == 0:
+            os.chown(destination, sudo_uid, sudo_gid)
+        os.chmod(destination, 0o400)
+    except Exception:
+        destination.unlink(missing_ok=True)
+        raise
+    expires = dt.datetime.now(dt.timezone.utc) + dt.timedelta(seconds=ARTIFACT_TTL_SECONDS)
+    return {
+        "artifactToken": token,
+        "sha256": digest.hexdigest(),
+        "size": size,
+        "expiresAt": expires.isoformat(),
+    }
+
+
+def release_artifact(request: dict[str, Any]) -> dict[str, Any]:
+    path = artifact_path(request.get("artifactToken"))
+    try:
+        path.unlink()
+        return {"released": True}
+    except FileNotFoundError:
+        return {"released": False}
+
+
+def get_capabilities(_: dict[str, Any]) -> dict[str, Any]:
+    warnings = []
+    yara = shutil.which("yara") is not None
+    java_attach = pathlib.Path("/usr/bin/jcmd").exists() or shutil.which("java") is not None
+    probe = PROBE_JAR.is_file()
+    if not yara:
+        warnings.append("YARA 不可用，WebShell 规则扫描将为 PARTIAL")
+    if not probe:
+        warnings.append("Tomcat 探针不可用，Java 组件调查将为 PARTIAL")
+    return {
+        "protocolVersion": 1,
+        "helper": {"name": "huntwarden-helper", "version": HELPER_VERSION},
+        "platform": {
+            "system": platform.system(), "release": platform.release(),
+            "architecture": platform.machine(), "python": platform.python_version(),
+        },
+        "operations": sorted(OPERATIONS.keys()),
+        "artifactTransfer": {"supported": True, "protocolVersion": 1, "maxBytes": ARTIFACT_MAX_BYTES},
+        "features": {"yara": yara, "javaAttach": java_attach, "tomcatProbe": probe},
+        "partial": bool(warnings),
+        "warnings": warnings,
+    }
 
 
 def file_facts(path: pathlib.Path) -> dict[str, Any]:
@@ -371,12 +471,9 @@ def search_web_access_log(request: dict[str, Any]) -> list[dict[str, Any]]:
 
 def collect_file(request: dict[str, Any]) -> dict[str, Any]:
     path = safe_path(request.get("path"))
-    maximum = safe_int(request.get("maxBytes"), 1, 100 * 1024 * 1024, "maxBytes")
-    info = path.stat()
-    if not stat.S_ISREG(info.st_mode) or info.st_size > maximum:
-        raise HelperError("EVIDENCE_COLLECTION", "file is not regular or exceeds collection limit")
-    data = path.read_bytes()
-    return {"dataBase64": base64.b64encode(data).decode(), "sha256": hashlib.sha256(data).hexdigest(), "size": len(data)}
+    maximum = safe_int(request.get("maxBytes"), 1, ARTIFACT_MAX_BYTES, "maxBytes")
+    artifact = stage_artifact(path, maximum)
+    return {"artifact": artifact, "sha256": artifact["sha256"], "size": artifact["size"]}
 
 
 def list_java_processes(_: dict[str, Any]) -> list[dict[str, Any]]:
@@ -829,6 +926,7 @@ def disable_account(request: dict[str, Any]) -> dict[str, Any]:
 
 
 OPERATIONS: dict[str, Callable[[dict[str, Any]], Any]] = {
+    "get_capabilities": get_capabilities,
     "get_host_info": get_host_info,
     "list_processes": list_processes,
     "discover_web_roots": discover_web_roots,
@@ -853,6 +951,7 @@ OPERATIONS: dict[str, Callable[[dict[str, Any]], Any]] = {
     "find_related_processes": find_related_processes,
     "list_process_connections": list_process_connections,
     "collect_persistence_artifact": collect_persistence_artifact,
+    "release_artifact": release_artifact,
     "get_action_receipt": get_action_receipt,
     "quarantine_file": quarantine_file,
     "disable_account": disable_account,

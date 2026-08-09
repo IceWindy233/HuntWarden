@@ -82,7 +82,12 @@ export function createWebShellTools(deps: ToolDependencies): SecurityToolDefinit
         const candidate = requireReference<FileCandidateValue>(deps.store, deps.task.taskId, params.candidateRef, "candidate");
         const result = await deps.executor.invoke({ operation: "collect_file", params: { path: candidate.value.path, maxBytes: deps.config.webshell.maxFileSizeBytes } }, signal);
         if (result.sha256 !== candidate.value.sha256) throw new Error("采集时文件哈希已变化");
-        const evidence = await deps.evidence.putBuffer({ taskId: deps.task.taskId, host: deps.task.target.host, type: "file", source: candidate.value.path, tool: "collect_file", toolCallId, data: Buffer.from(result.dataBase64, "base64"), metadata: { candidateRef: params.candidateRef } });
+        const commonInput = { taskId: deps.task.taskId, host: deps.task.target.host, type: "file", source: candidate.value.path, tool: "collect_file", toolCallId, metadata: { candidateRef: params.candidateRef } };
+        const evidence = result.artifact
+          ? await deps.evidence.putStream({ ...commonInput, transfer: async (onChunk) => await deps.executor.downloadArtifact(result.artifact!, onChunk, signal) })
+          : typeof result.dataBase64 === "string"
+            ? await deps.evidence.putBuffer({ ...commonInput, data: Buffer.from(result.dataBase64, "base64") })
+            : (() => { throw new Error("采集结果没有 Artifact Token 或兼容字节数据"); })();
         return { status: "success", summary: { evidenceId: evidence.evidenceId, sha256: evidence.sha256, size: result.size }, items: [{ evidenceId: evidence.evidenceId, source: evidence.source, sha256: evidence.sha256 }], artifactRefs: [evidence.evidenceId], warnings: [] };
       },
     }),

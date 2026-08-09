@@ -13,6 +13,7 @@ import type { DesktopCredentialStore } from "../credentials/credential-store.js"
 import { validateTargetConfig } from "../domain/validation.js";
 import type { AgentStreamUpdate, ApprovalTicket, AuditEvent, Evidence, Finding, ReportRecord, TaskContext } from "../domain/types.js";
 import { SSHExecutor } from "../executor/ssh-executor.js";
+import { SshHostKeyService, type SshHostKeyDiscovery } from "../executor/ssh-host-key-service.js";
 import type {
   ConfigProfile,
   ConfigProfileSummary,
@@ -43,6 +44,7 @@ export interface DesktopBackendOptions {
 
 export class DesktopBackend extends EventEmitter {
   readonly profiles: ConfigProfileService;
+  private readonly hostKeys = new SshHostKeyService();
   private application: Application | undefined;
   private activeProfile: ConfigProfile | undefined;
   private closePromise: Promise<void> | undefined;
@@ -190,6 +192,14 @@ export class DesktopBackend extends EventEmitter {
     } finally {
       await executor.close();
     }
+  }
+
+  async discoverSshHostKey(input: { host: string; port: number; knownHostsPath: string }): Promise<SshHostKeyDiscovery> {
+    return await this.hostKeys.discover(input);
+  }
+
+  async confirmSshHostKey(input: { host: string; port: number; knownHostsPath: string; expectedFingerprint: string }): Promise<SshHostKeyDiscovery> {
+    return await this.hostKeys.confirm(input);
   }
 
   listTasks(): TaskContext[] { return this.requireApplication().store.listTasks(); }

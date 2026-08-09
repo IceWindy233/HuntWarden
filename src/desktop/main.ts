@@ -113,6 +113,23 @@ function registerIpc(): void {
     const result = await dialog.showOpenDialog(mainWindow!, { title: "选择 known_hosts", properties: ["openFile", "showHiddenFiles"] });
     return result.canceled ? undefined : result.filePaths[0];
   });
+  handle(IPC.sshHostKeyDiscover, async (_event, value) => {
+    const input = exactObject(value, ["host", "port", "knownHostsPath"], "Host Key 发现参数");
+    return await requireBackend().discoverSshHostKey({
+      host: text(input.host, "目标主机", 253),
+      port: Number(input.port),
+      knownHostsPath: text(input.knownHostsPath, "known_hosts", 4096),
+    });
+  });
+  handle(IPC.sshHostKeyConfirm, async (_event, value) => {
+    const input = exactObject(value, ["host", "port", "knownHostsPath", "expectedFingerprint"], "Host Key 确认参数");
+    return await requireBackend().confirmSshHostKey({
+      host: text(input.host, "目标主机", 253),
+      port: Number(input.port),
+      knownHostsPath: text(input.knownHostsPath, "known_hosts", 4096),
+      expectedFingerprint: text(input.expectedFingerprint, "Host Key 指纹", 256),
+    });
+  });
   handle(IPC.sshTest, async (_event, value) => {
     const wrapper = exactObject(value, ["host", "port", "username", "hostFingerprint", "privateKeyPath", "knownHostsPath"], "目标");
     const input = newTaskInput({ request: "SSH 连接测试", mode: "SCAN", checks: ["webshell"], target: wrapper });

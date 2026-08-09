@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { chmod, mkdir, open, readFile, rename } from "node:fs/promises";
+import { chmod, mkdir, open, readFile, rename, unlink } from "node:fs/promises";
 import { basename, join } from "node:path";
 import { createDeterministicId, createId } from "../common/ids.js";
 import type { Evidence } from "../domain/types.js";
@@ -69,6 +69,62 @@ export class EvidenceStore {
     };
     this.runtime.putEvidence(evidence);
     return evidence;
+  }
+
+  async putStream(input: {
+    taskId: string; host: string; type: string; source: string; tool: string;
+    toolCallId?: string; metadata?: Record<string, unknown>;
+    transfer: (onChunk: (chunk: Buffer) => Promise<void>) => Promise<{ sha256: string; size: number }>;
+  }): Promise<Evidence> {
+    const existing = input.toolCallId
+      ? this.runtime.listEvidence(input.taskId).find((item) => item.toolCallId === input.toolCallId)
+      : undefined;
+    if (existing) return existing;
+    const evidenceId = input.toolCallId
+      ? createDeterministicId("evidence", `${input.taskId}:${input.toolCallId}`)
+      : createId("evidence");
+    const taskDir = join(this.baseDir, "evidence", input.taskId);
+    await mkdir(taskDir, { recursive: true, mode: 0o700 });
+    await chmod(taskDir, 0o700);
+    const finalPath = join(taskDir, `${evidenceId}_${safeName(input.source)}`);
+    const tempPath = `${finalPath}.${process.pid}.tmp`;
+    const handle = await open(tempPath, "wx", 0o600);
+    const digest = createHash("sha256");
+    let size = 0;
+    try {
+      const transfer = await input.transfer(async (chunk) => {
+        if (!Buffer.isBuffer(chunk) || chunk.length === 0) return;
+        digest.update(chunk);
+        size += chunk.length;
+        await handle.write(chunk);
+      });
+      const actualSha256 = digest.digest("hex");
+      if (transfer.size !== size || transfer.sha256 !== actualSha256) throw new Error("流式 Evidence 大小或 SHA-256 校验失败");
+      await handle.sync();
+      await handle.close();
+      await rename(tempPath, finalPath);
+      this.checkpoint?.("evidence_file_written_before_metadata");
+      await chmod(finalPath, 0o600);
+      const evidence: Evidence = {
+        evidenceId,
+        taskId: input.taskId,
+        host: input.host,
+        type: input.type,
+        source: input.source,
+        sha256: actualSha256,
+        collectedAt: new Date().toISOString(),
+        tool: input.tool,
+        ...(input.toolCallId ? { toolCallId: input.toolCallId } : {}),
+        storagePath: finalPath,
+        ...(input.metadata ? { metadata: input.metadata } : {}),
+      };
+      this.runtime.putEvidence(evidence);
+      return evidence;
+    } catch (error) {
+      await handle.close().catch(() => undefined);
+      await unlink(tempPath).catch(() => undefined);
+      throw error;
+    }
   }
 
   putStructured(input: Omit<Evidence, "evidenceId" | "collectedAt">): Evidence {

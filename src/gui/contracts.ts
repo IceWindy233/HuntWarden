@@ -1,7 +1,8 @@
 import type { AppConfig } from "../config/schema.js";
 import type { ActionReceipt, AgentStreamUpdate, ApprovalTicket, AuditEvent, Evidence, Finding, ReportRecord, TaskContext, TaskMode, CheckCategory } from "../domain/types.js";
+import type { SshHostKeyDiscovery } from "../executor/ssh-host-key-service.js";
 
-export const DESKTOP_API_VERSION = 4 as const;
+export const DESKTOP_API_VERSION = 5 as const;
 
 export interface ConfigProfileSummary {
   profileId: string;
@@ -142,6 +143,8 @@ export interface HuntWardenDesktopApi {
 
   selectPrivateKey(): Promise<string | undefined>;
   selectKnownHosts(): Promise<string | undefined>;
+  discoverSshHostKey(input: { host: string; port: number; knownHostsPath: string }): Promise<SshHostKeyDiscovery>;
+  confirmSshHostKey(input: { host: string; port: number; knownHostsPath: string; expectedFingerprint: string }): Promise<SshHostKeyDiscovery>;
   testSshTarget(input: NewTaskInput["target"]): Promise<{ ok: boolean; fingerprint?: string; message: string }>;
 
   listTasks(): Promise<TaskContext[]>;

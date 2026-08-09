@@ -1,4 +1,36 @@
+export interface HostCapabilities {
+  protocolVersion: number;
+  helper: { name: string; version: string };
+  platform: { system: string; release: string; architecture: string; python: string };
+  operations: string[];
+  artifactTransfer: { supported: boolean; protocolVersion: number; maxBytes: number };
+  features: { yara: boolean; javaAttach: boolean; tomcatProbe: boolean };
+  partial: boolean;
+  warnings: string[];
+}
+
+export interface RemoteArtifact {
+  artifactToken: string;
+  sha256: string;
+  size: number;
+  expiresAt: string;
+}
+
+export interface CollectedArtifactOutput {
+  sha256: string;
+  size: number;
+  artifact?: RemoteArtifact;
+  /** Faux/legacy executors may still return inline data. SSH never does. */
+  dataBase64?: string;
+}
+
+export interface ArtifactTransferResult {
+  sha256: string;
+  size: number;
+}
+
 export interface HostOperationMap {
+  get_capabilities: { input: Record<string, never>; output: HostCapabilities };
   get_host_info: { input: Record<string, never>; output: Record<string, unknown> };
   list_processes: { input: { pattern?: string }; output: Record<string, unknown>[] };
   discover_web_roots: { input: Record<string, never>; output: { path: string; server: string }[] };
@@ -9,7 +41,7 @@ export interface HostOperationMap {
   yara_scan_files: { input: { paths: string[]; rulePath: string }; output: Record<string, unknown>[] };
   inspect_script_file: { input: { path: string; maxBytes: number }; output: Record<string, unknown> };
   search_web_access_log: { input: { path: string; fileName: string; maxLines: number }; output: Record<string, unknown>[] };
-  collect_file: { input: { path: string; maxBytes: number }; output: { dataBase64: string; sha256: string; size: number } };
+  collect_file: { input: { path: string; maxBytes: number }; output: CollectedArtifactOutput };
   list_java_processes: { input: Record<string, never>; output: Record<string, unknown>[] };
   detect_java_container: { input: { pid: number }; output: Record<string, unknown> };
   run_tomcat_probe: {
@@ -29,6 +61,7 @@ export interface HostOperationMap {
   find_related_processes: { input: { kind: string; path: string; commandHint?: string; expectedSha256?: string; maxProcesses: number }; output: Record<string, unknown>[] };
   list_process_connections: { input: { pid: number; maxConnections: number }; output: { items: Record<string, unknown>[]; partial: boolean; warnings: string[] } };
   collect_persistence_artifact: { input: { kind: string; path: string; expectedSha256: string; maxBytes: number }; output: { dataBase64: string; sha256: string; size: number } };
+  release_artifact: { input: { artifactToken: string }; output: { released: boolean } };
   get_action_receipt: { input: { actionId: string }; output: Record<string, unknown> };
   quarantine_file: {
     input: { actionId: string; path: string; expectedSha256: string; quarantineRoot: string };
@@ -53,5 +86,11 @@ export interface HostExecutor {
     request: HostOperationRequest<T>,
     signal?: AbortSignal,
   ): Promise<HostOperationOutput<T>>;
+  downloadArtifact(
+    artifact: RemoteArtifact,
+    onChunk: (chunk: Buffer) => void | Promise<void>,
+    signal?: AbortSignal,
+    timeoutMs?: number,
+  ): Promise<ArtifactTransferResult>;
   close(): Promise<void>;
 }

@@ -17,6 +17,8 @@ export const IPC = {
   modelSmoke: "huntwarden:model:smoke",
   selectPrivateKey: "huntwarden:file:private-key",
   selectKnownHosts: "huntwarden:file:known-hosts",
+  sshHostKeyDiscover: "huntwarden:ssh:host-key:discover",
+  sshHostKeyConfirm: "huntwarden:ssh:host-key:confirm",
   sshTest: "huntwarden:ssh:test",
   taskList: "huntwarden:task:list",
   taskSnapshot: "huntwarden:task:snapshot",
