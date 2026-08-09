@@ -12,7 +12,7 @@ const NEW_TASK_FIELDS: { key: NewTaskField; label: string; defaultValue: (applic
   { key: "username", label: "SSH 用户", defaultValue: () => "secagent" },
   { key: "fingerprint", label: "SHA-256 主机指纹（留空从 known_hosts 读取）", defaultValue: () => "" },
   { key: "mode", label: "模式 SCAN/REMEDIATE", defaultValue: (application) => application.config.agent.defaultMode },
-  { key: "request", label: "调查请求", defaultValue: () => "排查 WebShell、Tomcat Java 内存马、Linux 后门账户和持久化，并形成结构化报告。" },
+  { key: "request", label: "调查请求", defaultValue: () => "排查 WebShell、Tomcat Java 内存马、Linux 后门账户、持久化与入侵迹象，并形成结构化报告。" },
 ];
 
 export interface AppProps { application: Application; initialTask?: TaskContext; autoStart?: boolean }

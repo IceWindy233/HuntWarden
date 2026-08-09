@@ -1,3 +1,4 @@
+import { isIP } from "node:net";
 import type { AppConfig } from "../config/schema.js";
 import { getConfigIssues } from "../config/load-config.js";
 import type { NewTaskInput } from "../gui/contracts.js";
@@ -32,17 +33,24 @@ export function appConfig(value: unknown): AppConfig {
 }
 
 export function newTaskInput(value: unknown): NewTaskInput {
-  const record = exactObject(value, ["request", "mode", "checks", "target"], "任务");
+  const record = exactObject(value, ["request", "mode", "checks", "profile", "timeWindowHours", "iocs", "target"], "任务");
   const request = text(record.request, "调查请求", 20_000);
   if (record.mode !== "SCAN" && record.mode !== "REMEDIATE") throw new Error("任务模式无效");
   if (!Array.isArray(record.checks) || record.checks.length < 1) throw new Error("至少选择一个检测项");
-  const allowedChecks = new Set(["webshell", "java_memory_shell", "backdoor_account", "linux_persistence"]);
+  const allowedChecks = new Set(["webshell", "java_memory_shell", "backdoor_account", "linux_persistence", "linux_intrusion_triage"]);
   if (record.checks.some((item) => typeof item !== "string" || !allowedChecks.has(item))) throw new Error("检测项无效");
+  if (record.profile !== undefined && !["QUICK", "STANDARD", "DEEP"].includes(String(record.profile))) throw new Error("扫描预设无效");
+  if (record.timeWindowHours !== undefined && (typeof record.timeWindowHours !== "number" || !Number.isInteger(record.timeWindowHours) || record.timeWindowHours < 1 || record.timeWindowHours > 8_760)) {
+    throw new Error("调查时间窗必须是 1 到 8760 之间的整数小时");
+  }
   const target = exactObject(record.target, ["host", "port", "username", "hostFingerprint", "privateKeyPath", "knownHostsPath"], "目标");
   const parsed: NewTaskInput = {
     request,
     mode: record.mode,
     checks: [...new Set(record.checks)] as NewTaskInput["checks"],
+    ...(record.profile !== undefined ? { profile: record.profile as NonNullable<NewTaskInput["profile"]> } : {}),
+    ...(record.timeWindowHours !== undefined ? { timeWindowHours: Number(record.timeWindowHours) } : {}),
+    ...(record.iocs !== undefined ? { iocs: parseInvestigationIocs(record.iocs) } : {}),
     target: {
       host: text(target.host, "目标主机", 253),
       port: Number(target.port),
@@ -53,6 +61,47 @@ export function newTaskInput(value: unknown): NewTaskInput {
     },
   };
   validateTargetConfig(parsed.target);
+  return parsed;
+}
+
+const MAX_IOCS_PER_KIND = 100;
+const MAX_IOCS_TOTAL = 200;
+
+function iocValues(value: unknown, kind: string, validate: (item: string) => boolean, maxLength: number, normalize: (item: string) => string = (item) => item): string[] | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value)) throw new Error(`IOC ${kind} 必须是字符串数组`);
+  if (value.length > MAX_IOCS_PER_KIND) throw new Error(`IOC ${kind} 不能超过 ${MAX_IOCS_PER_KIND} 条`);
+  const result: string[] = [];
+  for (const raw of value) {
+    if (typeof raw !== "string") throw new Error(`IOC ${kind} 必须是字符串数组`);
+    const item = raw.trim();
+    if (!item || item.length > maxLength || item.includes("\0") || !validate(item)) throw new Error(`IOC ${kind} 格式无效: ${item.slice(0, 80) || "（空）"}`);
+    result.push(normalize(item));
+  }
+  return [...new Set(result)];
+}
+
+function validDomain(value: string): boolean {
+  if (value.length > 253 || value.endsWith(".") || /\s/.test(value)) return false;
+  const labels = value.split(".");
+  return labels.length >= 2 && labels.every((label) => label.length >= 1 && label.length <= 63 && /^[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?$/.test(label));
+}
+
+function parseInvestigationIocs(value: unknown): NonNullable<NewTaskInput["iocs"]> {
+  const record = exactObject(value, ["hash", "domain", "ip", "path", "processName"], "IOC");
+  const parsed: NonNullable<NewTaskInput["iocs"]> = {};
+  const hash = iocValues(record.hash, "hash", (item) => /^(?:[a-fA-F0-9]{32}|[a-fA-F0-9]{40}|[a-fA-F0-9]{64}|[a-fA-F0-9]{128})$/.test(item), 128, (item) => item.toLowerCase());
+  const domain = iocValues(record.domain, "domain", validDomain, 253, (item) => item.toLowerCase());
+  const ip = iocValues(record.ip, "ip", (item) => isIP(item) !== 0, 45, (item) => item.toLowerCase());
+  const path = iocValues(record.path, "path", (item) => item.startsWith("/") && !/[\r\n]/.test(item), 4_096);
+  const processName = iocValues(record.processName, "processName", (item) => !/[\r\n/]/.test(item), 256);
+  if (hash?.length) parsed.hash = hash;
+  if (domain?.length) parsed.domain = domain;
+  if (ip?.length) parsed.ip = ip;
+  if (path?.length) parsed.path = path;
+  if (processName?.length) parsed.processName = processName;
+  const total = Object.values(parsed).reduce((sum, items) => sum + items.length, 0);
+  if (total > MAX_IOCS_TOTAL) throw new Error(`IOC 总数不能超过 ${MAX_IOCS_TOTAL} 条`);
   return parsed;
 }
 

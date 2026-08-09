@@ -15,6 +15,7 @@ export function testConfig(baseDir: string): AppConfig {
     java: { supportedContainers: ["tomcat"], allowClassDump: true, allowRuntimeModification: false, probeJar: `${baseDir}/probe.jar` },
     account: { checkAuthorizedKeys: true, checkLoginHistory: true },
     persistence: { maxItemsPerSource: 500, includeUserScope: true, maxConnections: 500 },
+    triage: { maxProcesses: 2_000, maxConnections: 5_000, maxFiles: 10_000, maxTimelineEvents: 10_000, maxArtifactBytes: 10 * 1024 * 1024 },
     remediation: { requireApproval: true, allowedTools: ["quarantine_file", "disable_account"], quarantineRoot: "/var/lib/huntwarden/quarantine" },
   };
 }

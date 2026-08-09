@@ -16,6 +16,7 @@ export function createSecurityTools(deps: ToolDependencies): SecurityToolDefinit
   if (selected.has("java_memory_shell")) tools.push(...createJavaTools(deps));
   if (selected.has("backdoor_account")) tools.push(...createAccountTools(deps));
   if (selected.has("linux_persistence")) tools.push(...createPersistenceTools(deps));
+  // linux_intrusion_triage 已进入领域与任务边界；专用只读 Tool Pack 在后续切片接入此注册点。
 
   tools.push(createRecordFindingTool(deps));
 

@@ -3,7 +3,7 @@ import { access, chmod, mkdir, readdir, readFile, stat, writeFile } from "node:f
 import { join } from "node:path";
 import { sanitizeForLlm } from "../agent/data-sanitizer.js";
 import { createId } from "../common/ids.js";
-import type { ReportGenerationMode, ReportRecord, TaskContext } from "../domain/types.js";
+import { CHECK_CATEGORY_LABELS, type ReportGenerationMode, type ReportRecord, type TaskContext } from "../domain/types.js";
 import type { SecurityAgentRuntime } from "../runtime/security-agent-runtime.js";
 import type { RuntimeStore } from "../storage/runtime-store.js";
 
@@ -165,7 +165,7 @@ export class ReportService {
       this.store.putFinding({
         findingId: createId("finding"), taskId: task.taskId, host: task.target.host,
         category, severity: "INFO", confidence: 1, status: "NOT_CHECKED",
-        title: `${category} 未完成检测`,
+        title: `${CHECK_CATEGORY_LABELS[category]}未完成检测`,
         summary: "调查在该检测项形成有效工具结论前结束；NOT_CHECKED 不代表目标安全。",
         evidenceRefs: [], recommendation: "补齐目标条件或调查预算后重新执行该检测项。",
         createdAt: new Date().toISOString(), toolCallId: `report-coverage:${task.taskId}:${category}`,
@@ -175,7 +175,18 @@ export class ReportService {
 
   private reportContext(task: TaskContext): string {
     return sanitizeForLlm(JSON.stringify({
-      task: { taskId: task.taskId, target: task.target.host, request: task.request, mode: task.mode, checks: task.checks, coverage: task.coverage, interruption: task.interruption },
+      task: {
+        taskId: task.taskId,
+        target: task.target.host,
+        request: task.request,
+        mode: task.mode,
+        profile: task.profile,
+        timeWindowHours: task.timeWindowHours,
+        iocs: task.iocs,
+        checks: task.checks.map((category) => ({ category, label: CHECK_CATEGORY_LABELS[category], status: task.coverage[category] })),
+        coverage: task.coverage,
+        interruption: task.interruption,
+      },
       findings: this.store.listFindings(task.taskId),
       evidence: this.store.listEvidence(task.taskId).map(({ storagePath: _private, ...item }) => item),
       approvals: this.store.listApprovals(task.taskId),
@@ -192,12 +203,13 @@ export class ReportService {
     const recovery = this.store.listAudit(task.taskId).filter((item) => item.event.includes("recover") || item.event.includes("interrupt"));
     const lines = [
       "# HuntWarden 主机安全专项检测报告", "", "## 任务信息", "",
-      `- 任务：${task.taskId}`, `- 目标：${task.target.host}`, `- 模式：${task.mode}`, `- 请求：${task.request}`, "",
-      "## 检测覆盖", "", ...task.checks.map((category) => `- ${category}: ${task.coverage[category] ?? "NOT_CHECKED"}`), "",
+      `- 任务：${task.taskId}`, `- 目标：${task.target.host}`, `- 模式：${task.mode}`, `- 扫描预设：${task.profile ?? "未记录（历史任务）"}`, `- 调查时间窗：${task.timeWindowHours ? `${task.timeWindowHours} 小时` : "未记录（历史任务）"}`, `- 请求：${task.request}`, "",
+      "## 定向 IOC", "", ...(Object.entries(task.iocs ?? {}).length > 0 ? Object.entries(task.iocs ?? {}).map(([kind, values]) => `- ${kind}: ${values.join(", ")}`) : ["- 未提供"]), "",
+      "## 检测覆盖", "", ...task.checks.map((category) => `- ${category}: ${task.coverage[category] ?? "NOT_CHECKED"}（${CHECK_CATEGORY_LABELS[category]}）`), "",
       "## Findings", "",
     ];
     for (const finding of findings) {
-      lines.push(`### ${finding.findingId} ${finding.title}`, "", `- 类别：${finding.category}`, `- 状态：${finding.status}`, `- 严重度：${finding.severity}`, `- 置信度：${finding.confidence}`, `- 证据：${finding.evidenceRefs.join(", ") || "无"}`, "", finding.summary, "");
+      lines.push(`### ${finding.findingId} ${finding.title}`, "", `- 类别：${CHECK_CATEGORY_LABELS[finding.category]} (${finding.category})`, `- 状态：${finding.status}`, `- 严重度：${finding.severity}`, `- 置信度：${finding.confidence}`, `- 证据：${finding.evidenceRefs.join(", ") || "无"}`, "", finding.summary, "");
     }
     lines.push("## Evidence", "");
     for (const item of evidence) lines.push(`- ${item.evidenceId}: ${item.type} / ${item.source} / SHA-256 ${item.sha256 ?? "N/A"}`);

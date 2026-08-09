@@ -1,8 +1,8 @@
 import type { AppConfig } from "../config/schema.js";
-import type { ActionReceipt, AgentStreamUpdate, ApprovalTicket, AuditEvent, Evidence, Finding, ReportRecord, TaskContext, TaskMode, CheckCategory } from "../domain/types.js";
+import type { ActionReceipt, AgentStreamUpdate, ApprovalTicket, AuditEvent, Evidence, Finding, InvestigationIocs, ReportRecord, ScanProfile, TaskContext, TaskMode, CheckCategory } from "../domain/types.js";
 import type { SshHostKeyDiscovery } from "../executor/ssh-host-key-service.js";
 
-export const DESKTOP_API_VERSION = 5 as const;
+export const DESKTOP_API_VERSION = 6 as const;
 
 export interface ConfigProfileSummary {
   profileId: string;
@@ -65,6 +65,9 @@ export interface NewTaskInput {
   request: string;
   mode: TaskMode;
   checks: CheckCategory[];
+  profile?: ScanProfile;
+  timeWindowHours?: number;
+  iocs?: InvestigationIocs;
   target: {
     host: string;
     port: number;

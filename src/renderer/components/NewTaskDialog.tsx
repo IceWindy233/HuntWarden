@@ -4,11 +4,23 @@ import type { SshHostKeyDiscovery } from "../../executor/ssh-host-key-service.js
 import type { TaskContext } from "../../domain/types.js";
 import { Button, Field, Input, Modal, Select, Textarea } from "./ui.js";
 
+type IocKind = keyof NonNullable<NewTaskInput["iocs"]>;
+const PROFILE_TIME_WINDOWS: Record<NonNullable<NewTaskInput["profile"]>, number> = { QUICK: 24, STANDARD: 168, DEEP: 720 };
+const IOC_FIELDS: { kind: IocKind; label: string; placeholder: string }[] = [
+  { kind: "hash", label: "文件 Hash", placeholder: "MD5 / SHA-1 / SHA-256 / SHA-512" },
+  { kind: "domain", label: "域名", placeholder: "example.org" },
+  { kind: "ip", label: "IP", placeholder: "203.0.113.10" },
+  { kind: "path", label: "文件路径", placeholder: "/tmp/suspicious" },
+  { kind: "processName", label: "进程名", placeholder: "suspicious-process" },
+];
+
 export function NewTaskDialog({ profile, onClose, onCreated, notify }: { profile: ConfigProfile; onClose: () => void; onCreated: (task: TaskContext) => void; notify: (message: string, tone?: "success" | "error" | "info") => void }) {
   const [form, setForm] = useState<NewTaskInput>({
-    request: "排查 WebShell、Tomcat Java 内存马、Linux 后门账户与持久化，并形成结构化报告。",
+    request: "排查 WebShell、Tomcat Java 内存马、Linux 后门账户、持久化与入侵迹象，并形成结构化报告。",
     mode: profile.config.agent.defaultMode,
-    checks: ["webshell", "java_memory_shell", "backdoor_account", "linux_persistence"],
+    checks: ["webshell", "java_memory_shell", "backdoor_account", "linux_persistence", "linux_intrusion_triage"],
+    profile: "STANDARD",
+    timeWindowHours: PROFILE_TIME_WINDOWS.STANDARD,
     target: {
       host: "127.0.0.1", port: 22, username: "secagent", hostFingerprint: "",
       privateKeyPath: profile.config.executor.privateKeyPath,
@@ -17,6 +29,7 @@ export function NewTaskDialog({ profile, onClose, onCreated, notify }: { profile
   });
   const [busy, setBusy] = useState<string>();
   const [hostKey, setHostKey] = useState<SshHostKeyDiscovery>();
+  const [iocDraft, setIocDraft] = useState<Record<IocKind, string>>({ hash: "", domain: "", ip: "", path: "", processName: "" });
 
   const updateTarget = (patch: Partial<NewTaskInput["target"]>) => {
     const identityChanged = patch.host !== undefined || patch.port !== undefined || patch.knownHostsPath !== undefined;
@@ -24,6 +37,13 @@ export function NewTaskDialog({ profile, onClose, onCreated, notify }: { profile
     setForm((old) => ({ ...old, target: { ...old.target, ...(identityChanged ? { hostFingerprint: "" } : {}), ...patch } }));
   };
   const toggleCheck = (check: NewTaskInput["checks"][number]) => setForm((old) => ({ ...old, checks: old.checks.includes(check) ? old.checks.filter((item) => item !== check) : [...old.checks, check] }));
+
+  const parsedIocs = (): NonNullable<NewTaskInput["iocs"]> => Object.fromEntries(
+    Object.entries(iocDraft).flatMap(([kind, draft]) => {
+      const values = [...new Set(draft.split(/[\n,]+/).map((item) => item.trim()).filter(Boolean))];
+      return values.length > 0 ? [[kind, values]] : [];
+    }),
+  ) as NonNullable<NewTaskInput["iocs"]>;
 
   async function testSsh(): Promise<void> {
     setBusy("test");
@@ -75,7 +95,11 @@ export function NewTaskDialog({ profile, onClose, onCreated, notify }: { profile
 
   async function create(): Promise<void> {
     setBusy("create");
-    try { const task = await window.huntwarden.createTask(form); notify(`任务 ${task.taskId} 已创建`, "success"); onCreated(task); }
+    try {
+      const iocs = parsedIocs();
+      const task = await window.huntwarden.createTask({ ...form, ...(Object.keys(iocs).length > 0 ? { iocs } : {}) });
+      notify(`任务 ${task.taskId} 已创建`, "success"); onCreated(task);
+    }
     catch (error) { notify(error instanceof Error ? error.message : String(error), "error"); }
     finally { setBusy(undefined); }
   }
@@ -87,6 +111,8 @@ export function NewTaskDialog({ profile, onClose, onCreated, notify }: { profile
       <Field label="SSH 端口"><Input type="number" min={1} max={65535} value={form.target.port} onChange={(event) => updateTarget({ port: Number(event.target.value) })} /></Field>
       <Field label="SSH 用户"><Input value={form.target.username} onChange={(event) => updateTarget({ username: event.target.value })} /></Field>
       <Field label="任务模式"><Select value={form.mode} onChange={(event) => setForm({ ...form, mode: event.target.value as NewTaskInput["mode"] })}><option value="SCAN">SCAN · 只读调查</option><option value="REMEDIATE">REMEDIATE · 允许逐动作审批处置</option></Select></Field>
+      <Field label="扫描预设" hint="切换预设会同步推荐时间窗。"><Select value={form.profile ?? "STANDARD"} onChange={(event) => { const next = event.target.value as NonNullable<NewTaskInput["profile"]>; setForm((old) => ({ ...old, profile: next, timeWindowHours: PROFILE_TIME_WINDOWS[next] })); }}><option value="QUICK">QUICK · 快速分诊</option><option value="STANDARD">STANDARD · 标准调查</option><option value="DEEP">DEEP · 深度调查</option></Select></Field>
+      <Field label="调查时间窗（小时）"><Input type="number" min={1} max={8760} value={form.timeWindowHours ?? ""} onChange={(event) => setForm((old) => ({ ...old, timeWindowHours: Number(event.target.value) }))} /></Field>
       <Field label="SHA-256 Host Key 指纹" wide hint="先按 host + port 无凭据发现；未知 Key 必须显式确认，冲突或撤销 Key 会被阻断。"><div className="input-action"><Input value={form.target.hostFingerprint} onChange={(event) => updateTarget({ hostFingerprint: event.target.value })} placeholder="SHA256:..." /><Button variant="ghost" onClick={discoverHostKey} busy={busy === "host-key"}>解析 Host Key</Button></div></Field>
       <Field label="SSH 私钥" wide><div className="input-action"><Input value={form.target.privateKeyPath} onChange={(event) => updateTarget({ privateKeyPath: event.target.value })} /><Button variant="ghost" onClick={async () => { const path = await window.huntwarden.selectPrivateKey(); if (path) updateTarget({ privateKeyPath: path }); }}>选择</Button></div></Field>
       <Field label="known_hosts" wide><div className="input-action"><Input value={form.target.knownHostsPath} onChange={(event) => updateTarget({ knownHostsPath: event.target.value })} /><Button variant="ghost" onClick={async () => { const path = await window.huntwarden.selectKnownHosts(); if (path) updateTarget({ knownHostsPath: path }); }}>选择</Button></div></Field>
@@ -103,6 +129,11 @@ export function NewTaskDialog({ profile, onClose, onCreated, notify }: { profile
       <CheckCard active={form.checks.includes("java_memory_shell")} title="Java 内存马" description="Tomcat 组件、Class 来源与只读 Dump" onClick={() => toggleCheck("java_memory_shell")} />
       <CheckCard active={form.checks.includes("backdoor_account")} title="后门账户" description="特权账户、SSH Key 与登录历史" onClick={() => toggleCheck("backdoor_account")} />
       <CheckCard active={form.checks.includes("linux_persistence")} title="Linux 持久化" description="Cron、systemd、SSH Key、Shell 启动项及进程网络关联" onClick={() => toggleCheck("linux_persistence")} />
+      <CheckCard active={form.checks.includes("linux_intrusion_triage")} title="Linux 入侵分诊" description="IOC、进程、网络、文件与时间线的只读关联调查" onClick={() => toggleCheck("linux_intrusion_triage")} />
+    </div>
+    <div className="ioc-section">
+      <div className="ioc-heading"><strong>IOC 定向线索（可选）</strong><span>每类最多 100 条、总计最多 200 条；使用逗号或换行分隔。</span></div>
+      <div className="ioc-grid">{IOC_FIELDS.map((item) => <Field key={item.kind} label={item.label}><Textarea aria-label={`IOC ${item.label}`} rows={2} value={iocDraft[item.kind]} placeholder={item.placeholder} onChange={(event) => setIocDraft((old) => ({ ...old, [item.kind]: event.target.value }))} /></Field>)}</div>
     </div>
     <Field label="调查请求" wide><Textarea rows={4} value={form.request} onChange={(event) => setForm({ ...form, request: event.target.value })} /></Field>
     {form.mode === "REMEDIATE" ? <div className="warning-callout"><strong>处置模式已启用</strong><span>任何文件隔离或账户禁用仍需在 GUI 中逐动作审批，模型不能自行授权。</span></div> : null}

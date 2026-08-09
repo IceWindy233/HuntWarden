@@ -16,6 +16,15 @@ function withIncrementalDefaults(input: unknown): unknown {
   if (migrated.persistence === undefined) {
     migrated.persistence = { maxItemsPerSource: 500, includeUserScope: true, maxConnections: 500 };
   }
+  if (migrated.triage === undefined) {
+    migrated.triage = {
+      maxProcesses: 2_000,
+      maxConnections: 5_000,
+      maxFiles: 10_000,
+      maxTimelineEvents: 10_000,
+      maxArtifactBytes: 10_485_760,
+    };
+  }
   return migrated;
 }
 

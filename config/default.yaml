@@ -45,6 +45,13 @@ persistence:
   includeUserScope: true
   maxConnections: 500
 
+triage:
+  maxProcesses: 2000
+  maxConnections: 5000
+  maxFiles: 10000
+  maxTimelineEvents: 10000
+  maxArtifactBytes: 10485760
+
 remediation:
   requireApproval: true
   allowedTools: [quarantine_file, disable_account]

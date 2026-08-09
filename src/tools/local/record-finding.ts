@@ -12,7 +12,7 @@ export function createRecordFindingTool(deps: ToolDependencies): SecurityToolDef
     name: "record_finding", label: "记录安全发现",
     description: "把已经由工具事实支持的结论保存为结构化 Finding。每个检测类别结束前必须调用；ERROR/NOT_CHECKED 也必须明确记录。高风险结论必须引用 Evidence ID。",
     parameters: Type.Object({
-      category: Type.Union([Type.Literal("webshell"), Type.Literal("java_memory_shell"), Type.Literal("backdoor_account"), Type.Literal("linux_persistence")]),
+      category: Type.Union([Type.Literal("webshell"), Type.Literal("java_memory_shell"), Type.Literal("backdoor_account"), Type.Literal("linux_persistence"), Type.Literal("linux_intrusion_triage")]),
       severity: Type.Union(severities.map((value) => Type.Literal(value))),
       confidence: Type.Number({ minimum: 0, maximum: 1 }),
       status: Type.Union(statuses.map((value) => Type.Literal(value))),

@@ -34,11 +34,13 @@ describe("配置与不透明引用", () => {
     expect(model).toMatchObject({ api: "openai-completions", baseUrl: "https://api.deepseek.com", reasoning: true });
   });
 
-  it("为旧 Profile 纯增量注入持久化默认值", () => {
+  it("为旧 Profile 纯增量注入持久化与入侵分诊预算默认值", () => {
     const legacy = testConfig("/tmp/huntwarden-config-migration") as unknown as Record<string, unknown>;
     delete legacy.persistence;
+    delete legacy.triage;
     const migrated = normalizeConfig(legacy, "/tmp/huntwarden-config-migration/profile.yaml");
     expect(migrated.persistence).toEqual({ maxItemsPerSource: 500, includeUserScope: true, maxConnections: 500 });
+    expect(migrated.triage).toEqual({ maxProcesses: 2_000, maxConnections: 5_000, maxFiles: 10_000, maxTimelineEvents: 10_000, maxArtifactBytes: 10_485_760 });
   });
 
   it("拒绝关闭审批，并允许选择 Pi 内置 Provider", () => {

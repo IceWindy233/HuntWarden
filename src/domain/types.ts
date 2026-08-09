@@ -12,7 +12,37 @@ export type TaskStatus =
   | "FAILED"
   | "ABORTED";
 
-export type CheckCategory = "webshell" | "java_memory_shell" | "backdoor_account" | "linux_persistence";
+export type CheckCategory =
+  | "webshell"
+  | "java_memory_shell"
+  | "backdoor_account"
+  | "linux_persistence"
+  | "linux_intrusion_triage";
+export type ScanProfile = "QUICK" | "STANDARD" | "DEEP";
+
+export interface InvestigationIocs {
+  hash?: string[];
+  domain?: string[];
+  ip?: string[];
+  path?: string[];
+  processName?: string[];
+}
+
+export const CHECK_CATEGORY_LABELS: Record<CheckCategory, string> = {
+  webshell: "WebShell",
+  java_memory_shell: "Java 内存马",
+  backdoor_account: "后门账户",
+  linux_persistence: "Linux 持久化",
+  linux_intrusion_triage: "Linux 入侵分诊",
+};
+
+export const CHECK_CATEGORY_SHORT_LABELS: Record<CheckCategory, string> = {
+  webshell: "WEB",
+  java_memory_shell: "JAVA",
+  backdoor_account: "ACCOUNT",
+  linux_persistence: "PERSIST",
+  linux_intrusion_triage: "TRIAGE",
+};
 export type FindingStatus =
   | "CONFIRMED"
   | "HIGHLY_SUSPICIOUS"
@@ -43,6 +73,10 @@ export interface TaskContext {
   modelId: string;
   promptVersion: string;
   checks: CheckCategory[];
+  /** 历史任务可能没有扫描预设、时间窗与定向 IOC。 */
+  profile?: ScanProfile;
+  timeWindowHours?: number;
+  iocs?: InvestigationIocs;
   coverage: Partial<Record<CheckCategory, FindingStatus>>;
   createdAt: string;
   updatedAt: string;
@@ -160,7 +194,7 @@ export interface AgentStreamUpdate {
 export interface CandidateReference<T = Record<string, unknown>> {
   ref: string;
   taskId: string;
-  kind: "candidate" | "process" | "component" | "class" | "account" | "persistence";
+  kind: "candidate" | "process" | "component" | "class" | "account" | "persistence" | "file" | "socket" | "timeline";
   value: T;
   createdAt: string;
 }

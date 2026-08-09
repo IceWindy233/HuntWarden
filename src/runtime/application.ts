@@ -5,7 +5,7 @@ import { ApprovalService } from "../agent/approval-service.js";
 import type { AppConfig } from "../config/schema.js";
 import { createId } from "../common/ids.js";
 import { InvalidArgumentError } from "../common/errors.js";
-import type { AgentStreamUpdate, CheckCategory, ReportRecord, TargetConfig, TaskContext, TaskMode } from "../domain/types.js";
+import type { AgentStreamUpdate, CheckCategory, InvestigationIocs, ReportRecord, ScanProfile, TargetConfig, TaskContext, TaskMode } from "../domain/types.js";
 import { validateTargetConfig } from "../domain/validation.js";
 import { EvidenceStore } from "../evidence/evidence-store.js";
 import { SSHExecutor } from "../executor/ssh-executor.js";
@@ -36,7 +36,7 @@ export class Application extends EventEmitter {
     this.approvals.on("decided", (ticket) => this.emit("changed", ticket.taskId));
   }
 
-  createTask(input: { request: string; mode: TaskMode; checks?: CheckCategory[]; target: TargetConfig }): TaskContext {
+  createTask(input: { request: string; mode: TaskMode; checks?: CheckCategory[]; profile?: ScanProfile; timeWindowHours?: number; iocs?: InvestigationIocs; target: TargetConfig }): TaskContext {
     validateTargetConfig(input.target);
     if (!input.request.trim() || input.request.length > 20_000) throw new InvalidArgumentError("调查请求不能为空且不能超过 20000 字符");
     if (!(["SCAN", "REMEDIATE"] as const).includes(input.mode)) throw new InvalidArgumentError("任务模式必须是 SCAN 或 REMEDIATE");
@@ -46,11 +46,27 @@ export class Application extends EventEmitter {
       taskId: createId("task"), request: input.request, target: input.target, mode: input.mode,
       status: "CREATED", modelProvider: this.config.model.provider, modelId: this.config.model.model,
       promptVersion: this.config.agent.promptVersion,
-      checks: input.checks ?? ["webshell", "java_memory_shell", "backdoor_account", "linux_persistence"], coverage: {},
+      checks: input.checks ?? ["webshell", "java_memory_shell", "backdoor_account", "linux_persistence", "linux_intrusion_triage"],
+      ...(input.profile ? { profile: input.profile } : {}),
+      ...(input.timeWindowHours !== undefined ? { timeWindowHours: input.timeWindowHours } : {}),
+      ...(input.iocs && Object.keys(input.iocs).length > 0 ? { iocs: structuredClone(input.iocs) } : {}),
+      coverage: {},
       createdAt: now, updatedAt: now, turnCount: 0, toolCallCount: 0,
     };
     this.store.createTask(task);
-    this.store.appendAudit({ taskId: task.taskId, event: "task_created", level: "info", data: { host: task.target.host, mode: task.mode, checks: task.checks } });
+    this.store.appendAudit({
+      taskId: task.taskId,
+      event: "task_created",
+      level: "info",
+      data: {
+        host: task.target.host,
+        mode: task.mode,
+        checks: task.checks,
+        profile: task.profile ?? "LEGACY_DEFAULT",
+        timeWindowHours: task.timeWindowHours,
+        iocCounts: Object.fromEntries(Object.entries(task.iocs ?? {}).map(([kind, values]) => [kind, values.length])),
+      },
+    });
     this.emit("changed", task.taskId);
     return task;
   }

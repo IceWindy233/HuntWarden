@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from "react";
-import type { ReportRecord } from "../../domain/types.js";
+import { CHECK_CATEGORY_SHORT_LABELS, type ReportRecord } from "../../domain/types.js";
 import type { TaskSnapshot } from "../../gui/contracts.js";
 import { Button, EmptyState, formatTime, shortId, StatusPill, Textarea } from "./ui.js";
 
@@ -114,7 +114,7 @@ export function TaskWorkspace({ snapshot, refresh, notify, liveStream }: { snaps
       <Metric label="工具调用" value={`${task.toolCallCount}`} tone="blue" />
       <Metric label="高风险发现" value={`${counts.suspicious}`} tone={counts.suspicious ? "amber" : "green"} />
       <Metric label="Evidence" value={`${snapshot.evidence.length}`} tone="violet" />
-      <div className="coverage-metric"><span>检测覆盖</span><div className="coverage-tags">{task.checks.map((check) => <span key={check} className={`coverage-tag ${task.coverage[check] ? "done" : "pending"}`} title={task.coverage[check]}>{check === "webshell" ? "WEB" : check === "java_memory_shell" ? "JAVA" : check === "backdoor_account" ? "ACCOUNT" : "PERSIST"}</span>)}</div></div>
+      <div className="coverage-metric"><span>检测覆盖</span><div className="coverage-tags">{task.checks.map((check) => <span key={check} className={`coverage-tag ${task.coverage[check] ? "done" : "pending"}`} title={task.coverage[check]}>{CHECK_CATEGORY_SHORT_LABELS[check]}</span>)}</div></div>
     </div>
 
     <nav className="task-tabs">{TABS.map((item) => <button key={item} className={tab === item ? "active" : ""} onClick={() => setTab(item)}>{item}{item === "发现" && snapshot.findings.length ? <span>{snapshot.findings.length}</span> : item === "证据" && snapshot.evidence.length ? <span>{snapshot.evidence.length}</span> : null}</button>)}</nav>

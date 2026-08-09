@@ -78,6 +78,13 @@ export const ConfigSchema = Type.Object({
     includeUserScope: Type.Boolean(),
     maxConnections: Type.Integer({ minimum: 1, maximum: 5000 }),
   }),
+  triage: Type.Object({
+    maxProcesses: Type.Integer({ minimum: 1, maximum: 10_000 }),
+    maxConnections: Type.Integer({ minimum: 1, maximum: 20_000 }),
+    maxFiles: Type.Integer({ minimum: 1, maximum: 50_000 }),
+    maxTimelineEvents: Type.Integer({ minimum: 1, maximum: 50_000 }),
+    maxArtifactBytes: Type.Integer({ minimum: 1024, maximum: 104_857_600 }),
+  }),
   remediation: Type.Object({
     requireApproval: Type.Literal(true),
     allowedTools: Type.Array(Type.Union([Type.Literal("quarantine_file"), Type.Literal("disable_account")])),
