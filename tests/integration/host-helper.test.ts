@@ -73,6 +73,19 @@ describe("目标辅助程序边界", () => {
     expect(identity.envelope).toMatchObject({ ok: false, error: { code: "INVALID_ARGUMENT" } });
   });
 
+  it.skipIf(process.platform !== "linux")("进程环境只返回变量名和风险标签，不返回变量值", () => {
+    const snapshot = invoke("capture_volatile_snapshot", { maxProcesses: 1000, maxConnections: 1 });
+    expect(snapshot.envelope.ok).toBe(true);
+    const processes = (snapshot.envelope.result as { processes: { environment: Record<string, unknown> }[] }).processes;
+    expect(processes.length).toBeGreaterThan(0);
+    for (const process of processes) {
+      expect(process.environment).toEqual({
+        variableNames: expect.any(Array), riskLabels: expect.any(Array), partial: expect.any(Boolean),
+      });
+      expect(process.environment).not.toHaveProperty("values");
+    }
+  });
+
   it("包完整性核验拒绝目录穿越和非固定目录", () => {
     const traversal = invoke("verify_package_integrity", {
       path: "/tmp/../etc/passwd", expectedInode: "1", expectedSha256: "0".repeat(64),

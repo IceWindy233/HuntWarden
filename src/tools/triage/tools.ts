@@ -104,7 +104,7 @@ export function createTriageTools(deps: ToolDependencies): SecurityToolDefinitio
     createSecurityTool(...common, {
       name: "list_suspicious_processes",
       label: "枚举可疑进程",
-      description: "基于删除后运行、临时目录、隐藏名称、可写可执行映射等固定特征枚举进程；不返回环境变量或完整命令参数。",
+      description: "基于删除后运行、临时目录、隐藏名称、可写可执行映射等固定特征枚举进程；环境只返回变量名与风险标签，不返回变量值或完整命令参数。",
       parameters: Type.Object({}, { additionalProperties: false }),
       risk: "READ", replayPolicy: "SAFE", timeoutMs: 90_000, auditEvent: "suspicious_processes_listed",
       run: async (toolCallId, _params, signal): Promise<SecurityToolResult> => {

@@ -1589,6 +1589,34 @@ def process_launcher_path(pid: int) -> str | None:
     return None
 
 
+def process_environment_metadata(pid: int) -> dict[str, Any]:
+    """Return environment variable names and risk tags only, never values."""
+    try:
+        with pathlib.Path(f"/proc/{pid}/environ").open("rb") as handle:
+            raw = handle.read(1024 * 1024 + 1)
+    except (OSError, PermissionError):
+        return {"variableNames": [], "riskLabels": [], "partial": True}
+    names: list[str] = []
+    risks: set[str] = set()
+    for entry in raw[:1024 * 1024].split(b"\0"):
+        name_bytes, separator, _ = entry.partition(b"=")
+        if not separator:
+            continue
+        name = name_bytes.decode("ascii", errors="ignore")
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,127}", name):
+            continue
+        names.append(name)
+        upper = name.upper()
+        if re.search(r"TOKEN|SECRET|PASSWORD|PASSWD|API_KEY|PRIVATE_KEY|CREDENTIAL", upper): risks.add("credential_variable_present")
+        if re.search(r"AWS_|AZURE_|GOOGLE_|GCP_", upper): risks.add("cloud_variable_present")
+        if upper in {"LD_PRELOAD", "LD_LIBRARY_PATH", "PYTHONPATH", "PERL5LIB", "RUBYLIB"}: risks.add("loader_influence_variable")
+        if upper in {"HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY"}: risks.add("proxy_variable_present")
+        if len(names) >= 512:
+            break
+    return {"variableNames": sorted(set(names)), "riskLabels": sorted(risks),
+            "partial": len(raw) > 1024 * 1024 or len(names) >= 512}
+
+
 def stable_process(pid: int, digest_cache: dict[tuple[int, int], str] | None = None) -> dict[str, Any]:
     before = proc_stat_fields(pid)
     proc_exe = pathlib.Path(f"/proc/{pid}/exe")
@@ -1631,6 +1659,7 @@ def stable_process(pid: int, digest_cache: dict[tuple[int, int], str] | None = N
         "exeSize": info.st_size,
         "startedAt": process_start_time(before["startTicks"]),
         "launcherPath": process_launcher_path(pid),
+        "environment": process_environment_metadata(pid),
     }
 
 
