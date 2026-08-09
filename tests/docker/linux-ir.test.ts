@@ -46,6 +46,10 @@ describe.skipIf(!enabled)("Docker Lab-Linux-IR 通用入侵分诊", () => {
       startTicks: expect.stringMatching(/^\d+$/),
       exeInode: expect.stringMatching(/^\d+$/),
       exeSha256: expect.stringMatching(/^[0-9a-f]{64}$/),
+      cwd: expect.any(String),
+      root: expect.any(String),
+      namespaces: expect.objectContaining({ pid: expect.stringMatching(/^pid:\[\d+\]$/) }),
+      cgroups: expect.any(Array),
     });
     expect((snapshot.connections as Record<string, unknown>[]).every((item) => !("processPid" in item) || Number.isInteger(item.processPid))).toBe(true);
 

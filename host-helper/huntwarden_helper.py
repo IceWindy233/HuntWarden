@@ -1617,6 +1617,28 @@ def process_environment_metadata(pid: int) -> dict[str, Any]:
             "partial": len(raw) > 1024 * 1024 or len(names) >= 512}
 
 
+def process_scope_metadata(pid: int) -> dict[str, Any]:
+    links: dict[str, str | None] = {}
+    for name in ("cwd", "root"):
+        try:
+            links[name] = os.readlink(f"/proc/{pid}/{name}")[:4096]
+        except OSError:
+            links[name] = None
+    namespaces: dict[str, str] = {}
+    for name in ("pid", "mnt", "net", "user", "uts", "ipc", "cgroup"):
+        try:
+            namespaces[name] = os.readlink(f"/proc/{pid}/ns/{name}")[:256]
+        except OSError:
+            continue
+    cgroups: list[str] = []
+    try:
+        with pathlib.Path(f"/proc/{pid}/cgroup").open("r", encoding="utf-8", errors="replace") as handle:
+            cgroups = [line.strip()[:4096] for _, line in zip(range(128), handle) if line.strip()]
+    except OSError:
+        pass
+    return {**links, "namespaces": namespaces, "cgroups": cgroups}
+
+
 def stable_process(pid: int, digest_cache: dict[tuple[int, int], str] | None = None) -> dict[str, Any]:
     before = proc_stat_fields(pid)
     proc_exe = pathlib.Path(f"/proc/{pid}/exe")
@@ -1643,6 +1665,7 @@ def stable_process(pid: int, digest_cache: dict[tuple[int, int], str] | None = N
         username = pwd.getpwuid(uid).pw_name
     except KeyError:
         username = str(uid)
+    scope = process_scope_metadata(pid)
     return {
         "bootId": boot_id(),
         "pid": pid,
@@ -1660,6 +1683,7 @@ def stable_process(pid: int, digest_cache: dict[tuple[int, int], str] | None = N
         "startedAt": process_start_time(before["startTicks"]),
         "launcherPath": process_launcher_path(pid),
         "environment": process_environment_metadata(pid),
+        **scope,
     }
 
 
