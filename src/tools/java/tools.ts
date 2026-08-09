@@ -92,8 +92,12 @@ export function createJavaTools(deps: ToolDependencies): SecurityToolDefinition[
         if (!deps.config.java.allowClassDump) throw new Error("配置禁止 Class Dump");
         const target = requireReference<JavaClass>(deps.store, deps.task.taskId, params.classRef, "class");
         const result = await deps.executor.invoke({ operation: "run_tomcat_probe", params: { pid: target.value.pid, command: "dump_class", className: target.value.className } }, signal);
-        if (typeof result.dataBase64 !== "string") throw new Error("Class Dump 未返回字节数据");
-        const evidence = await deps.evidence.putBuffer({ taskId: deps.task.taskId, host: deps.task.target.host, type: "java_class", source: `PID:${target.value.pid}/${target.value.className}`, tool: "dump_java_class", toolCallId, data: Buffer.from(result.dataBase64, "base64"), metadata: { classRef: params.classRef } });
+        const commonInput = { taskId: deps.task.taskId, host: deps.task.target.host, type: "java_class", source: `PID:${target.value.pid}/${target.value.className}`, tool: "dump_java_class", toolCallId, metadata: { classRef: params.classRef } };
+        const evidence = result.artifact
+          ? await deps.evidence.putStream({ ...commonInput, transfer: async (onChunk) => deps.executor.downloadArtifact(result.artifact!, onChunk, signal, 120_000) })
+          : typeof result.dataBase64 === "string"
+            ? await deps.evidence.putBuffer({ ...commonInput, data: Buffer.from(result.dataBase64, "base64") })
+            : (() => { throw new Error("Class Dump 未返回可采集内容"); })();
         return { status: result.partial ? "partial" : "success", summary: { evidenceId: evidence.evidenceId, sha256: evidence.sha256 }, items: [{ evidenceId: evidence.evidenceId, className: target.value.className }], artifactRefs: [evidence.evidenceId], warnings: [] };
       },
     }),
