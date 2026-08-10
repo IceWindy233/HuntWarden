@@ -2,7 +2,7 @@ import type { AppConfig } from "../config/schema.js";
 import type { ActionReceipt, AgentStreamUpdate, ApprovalTicket, AuditEvent, Evidence, Finding, InvestigationIocs, ReportRecord, ScanProfile, TaskContext, TaskMode, CheckCategory } from "../domain/types.js";
 import type { SshHostKeyDiscovery } from "../executor/ssh-host-key-service.js";
 
-export const DESKTOP_API_VERSION = 6 as const;
+export const DESKTOP_API_VERSION = 7 as const;
 
 export interface ConfigProfileSummary {
   profileId: string;
@@ -58,6 +58,13 @@ export interface ModelCheckResult {
   endpoint: string;
   credentialSource?: string;
   toolCallVerified: boolean;
+  message: string;
+}
+
+export interface ThreatIntelCheckResult {
+  ok: boolean;
+  provider: "dbapp-ti";
+  source: string;
   message: string;
 }
 
@@ -143,6 +150,7 @@ export interface HuntWardenDesktopApi {
   deleteCredential(provider: string): Promise<void>;
   checkModel(profileId: string): Promise<ModelCheckResult>;
   smokeModel(profileId: string): Promise<ModelCheckResult>;
+  testThreatIntel(profileId: string): Promise<ThreatIntelCheckResult>;
 
   selectPrivateKey(): Promise<string | undefined>;
   selectKnownHosts(): Promise<string | undefined>;

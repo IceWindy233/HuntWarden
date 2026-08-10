@@ -22,6 +22,7 @@ HuntWarden（猎卫）是面向安全分析师的 AI 主机安全调查与受控
 - Tomcat 运行时 Filter/Servlet/Listener 枚举、ClassLoader/CodeSource/ProtectionDomain、磁盘来源和只读 Class Dump；不清除、不重定义、不重启 JVM。
 - 特权账户、账户状态、SSH Key 指纹、登录历史和受控账户禁用。
 - Cron、systemd、SSH Authorized Keys、Shell 启动项，以及基于不透明引用的进程和网络关联调查；仅提供 READ/COLLECT 工具。
+- 安恒威胁情报受控富化：批量查询任务内已观测公网外联 IP、分析师预置域名/IP 与文件哈希，结果固化为 Evidence 并在 GUI“情报”页归因展示。
 - 由分析师确认后手动生成的不可变版本化中文 Markdown 报告、ID 引用校验、一次模型修复和确定性回退模板；支持历史版本切换与 Finder 定位。
 - 五套无害 Docker Lab 与 Pi Faux Provider 可重复 Agent 测试。
 
@@ -134,6 +135,22 @@ HUNTWARDEN_CONFIG=./config/deepseek.yaml npm run dev
 ```
 
 `model:smoke` 仅要求模型调用本地虚拟 `connection_probe`，不连接 SSH 主机、不执行安全检测或写操作；但会产生少量 API Token 费用。
+
+### 安恒威胁情报
+
+HuntWarden 通过安恒威胁情报开放接口 `https://ti.dbappsecurity.com.cn/oapi/v1/` 对调查事实做外部富化。该功能默认关闭，可在 GUI“配置中心 → 安恒威胁情报”中启用并将 `nti-` 开头的 API Key 保存到 HuntWarden 自己的系统安全存储；它不会读取 Codex Skill 的 `.apikey` 文件。TUI/命令行也可以使用环境变量：
+
+```bash
+export DBAPP_TI_API_KEY='nti-...'
+```
+
+安全边界：
+
+- 模型不能提交任意 IP、域名或哈希；网络查询只接受当前任务产生的 `SOCK-*` 引用，额外 IOC 只能由分析师在新建任务时提供。
+- 私网、回环、链路本地、文档网段和其他保留地址始终在本地过滤，不会上送。
+- 相同 IOC 按 Profile 配置在内存中缓存；未命中缓存的每次批量请求消耗 1 次安恒威胁情报额度。
+- 情报命中会记录来源“安恒威胁情报 (DBAPP Threat Intelligence)”和 Evidence，但不能单独形成 `CONFIRMED` 结论。
+- GUI“测试情报 API”会查询 `example.com`，只有在用户二次确认后执行，并消耗 1 次额度；自动化测试全部使用假客户端，不访问真实接口。
 
 ## 启动 TUI
 
@@ -250,6 +267,7 @@ Lab 只允许在隔离开发环境使用。账户禁用与隔离测试会真实�
 ## 安全与恢复语义
 
 - Agent 工具参数没有 host、任意路径、任意 PID 或命令字符串；后续调查使用任务内不透明引用。
+- 外部威胁情报工具同样受任务引用边界约束；不向模型返回 API Key，也不把私网地址发送给情报服务。
 - `SCAN` 模式在工具执行前硬阻断全部写操作。
 - `REMEDIATE` 模式仍要求绑定 `taskId + targetFingerprint + tool + argsDigest + actionId` 的一次性票据。
 - 文件隔离要求已有 Evidence，且远端当前哈希与审批时一致；仅同文件系统原子移动并设置 `000`。

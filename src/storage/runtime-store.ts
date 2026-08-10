@@ -390,6 +390,12 @@ export class RuntimeStore {
     return expectedKind && value.kind !== expectedKind ? undefined : value;
   }
 
+  listReferences<T>(taskId: string, kind: CandidateReference["kind"]): CandidateReference<T>[] {
+    const rows = this.db.prepare("SELECT payload FROM artifact_refs WHERE task_id=? AND kind=? ORDER BY created_at")
+      .all(taskId, kind) as unknown as JsonRow[];
+    return rows.map((row) => JSON.parse(row.payload) as CandidateReference<T>);
+  }
+
   putFinding(finding: Finding): Finding {
     const existing = this.db.prepare("SELECT payload FROM findings WHERE tool_call_id=?")
       .get(finding.toolCallId) as JsonRow | undefined;

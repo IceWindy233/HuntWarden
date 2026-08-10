@@ -52,6 +52,17 @@ triage:
   maxTimelineEvents: 10000
   maxArtifactBytes: 10485760
 
+threatIntel:
+  enabled: false
+  provider: dbapp-ti
+  baseUrl: https://ti.dbappsecurity.com.cn/oapi/v1/
+  apiKeyEnv: DBAPP_TI_API_KEY
+  timeoutSeconds: 15
+  maxBatchSize: 100
+  cacheTtlSeconds: 3600
+  autoEnrichConnections: true
+  includePrivateAddresses: false
+
 remediation:
   requireApproval: true
   allowedTools: [quarantine_file, disable_account]

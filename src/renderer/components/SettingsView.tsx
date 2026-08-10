@@ -36,11 +36,17 @@ export function SettingsView({ profiles, activeProfileId, initialProfileId, onPr
   const [credential, setCredential] = useState<CredentialStatus>();
   const [secret, setSecret] = useState("");
   const [persistSecret, setPersistSecret] = useState(true);
+  const [tiCredential, setTiCredential] = useState<CredentialStatus>();
+  const [tiSecret, setTiSecret] = useState("");
+  const [persistTiSecret, setPersistTiSecret] = useState(true);
   const [validation, setValidation] = useState<ConfigValidationResult>();
   const [busy, setBusy] = useState<string>();
   const [advancedOpen, setAdvancedOpen] = useState(false);
 
   useEffect(() => { void window.huntwarden.listModelProviders().then(setProviders); }, []);
+  useEffect(() => {
+    void window.huntwarden.getCredentialStatus("dbapp-ti").then(setTiCredential).catch(() => setTiCredential(undefined));
+  }, []);
   useEffect(() => {
     if (!selectedId) return;
     setBusy("load");
@@ -64,6 +70,7 @@ export function SettingsView({ profiles, activeProfileId, initialProfileId, onPr
   const updateModel = (next: AppConfig["model"]) => setConfig((old) => old ? { ...old, model: next } : old);
   const updateAgent = (patch: Partial<AppConfig["agent"]>) => setConfig((old) => old ? { ...old, agent: { ...old.agent, ...patch } } : old);
   const updateExecutor = (patch: Partial<AppConfig["executor"]>) => setConfig((old) => old ? { ...old, executor: { ...old.executor, ...patch } } : old);
+  const updateThreatIntel = (patch: Partial<AppConfig["threatIntel"]>) => setConfig((old) => old ? { ...old, threatIntel: { ...old.threatIntel, ...patch } } : old);
 
   async function selectProvider(nextProvider: string): Promise<void> {
     if (!config || source !== "builtin") return;
@@ -143,6 +150,34 @@ export function SettingsView({ profiles, activeProfileId, initialProfileId, onPr
     await window.huntwarden.deleteCredential(providerId); setCredential(await window.huntwarden.getCredentialStatus(providerId)); notify("凭据已删除", "success");
   }
 
+  async function saveThreatIntelSecret(): Promise<void> {
+    if (!tiSecret.trim()) return;
+    setBusy("ti-credential");
+    try {
+      const saved = await window.huntwarden.saveCredential({ provider: "dbapp-ti", secret: tiSecret, persist: persistTiSecret });
+      setTiCredential(saved); setTiSecret("");
+      notify(saved.notice ?? "安恒威胁情报 Key 已保存，GUI 不会再次读取明文", saved.notice ? "info" : "success");
+    } catch (error) { notify(error instanceof Error ? error.message : String(error), "error"); }
+    finally { setBusy(undefined); }
+  }
+
+  async function deleteThreatIntelSecret(): Promise<void> {
+    if (!confirm("确认删除安恒威胁情报 API Key？")) return;
+    await window.huntwarden.deleteCredential("dbapp-ti");
+    setTiCredential(await window.huntwarden.getCredentialStatus("dbapp-ti"));
+    notify("安恒威胁情报凭据已删除", "success");
+  }
+
+  async function testThreatIntel(): Promise<void> {
+    if (!profile || !confirm("在线测试将查询 example.com，并消耗 1 次安恒威胁情报额度。是否继续？")) return;
+    setBusy("ti-test");
+    try {
+      const result = await window.huntwarden.testThreatIntel(profile.profileId);
+      notify(result.message, result.ok ? "success" : "error");
+    } catch (error) { notify(error instanceof Error ? error.message : String(error), "error"); }
+    finally { setBusy(undefined); }
+  }
+
   async function runModelCheck(live: boolean): Promise<void> {
     if (!profile) return;
     setBusy(live ? "smoke" : "check");
@@ -179,6 +214,21 @@ export function SettingsView({ profiles, activeProfileId, initialProfileId, onPr
 
         <div className="credential-card"><div className="credential-status"><div className={`status-orb ${credential?.configured ? "ok" : "warn"}`} /><div><strong>{providerId} API 凭据</strong><span>{credential?.configured ? `已配置 · ${credential.source ?? "Provider 环境"}` : "尚未配置"}</span>{credential?.secureStorageBackend ? <small>安全存储：{credential.secureStorageBackend}</small> : null}{credential?.notice ? <small>{credential.notice}</small> : null}</div></div><div className="credential-input"><Input type="password" autoComplete="new-password" placeholder="输入 API Key（保存后不可读取）" value={secret} onChange={(event) => setSecret(event.target.value)} /><label className="checkbox-row"><input type="checkbox" checked={persistSecret} onChange={(event) => setPersistSecret(event.target.checked)} />系统安全存储持久化</label><Button onClick={saveSecret} busy={busy === "credential"}>保存 Key</Button>{credential?.configured ? <Button variant="ghost" onClick={deleteSecret}>删除</Button> : null}</div></div>
         <div className="inline-actions"><Button onClick={() => runModelCheck(false)} busy={busy === "check"} disabled={!profile}>静态检查</Button><Button variant="primary" onClick={() => runModelCheck(true)} busy={busy === "smoke"} disabled={!profile}>真实 Tool Call 冒烟</Button><span className="cost-note">冒烟测试会产生少量模型费用</span></div>
+      </Section>
+
+      <Section title="安恒威胁情报" description="对当前任务已观测的公网外联 IP、分析师提供的域名/IP 和文件哈希做受控富化；不会读取 Codex Skill 的密钥文件。">
+        <div className="form-grid">
+          <Field label="启用情报查询"><Select value={config.threatIntel.enabled ? "yes" : "no"} onChange={(event) => updateThreatIntel({ enabled: event.target.value === "yes" })}><option value="no">关闭</option><option value="yes">启用</option></Select></Field>
+          <Field label="自动富化可疑外联"><Select value={config.threatIntel.autoEnrichConnections ? "yes" : "no"} onChange={(event) => updateThreatIntel({ autoEnrichConnections: event.target.value === "yes" })}><option value="yes">启用</option><option value="no">仅手动调用</option></Select></Field>
+          <Field label="Provider"><Input value="dbapp-ti" disabled /></Field>
+          <Field label="API 端点"><Input value={config.threatIntel.baseUrl} disabled /></Field>
+          <Field label="请求超时（秒）"><Input type="number" min={1} max={60} value={config.threatIntel.timeoutSeconds} onChange={(event) => updateThreatIntel({ timeoutSeconds: Number(event.target.value) })} /></Field>
+          <Field label="单批 IOC 上限"><Input type="number" min={1} max={100} value={config.threatIntel.maxBatchSize} onChange={(event) => updateThreatIntel({ maxBatchSize: Number(event.target.value) })} /></Field>
+          <Field label="本地缓存（秒）"><Input type="number" min={0} max={86400} value={config.threatIntel.cacheTtlSeconds} onChange={(event) => updateThreatIntel({ cacheTtlSeconds: Number(event.target.value) })} /></Field>
+          <Field label="私网地址上送"><Input value="始终禁止" disabled /></Field>
+        </div>
+        <div className="credential-card"><div className="credential-status"><div className={`status-orb ${tiCredential?.configured ? "ok" : "warn"}`} /><div><strong>DBAPP TI API 凭据</strong><span>{tiCredential?.configured ? `已配置 · ${tiCredential.source ?? config.threatIntel.apiKeyEnv}` : `尚未配置 · 可使用 ${config.threatIntel.apiKeyEnv}`}</span>{tiCredential?.secureStorageBackend ? <small>安全存储：{tiCredential.secureStorageBackend}</small> : null}{tiCredential?.notice ? <small>{tiCredential.notice}</small> : null}</div></div><div className="credential-input"><Input type="password" autoComplete="new-password" placeholder="nti-…（保存后不可读取）" value={tiSecret} onChange={(event) => setTiSecret(event.target.value)} /><label className="checkbox-row"><input type="checkbox" checked={persistTiSecret} onChange={(event) => setPersistTiSecret(event.target.checked)} />系统安全存储持久化</label><Button onClick={saveThreatIntelSecret} busy={busy === "ti-credential"}>保存情报 Key</Button>{tiCredential?.configured ? <Button variant="ghost" onClick={deleteThreatIntelSecret}>删除</Button> : null}</div></div>
+        <div className="inline-actions"><Button variant="primary" onClick={testThreatIntel} busy={busy === "ti-test"} disabled={!profile}>测试情报 API</Button><span className="cost-note">测试会查询 example.com，并消耗 1 次安恒威胁情报额度</span></div>
       </Section>
 
       <Section title="Agent 预算" description="达到预算后停止调查并在报告中保留未完成项。">

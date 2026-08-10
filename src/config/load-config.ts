@@ -25,6 +25,19 @@ function withIncrementalDefaults(input: unknown): unknown {
       maxArtifactBytes: 10_485_760,
     };
   }
+  if (migrated.threatIntel === undefined) {
+    migrated.threatIntel = {
+      enabled: false,
+      provider: "dbapp-ti",
+      baseUrl: "https://ti.dbappsecurity.com.cn/oapi/v1/",
+      apiKeyEnv: "DBAPP_TI_API_KEY",
+      timeoutSeconds: 15,
+      maxBatchSize: 100,
+      cacheTtlSeconds: 3_600,
+      autoEnrichConnections: true,
+      includePrivateAddresses: false,
+    };
+  }
   return migrated;
 }
 

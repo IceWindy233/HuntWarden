@@ -3,8 +3,8 @@ import { CHECK_CATEGORY_SHORT_LABELS, type ReportRecord } from "../../domain/typ
 import type { TaskSnapshot } from "../../gui/contracts.js";
 import { Button, EmptyState, formatTime, shortId, StatusPill, Textarea } from "./ui.js";
 
-type TaskTab = "调查" | "工具" | "发现" | "证据" | "审计" | "报告";
-const TABS: TaskTab[] = ["调查", "工具", "发现", "证据", "审计", "报告"];
+type TaskTab = "调查" | "工具" | "发现" | "证据" | "情报" | "审计" | "报告";
+const TABS: TaskTab[] = ["调查", "工具", "发现", "证据", "情报", "审计", "报告"];
 
 export interface LiveAgentStream {
   taskId: string;
@@ -124,6 +124,7 @@ export function TaskWorkspace({ snapshot, refresh, notify, liveStream }: { snaps
       {tab === "工具" ? <ToolTimeline snapshot={snapshot} /> : null}
       {tab === "发现" ? <Findings snapshot={snapshot} /> : null}
       {tab === "证据" ? <EvidenceList snapshot={snapshot} notify={notify} /> : null}
+      {tab === "情报" ? <ThreatIntelView snapshot={snapshot} /> : null}
       {tab === "审计" ? <AuditLog snapshot={snapshot} /> : null}
       {tab === "报告" ? <ReportView taskId={task.taskId} reports={reports} selectedReportId={selectedReportId} report={report} onSelect={selectReport} onGenerate={generateReport} busy={busy === "report"} notify={notify} readOnly={archived} firstReportLabel={firstReportLabel} /> : null}
     </main>
@@ -152,6 +153,25 @@ function Findings({ snapshot }: { snapshot: TaskSnapshot }) {
 function EvidenceList({ snapshot, notify }: { snapshot: TaskSnapshot; notify: (message: string, tone?: "success" | "error" | "info") => void }) {
   if (snapshot.evidence.length === 0) return <EmptyState icon="▣" title="暂无 Evidence" description="采集结果、哈希和本地受管文件会在这里展示。" />;
   return <div className="evidence-grid">{snapshot.evidence.map((item) => <article className="evidence-card" key={item.evidenceId}><div className="evidence-icon">{item.storagePath ? "FILE" : "JSON"}</div><div className="evidence-main"><span className="mono">{item.evidenceId}</span><h3>{item.type}</h3><p title={item.source}>{item.source}</p><div className="evidence-meta"><span>采集 {formatTime(item.collectedAt)}</span><span>工具 {item.tool}</span>{item.sha256 ? <span className="mono">SHA {shortId(item.sha256)}</span> : null}</div></div>{item.storagePath ? <Button variant="ghost" onClick={async () => { try { await window.huntwarden.revealEvidence(item.evidenceId); } catch (error) { notify(error instanceof Error ? error.message : String(error), "error"); } }}>在 Finder 显示</Button> : null}</article>)}</div>;
+}
+
+function ThreatIntelView({ snapshot }: { snapshot: TaskSnapshot }) {
+  const evidence = snapshot.evidence.filter((item) => item.type.startsWith("dbapp_"));
+  const verdicts = evidence.flatMap((item) => {
+    const rows = item.metadata?.verdicts;
+    return Array.isArray(rows) ? rows.flatMap((row) => row && typeof row === "object" ? [{ evidenceId: item.evidenceId, ...row as Record<string, unknown> }] : []) : [];
+  });
+  if (evidence.length === 0) return <EmptyState icon="◎" title="暂无威胁情报" description="启用安恒威胁情报后，当前任务已观测的公网外联 IP 和分析师提供的 IOC 会在这里显示。私网、回环和保留地址不会上送。" />;
+  return <div className="ti-view">
+    <div className="ti-source-banner"><strong>情报来源：安恒威胁情报 (DBAPP Threat Intelligence)</strong><span>外部情报是关联证据，必须结合进程、文件和时间线事实，不会单独形成 CONFIRMED 结论。</span></div>
+    <div className="card-list">{verdicts.map((verdict, index) => {
+      const malicious = verdict.malicious === true;
+      const unknown = verdict.malicious === null;
+      const types = Array.isArray(verdict.threatTypes) ? verdict.threatTypes.map(String).join("、") : "";
+      const refs = Array.isArray(verdict.connectionRefs) ? verdict.connectionRefs.map(String) : [];
+      return <article className={`finding-card ti-card ${malicious ? "ti-malicious" : ""}`} key={`${String(verdict.evidenceId)}-${String(verdict.ioc)}-${index}`}><header><div><span className="mono muted">{String(verdict.evidenceId)}</span><h3>{String(verdict.ioc ?? "未知 IOC")}</h3></div><div><StatusPill value={malicious ? "SUSPICIOUS" : unknown ? "UNKNOWN" : "NO_FINDING"} /><StatusPill value={String(verdict.riskLevel ?? "unknown").toUpperCase()} /></div></header><p>{typeof verdict.description === "string" ? verdict.description : malicious ? "情报库返回恶意或高风险判定。" : unknown ? "情报库未返回明确判定。" : "情报库未标记为恶意。"}</p><footer><span>类型 <strong>{String(verdict.iocType ?? "unknown")}</strong></span><span>威胁标签 <strong>{types || "--"}</strong></span><span>关联连接 <strong>{refs.length}</strong></span><span>缓存 <strong>{verdict.cached === true ? "是" : "否"}</strong></span></footer></article>;
+    })}</div>
+  </div>;
 }
 
 function AuditLog({ snapshot }: { snapshot: TaskSnapshot }) {

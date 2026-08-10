@@ -12,6 +12,7 @@ import { SSHExecutor } from "../executor/ssh-executor.js";
 import { ReportService } from "../report/report-service.js";
 import type { RuntimeStore } from "../storage/runtime-store.js";
 import { createSecurityTools } from "../tools/index.js";
+import type { ThreatIntelClient } from "../threat-intel/types.js";
 import { SecurityAgentRuntime } from "./security-agent-runtime.js";
 
 export class Application extends EventEmitter {
@@ -28,6 +29,7 @@ export class Application extends EventEmitter {
     private readonly models: Models,
     private readonly model: Model<Api>,
     private readonly checkpoint?: (name: string) => void,
+    private readonly threatIntel?: ThreatIntelClient,
   ) {
     super();
     this.approvals = new ApprovalService(store);
@@ -79,7 +81,11 @@ export class Application extends EventEmitter {
     }
     this.executor = new SSHExecutor(task.target, this.config.executor.helperPath, this.config.executor.timeoutSeconds * 1000);
     const evidence = new EvidenceStore(this.config.storage.baseDir, this.store, this.checkpoint);
-    const deps = { task, config: this.config, store: this.store, evidence, executor: this.executor, approvals: this.approvals, ...(this.checkpoint ? { checkpoint: this.checkpoint } : {}) };
+    const deps = {
+      task, config: this.config, store: this.store, evidence, executor: this.executor, approvals: this.approvals,
+      ...(this.checkpoint ? { checkpoint: this.checkpoint } : {}),
+      ...(this.threatIntel ? { threatIntel: this.threatIntel } : {}),
+    };
     const tools = createSecurityTools(deps);
     this.runtime = new SecurityAgentRuntime({ task, config: this.config, store: this.store, executor: this.executor, approvals: this.approvals, tools, models: this.models, model: this.model, ...(this.checkpoint ? { checkpoint: this.checkpoint } : {}) });
     this.runtime.on("event", (event: { type: string }) => {

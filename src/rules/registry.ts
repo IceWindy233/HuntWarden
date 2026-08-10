@@ -133,4 +133,24 @@ export const DETERMINISTIC_RULES: readonly DeterministicRuleDefinition[] = [
       };
     },
   },
+  {
+    ruleId: "HW-TRIAGE-DBAPP-TI-001",
+    ruleVersion: "1.0.0",
+    category: "linux_intrusion_triage",
+    requiredStepIds: ["network-threat-intel"],
+    evaluate: (context) => {
+      const malicious = context.items("network-threat-intel").filter((item) => item.malicious === true);
+      if (malicious.length === 0) return undefined;
+      return {
+        status: "SUSPICIOUS",
+        severity: "MEDIUM",
+        confidence: 0.8,
+        title: "可疑进程外联命中安恒威胁情报",
+        basis: malicious.slice(0, 20).map((item) => `${text(item.ioc) || "<unknown>"}: 风险 ${text(item.riskLevel) || "unknown"}，类型 ${array(item.threatTypes).map(text).join(",") || "未返回"}`),
+        counterEvidence: ["外部情报是关联证据而非主机失陷的单独定论，仍需结合进程身份、连接状态、文件和时间线事实"],
+        evidenceRefs: context.evidenceRefs(["network-threat-intel"]),
+        recommendation: "核验 connectionRef 对应进程链和可执行文件来源；必要时采集文件哈希与时间线，形成多源结论。",
+      };
+    },
+  },
 ];

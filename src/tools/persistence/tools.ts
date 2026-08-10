@@ -4,6 +4,7 @@ import type { SecurityToolDefinition, SecurityToolResult } from "../../domain/ty
 import type { ToolDependencies } from "../dependencies.js";
 import { createReference, requireReference } from "../reference-utils.js";
 import { createSecurityTool } from "../tool-factory.js";
+import { attachConnectionReferences } from "../../threat-intel/network-ioc.js";
 
 interface PersistenceValue {
   kind: "cron" | "systemd" | "ssh" | "shell" | "extended";
@@ -113,11 +114,12 @@ export function createPersistenceTools(deps: ToolDependencies): SecurityToolDefi
           pid: process.value.pid, ...stable, maxConnections: deps.config.persistence.maxConnections,
         } }, signal);
         const warnings = Array.isArray(output.warnings) ? output.warnings : [];
+        const connections = attachConnectionReferences(deps.store, deps.task.taskId, output.items as Record<string, unknown>[], params.processRef);
         const evidence = deps.evidence.putStructured({ taskId: deps.task.taskId, host: deps.task.target.host, type: "process_connections",
           source: `PID:${process.value.pid}`, tool: "list_process_connections", toolCallId,
-          metadata: { processRef: params.processRef, connections: output.items, partial: output.partial, warnings } });
-        return { status: output.partial ? "partial" : "success", summary: { count: output.items.length, evidenceId: evidence.evidenceId },
-          items: output.items, artifactRefs: [params.processRef, evidence.evidenceId], warnings };
+          metadata: { processRef: params.processRef, connections: connections.items, partial: output.partial, warnings } });
+        return { status: output.partial ? "partial" : "success", summary: { count: connections.items.length, threatIntelEligible: connections.refs.length, evidenceId: evidence.evidenceId },
+          items: connections.items, artifactRefs: [params.processRef, ...connections.refs, evidence.evidenceId], warnings };
       },
     }),
     createSecurityTool(...common, {

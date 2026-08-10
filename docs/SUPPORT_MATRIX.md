@@ -1,6 +1,6 @@
 # HuntWarden 实战试用支持矩阵
 
-> 更新日期：2026-08-09。`已验证`仅表示仓库自动化或明确环境已通过；`待实机验收`不等同于不支持，而是不应在报告中宣称已验证。
+> 更新日期：2026-08-10。`已验证`仅表示仓库自动化或明确环境已通过；`待实机验收`不等同于不支持，而是不应在报告中宣称已验证。
 
 ## 目标与接入
 
@@ -33,6 +33,7 @@ Helper 启动时返回 `SUPPORTED | PARTIAL | UNSUPPORTED | PERMISSION_DENIED` �
 | 后门账户 | UID 0、sudo/wheel、NSS 来源标识、账户状态、Key 指纹、登录历史、sudo/doas/polkit、有效 sshd 信任配置 | SSSD/LDAP 真实目录、云登录日志尚待 VM 验收。 |
 | Linux 持久化 | Cron、systemd service/timer/drop-in/generated/transient、SSH、Shell、at/anacron、SysV/rc.local、XDG、PAM、udev、modprobe、cloud-init、包管理 Hook、user linger | initramfs 内容解析和 transient unit 的 D-Bus 运行态详情尚未实现。 |
 | Linux 入侵分诊 | 稳定进程身份、进程树/FD/maps/socket、删除后运行、近期/特权文件、dpkg/rpm、动态加载、认证/audit 时间线 | journald 当前以能力识别与文件日志为主，尚未实现完整 journal cursor 采集。 |
+| 安恒威胁情报富化 | 当前任务 `SOCK-*` 公网外联引用、分析师预置 IP/域名/文件哈希、批量查询、本地缓存、Evidence 与 GUI 情报视图 | API 客户端和假响应测试已验证；真实 API Key、额度与生产数据质量需要用户在线验收。外部命中不能单独形成 `CONFIRMED`。 |
 
 ## 数据与处置边界
 
@@ -40,6 +41,7 @@ Helper 启动时返回 `SUPPORTED | PARTIAL | UNSUPPORTED | PERMISSION_DENIED` �
 - 认证/audit/Access Log 只读取最新 64 MiB 窗口；达到上限返回 `PARTIAL`。YARA 对候选集合单次批量执行。
 - 当前真实主机试用建议使用 `SCAN`。已实现的写操作只有 WebShell 文件隔离和账户禁用，均要求 Evidence、一次性审批票据、目标端原子回执与执行后验证。
 - Linux 分诊、Java 内存马和扩展持久化暂不提供自动清除工具。
+- 威胁情报默认关闭；私网、回环、链路本地、文档网段和其他保留地址在本地过滤。Key 只从 HuntWarden 安全凭据存储或 `DBAPP_TI_API_KEY` 读取，不进入 YAML、模型上下文或 Evidence。
 
 ## 进入真实主机试用前
 

@@ -85,6 +85,17 @@ export const ConfigSchema = Type.Object({
     maxTimelineEvents: Type.Integer({ minimum: 1, maximum: 50_000 }),
     maxArtifactBytes: Type.Integer({ minimum: 1024, maximum: 104_857_600 }),
   }),
+  threatIntel: Type.Object({
+    enabled: Type.Boolean(),
+    provider: Type.Literal("dbapp-ti"),
+    baseUrl: Type.Literal("https://ti.dbappsecurity.com.cn/oapi/v1/"),
+    apiKeyEnv: Type.Literal("DBAPP_TI_API_KEY"),
+    timeoutSeconds: Type.Integer({ minimum: 1, maximum: 60 }),
+    maxBatchSize: Type.Integer({ minimum: 1, maximum: 100 }),
+    cacheTtlSeconds: Type.Integer({ minimum: 0, maximum: 86_400 }),
+    autoEnrichConnections: Type.Boolean(),
+    includePrivateAddresses: Type.Literal(false),
+  }),
   remediation: Type.Object({
     requireApproval: Type.Literal(true),
     allowedTools: Type.Array(Type.Union([Type.Literal("quarantine_file"), Type.Literal("disable_account")])),

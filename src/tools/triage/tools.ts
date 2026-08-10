@@ -4,6 +4,7 @@ import type { PartialItemsOutput, StableProcessIdentity } from "../../executor/o
 import type { ToolDependencies } from "../dependencies.js";
 import { createReference, requireReference } from "../reference-utils.js";
 import { createSecurityTool } from "../tool-factory.js";
+import { attachConnectionReferences } from "../../threat-intel/network-ioc.js";
 
 interface ProcessValue extends StableProcessIdentity {
   exePath?: string;
@@ -84,20 +85,21 @@ export function createTriageTools(deps: ToolDependencies): SecurityToolDefinitio
         const refs = output.processes.map((value) => createReference(deps.store, deps.task.taskId, "process", "process", value as ProcessValue));
         const processes = refs.map(({ ref, value }) => ({ processRef: ref, ...value }));
         const refsByPid = new Map(refs.map(({ ref, value }) => [value.pid, ref]));
-        const connections = Array.isArray(output.connections)
+        const rawConnections = Array.isArray(output.connections)
           ? (output.connections as Record<string, unknown>[]).map(({ processPid, ...connection }) => ({
               ...connection,
               ...(typeof processPid === "number" && refsByPid.has(processPid) ? { processRef: refsByPid.get(processPid) } : {}),
             }))
           : [];
+        const connections = attachConnectionReferences(deps.store, deps.task.taskId, rawConnections);
         const evidence = structuredEvidence(toolCallId, "capture_volatile_snapshot", "volatile_snapshot", "Linux /proc fixed snapshot", {
-          ...output, processes, connections,
+          ...output, processes, connections: connections.items,
         });
         return {
           status: output.partial ? "partial" : "success",
-          summary: { processCount: refs.length, connectionCount: Array.isArray(output.connections) ? output.connections.length : 0, evidenceId: evidence.evidenceId, partial: output.partial },
-          items: [{ evidenceId: evidence.evidenceId, bootId: output.bootId, capturedAt: output.capturedAt, processes, connections }],
-          artifactRefs: [...refs.map(({ ref }) => ref), evidence.evidenceId], warnings: output.warnings,
+          summary: { processCount: refs.length, connectionCount: connections.items.length, threatIntelEligible: connections.refs.length, evidenceId: evidence.evidenceId, partial: output.partial },
+          items: [{ evidenceId: evidence.evidenceId, bootId: output.bootId, capturedAt: output.capturedAt, processes, connections: connections.items }],
+          artifactRefs: [...refs.map(({ ref }) => ref), ...connections.refs, evidence.evidenceId], warnings: output.warnings,
         };
       },
     }),
@@ -168,10 +170,11 @@ export function createTriageTools(deps: ToolDependencies): SecurityToolDefinitio
         const output = await deps.executor.invoke({ operation: "list_process_connections", params: {
           ...stableRequest(target.value), maxConnections,
         } }, signal);
+        const connections = attachConnectionReferences(deps.store, deps.task.taskId, output.items as Record<string, unknown>[], params.processRef);
         const evidence = structuredEvidence(toolCallId, "list_process_connections", "triage_process_connections", params.processRef,
-          { processRef: params.processRef, ...output });
-        return partialResult(output, { processRef: params.processRef, evidenceId: evidence.evidenceId }, output.items,
-          [params.processRef, evidence.evidenceId]);
+          { processRef: params.processRef, ...output, items: connections.items });
+        return partialResult(output, { processRef: params.processRef, evidenceId: evidence.evidenceId, threatIntelEligible: connections.refs.length }, connections.items,
+          [params.processRef, ...connections.refs, evidence.evidenceId]);
       },
     }),
     createSecurityTool(...common, {

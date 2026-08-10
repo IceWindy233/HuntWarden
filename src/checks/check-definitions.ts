@@ -102,6 +102,9 @@ export const CHECK_DEFINITIONS: Record<string, CheckDefinition> = {
     label: "Linux 入侵分诊",
     minimumExecutionGraph: [
       { stepId: "suspicious-processes", toolName: "list_suspicious_processes", buildArguments: noArguments },
+      { stepId: "suspicious-connections", toolName: "list_process_connections", dependsOn: ["suspicious-processes"],
+        buildArguments: referenceArguments("suspicious-processes", "processRef", "PROC-") },
+      { stepId: "network-threat-intel", toolName: "enrich_observed_network_iocs", dependsOn: ["suspicious-connections"], buildArguments: noArguments },
     ],
   },
 };

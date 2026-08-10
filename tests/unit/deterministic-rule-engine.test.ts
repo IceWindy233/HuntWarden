@@ -189,4 +189,29 @@ describe("DeterministicRuleEngine", () => {
     ]));
     store.close();
   });
+
+  it("安恒情报命中只形成需主机事实佐证的 SUSPICIOUS，不单独确认为失陷", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "huntwarden-rule-ti-"));
+    directories.push(directory);
+    const store = await RuntimeStore.open(directory, "runtime.db");
+    const task = testTask();
+    task.checks = ["linux_intrusion_triage"];
+    store.createTask(task);
+    const evidenceId = "EV-rule-dbapp-ti";
+    putEvidence(store, evidenceId, task.taskId);
+
+    const result = new DeterministicRuleEngine(store).evaluate(task, [
+      ...preflight(),
+      outcome("network-threat-intel", [{
+        ioc: "8.8.8.8", malicious: true, riskLevel: "high", threatTypes: ["botnet"], connectionRefs: ["SOCK-test"],
+      }], [evidenceId]),
+    ]);
+
+    expect(result).toMatchObject([{
+      category: "linux_intrusion_triage", status: "SUSPICIOUS", severity: "MEDIUM", evidenceRefs: [evidenceId],
+    }]);
+    expect(result[0]?.summary).toContain("外部情报是关联证据而非主机失陷的单独定论");
+    expect(result[0]?.status).not.toBe("CONFIRMED");
+    store.close();
+  });
 });

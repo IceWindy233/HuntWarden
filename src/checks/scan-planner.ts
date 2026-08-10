@@ -46,6 +46,7 @@ export interface ScanPlannerOptions {
   tools: SecurityToolDefinition[];
   maxLlmBytes: number;
   accountChecks?: { checkAuthorizedKeys: boolean; checkLoginHistory: boolean };
+  threatIntelChecks?: { enabled: boolean; autoEnrichConnections: boolean };
 }
 
 function errorMessage(error: unknown): string {
@@ -139,7 +140,9 @@ export class ScanPlanner {
       const categoryOutcomes: ScanStepOutcome[] = [];
       for (const step of definition.minimumExecutionGraph) {
         if ((step.toolName === "inspect_authorized_keys" && this.options.accountChecks?.checkAuthorizedKeys === false)
-          || (step.toolName === "get_login_history" && this.options.accountChecks?.checkLoginHistory === false)) continue;
+          || (step.toolName === "get_login_history" && this.options.accountChecks?.checkLoginHistory === false)
+          || (step.toolName === "enrich_observed_network_iocs"
+            && (!this.options.threatIntelChecks?.enabled || !this.options.threatIntelChecks.autoEnrichConnections))) continue;
         minimumToolNames.add(step.toolName);
         const dependencyFailed = step.dependsOn?.some((dependency) => outcomes.some((outcome) =>
           outcome.stepId === dependency && outcome.status === "error",

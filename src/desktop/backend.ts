@@ -29,6 +29,7 @@ import type {
 import { DESKTOP_API_VERSION } from "../gui/contracts.js";
 import { Application } from "../runtime/application.js";
 import { RuntimeStore } from "../storage/runtime-store.js";
+import { DbappThreatIntelClient } from "../threat-intel/dbapp-client.js";
 
 export interface DesktopBackendOptions {
   userDataDir: string;
@@ -160,6 +161,9 @@ export class DesktopBackend extends EventEmitter {
   }
 
   async saveCredential(input: { provider: string; secret: string; persist: boolean }): Promise<CredentialStatus> {
+    if (input.provider === "dbapp-ti" && !/^nti-\S{8,}$/.test(input.secret.trim())) {
+      throw new Error("安恒威胁情报 API Key 格式无效，应以 nti- 开头");
+    }
     const result = await this.options.credentials.saveApiKey(input.provider, input.secret, input.persist);
     const status = await this.getCredentialStatus(input.provider);
     return result.recoveredUnreadableEntry
@@ -179,6 +183,18 @@ export class DesktopBackend extends EventEmitter {
     const profile = await this.profiles.get(profileId);
     const { models, model } = createModelBundle(profile.config, this.options.credentials);
     return await smokeModel(profile.config, models, model);
+  }
+
+  async testThreatIntel(profileId: string): Promise<{ ok: boolean; provider: "dbapp-ti"; source: string; message: string }> {
+    const profile = await this.profiles.get(profileId);
+    const client = this.createThreatIntelClient(profile.config);
+    const result = await client.compromiseDetection(["example.com"]);
+    return {
+      ok: true,
+      provider: "dbapp-ti",
+      source: result.source,
+      message: `安恒威胁情报 API 验证通过（请求 ${result.requestId ?? "无 request_id"}）；本次测试消耗 1 次查询额度。`,
+    };
   }
 
   async testSshTarget(target: NewTaskInput["target"]): Promise<{ ok: boolean; fingerprint?: string; message: string }> {
@@ -323,7 +339,14 @@ export class DesktopBackend extends EventEmitter {
     store.reconcileInterruptedTasks();
     const { models, model } = this.options.modelBundleFactory?.(this.activeProfile.config)
       ?? createModelBundle(this.activeProfile.config, this.options.credentials);
-    this.application = new Application(this.activeProfile.config, store, models, model, this.options.checkpoint);
+    this.application = new Application(
+      this.activeProfile.config,
+      store,
+      models,
+      model,
+      this.options.checkpoint,
+      this.createThreatIntelClient(this.activeProfile.config),
+    );
     this.seedNotificationBaseline(this.application);
     this.application.on("changed", (taskId: string) => this.publishTask(taskId));
     this.application.on("stream", (update: AgentStreamUpdate) => this.publishStream(update));
@@ -434,7 +457,15 @@ export class DesktopBackend extends EventEmitter {
     return ({
       openai: "OPENAI_API_KEY", deepseek: "DEEPSEEK_API_KEY", anthropic: "ANTHROPIC_API_KEY",
       google: "GEMINI_API_KEY", openrouter: "OPENROUTER_API_KEY", "azure-openai-responses": "AZURE_OPENAI_API_KEY",
-      "moonshotai-cn": "MOONSHOT_API_KEY", zai: "ZAI_API_KEY",
+      "moonshotai-cn": "MOONSHOT_API_KEY", zai: "ZAI_API_KEY", "dbapp-ti": "DBAPP_TI_API_KEY",
     } as Record<string, string>)[provider] ?? `${provider.toUpperCase().replace(/[^A-Z0-9]/g, "_")}_API_KEY`;
+  }
+
+  private createThreatIntelClient(config: AppConfig): DbappThreatIntelClient {
+    return new DbappThreatIntelClient(config.threatIntel, async () => {
+      const credential = await this.options.credentials.read("dbapp-ti");
+      if (credential?.type === "api_key") return credential.key;
+      return process.env[config.threatIntel.apiKeyEnv];
+    });
   }
 }

@@ -57,7 +57,11 @@ export class SecurityAgentRuntime extends EventEmitter {
     this.scanPlanner = options.scanPlanner === false
       ? undefined
       : options.scanPlanner ?? (tools.some((tool) => tool.name === "get_host_info")
-        ? new ScanPlanner({ task, store, tools, maxLlmBytes: config.llmData.maxTextBytes, accountChecks: config.account })
+        ? new ScanPlanner({
+            task, store, tools, maxLlmBytes: config.llmData.maxTextBytes,
+            accountChecks: config.account,
+            threatIntelChecks: config.threatIntel,
+          })
         : undefined);
   }
 

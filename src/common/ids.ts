@@ -12,6 +12,7 @@ const PREFIXES = {
   class: "CLASS",
   account: "ACCT",
   persistence: "PERSIST",
+  socket: "SOCK",
   report: "RPT",
 } as const;
 

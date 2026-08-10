@@ -15,6 +15,7 @@ export const IPC = {
   credentialDelete: "huntwarden:credential:delete",
   modelCheck: "huntwarden:model:check",
   modelSmoke: "huntwarden:model:smoke",
+  threatIntelTest: "huntwarden:threat-intel:test",
   selectPrivateKey: "huntwarden:file:private-key",
   selectKnownHosts: "huntwarden:file:known-hosts",
   sshHostKeyDiscover: "huntwarden:ssh:host-key:discover",

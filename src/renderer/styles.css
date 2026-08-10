@@ -350,3 +350,9 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
   .credential-input .checkbox-row { grid-column: 1 / -1; }
   .settings-scroll { padding-right: 24px; padding-left: 24px; }
 }
+.ti-view { display: grid; gap: 16px; }
+.ti-source-banner { display: grid; gap: 5px; padding: 14px 16px; border: 1px solid rgba(45, 212, 191, .26); border-radius: 10px; background: rgba(8, 145, 178, .08); }
+.ti-source-banner strong { color: #67e8f9; }
+.ti-source-banner span { color: var(--muted); font-size: 13px; }
+.ti-card { border-left: 3px solid rgba(94, 234, 212, .45); }
+.ti-card.ti-malicious { border-left-color: #fb7185; }

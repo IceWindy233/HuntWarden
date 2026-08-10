@@ -19,6 +19,7 @@ const api: HuntWardenDesktopApi = {
   deleteCredential: async (provider) => await ipcRenderer.invoke(IPC.credentialDelete, provider),
   checkModel: async (profileId) => await ipcRenderer.invoke(IPC.modelCheck, profileId),
   smokeModel: async (profileId) => await ipcRenderer.invoke(IPC.modelSmoke, profileId),
+  testThreatIntel: async (profileId) => await ipcRenderer.invoke(IPC.threatIntelTest, profileId),
   selectPrivateKey: async () => await ipcRenderer.invoke(IPC.selectPrivateKey),
   selectKnownHosts: async () => await ipcRenderer.invoke(IPC.selectKnownHosts),
   discoverSshHostKey: async (input) => await ipcRenderer.invoke(IPC.sshHostKeyDiscover, input),

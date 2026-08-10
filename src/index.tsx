@@ -6,6 +6,7 @@ import type { TaskMode } from "./domain/types.js";
 import { Application } from "./runtime/application.js";
 import { RuntimeStore } from "./storage/runtime-store.js";
 import { App } from "./tui/App.js";
+import { DbappThreatIntelClient } from "./threat-intel/dbapp-client.js";
 
 function arg(name: string): string | undefined {
   const index = process.argv.indexOf(name);
@@ -16,7 +17,8 @@ const config = await loadConfig();
 const store = await RuntimeStore.open(config.storage.baseDir, config.storage.databaseFile);
 store.reconcileInterruptedTasks();
 const { models, model } = createModelBundle(config);
-const application = new Application(config, store, models, model);
+const threatIntel = new DbappThreatIntelClient(config.threatIntel, async () => process.env[config.threatIntel.apiKeyEnv]);
+const application = new Application(config, store, models, model, undefined, threatIntel);
 
 let task = arg("--resume") ? store.getTask(arg("--resume")!) : undefined;
 if (!task && arg("--host")) {

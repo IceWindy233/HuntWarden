@@ -8,6 +8,7 @@ import { createRecordFindingTool } from "./local/record-finding.js";
 import { createRemediationTools } from "./remediation/tools.js";
 import { createPersistenceTools } from "./persistence/tools.js";
 import { createTriageTools } from "./triage/tools.js";
+import { createThreatIntelTools } from "./threat-intel/tools.js";
 
 export function createSecurityTools(deps: ToolDependencies): SecurityToolDefinition[] {
   const tools: SecurityToolDefinition[] = [...createHostTools(deps)];
@@ -18,6 +19,7 @@ export function createSecurityTools(deps: ToolDependencies): SecurityToolDefinit
   if (selected.has("backdoor_account")) tools.push(...createAccountTools(deps));
   if (selected.has("linux_persistence")) tools.push(...createPersistenceTools(deps));
   if (selected.has("linux_intrusion_triage")) tools.push(...createTriageTools(deps));
+  if (selected.has("linux_intrusion_triage") || selected.has("linux_persistence")) tools.push(...createThreatIntelTools(deps));
 
   tools.push(createRecordFindingTool(deps));
 

@@ -104,6 +104,7 @@ function registerIpc(): void {
   handle(IPC.credentialDelete, async (_event, provider) => await requireBackend().deleteCredential(text(provider, "Provider", 64)));
   handle(IPC.modelCheck, async (_event, profileId) => await requireBackend().checkModel(text(profileId, "Profile ID", 64)));
   handle(IPC.modelSmoke, async (_event, profileId) => await requireBackend().smokeModel(text(profileId, "Profile ID", 64)));
+  handle(IPC.threatIntelTest, async (_event, profileId) => await requireBackend().testThreatIntel(text(profileId, "Profile ID", 64)));
 
   handle(IPC.selectPrivateKey, async () => {
     const result = await dialog.showOpenDialog(mainWindow!, { title: "选择 SSH 私钥", properties: ["openFile", "showHiddenFiles"] });
