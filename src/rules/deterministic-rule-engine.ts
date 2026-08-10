@@ -58,7 +58,13 @@ export class DeterministicRuleEngine {
     for (const rule of this.registry) {
       if (!selected.has(rule.category)) continue;
       const required = [...preflightSteps, ...rule.requiredStepIds];
-      if (!context.complete(required)) {
+      const preflightUsable = preflightSteps.every((stepId) => {
+        const values = context.stepOutcomes(stepId);
+        return values.length > 0 && values.every((outcome) =>
+          (outcome.status === "success" || outcome.status === "partial") && normalizedDetails(outcome) !== undefined,
+        );
+      });
+      if (!preflightUsable || !context.complete(rule.requiredStepIds)) {
         this.store.appendAudit({
           taskId: task.taskId,
           event: "deterministic_rule_skipped_incomplete",

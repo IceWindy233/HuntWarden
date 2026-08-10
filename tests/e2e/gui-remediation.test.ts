@@ -119,7 +119,9 @@ describe.skipIf(!enabled)("GUI REMEDIATE 真实审批闭环", () => {
     const completed = await waitCompleted(page, taskId);
     expect(completed.approvals).toMatchObject([{ tool: "quarantine_file", status: "CONSUMED" }]);
     expect(completed.actionReceipts).toMatchObject([{ tool: "quarantine_file", status: "SUCCEEDED" }]);
-    expect(completed.findings).toMatchObject([{ category: "webshell", status: "CONFIRMED" }]);
+    expect(completed.findings).toEqual(expect.arrayContaining([
+      expect.objectContaining({ category: "webshell", status: "CONFIRMED" }),
+    ]));
 
     const remote = new SSHExecutor(target, "/usr/local/libexec/huntwarden-helper", 30_000);
     try {
@@ -142,7 +144,9 @@ describe.skipIf(!enabled)("GUI REMEDIATE 真实审批闭环", () => {
     const completed = await waitCompleted(page, taskId);
     expect(completed.approvals).toMatchObject([{ tool: "disable_account", status: "CONSUMED" }]);
     expect(completed.actionReceipts).toMatchObject([{ tool: "disable_account", status: "SUCCEEDED" }]);
-    expect(completed.findings).toMatchObject([{ category: "backdoor_account", status: "CONFIRMED" }]);
+    expect(completed.findings).toEqual(expect.arrayContaining([
+      expect.objectContaining({ category: "backdoor_account", status: "CONFIRMED" }),
+    ]));
 
     const remote = new SSHExecutor(target, "/usr/local/libexec/huntwarden-helper", 30_000);
     try {

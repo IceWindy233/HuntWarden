@@ -131,7 +131,10 @@ export class ScanPlanner {
       results.set(step.stepId, outcomes.filter((outcome) => outcome.stepId === step.stepId && outcome.details !== undefined).map((outcome) => outcome.details));
     }
 
-    const preflightIncomplete = outcomes.filter((outcome) => outcome.status === "error" || outcome.status === "partial");
+    // get_capabilities 是跨检测包的能力总览。它可能因为与当前检测无关的能力
+    // （例如 WebShell 任务中的 Tomcat 探针）缺失而返回 partial。只有预检本身
+    // 无法执行时才阻断所有类别；类别相关的降级由各自最低步骤负责固化。
+    const preflightIncomplete = outcomes.filter((outcome) => outcome.status === "error");
     for (const definition of selectedCheckDefinitions(task.checks)) {
       const categoryOutcomes: ScanStepOutcome[] = [];
       for (const step of definition.minimumExecutionGraph) {
@@ -139,7 +142,7 @@ export class ScanPlanner {
           || (step.toolName === "get_login_history" && this.options.accountChecks?.checkLoginHistory === false)) continue;
         minimumToolNames.add(step.toolName);
         const dependencyFailed = step.dependsOn?.some((dependency) => outcomes.some((outcome) =>
-          outcome.stepId === dependency && (outcome.status === "error" || outcome.status === "partial"),
+          outcome.stepId === dependency && outcome.status === "error",
         ));
         let stepOutcomes: ScanStepOutcome[];
         if (dependencyFailed) {

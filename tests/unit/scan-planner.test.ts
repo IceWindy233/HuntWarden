@@ -74,6 +74,42 @@ describe("ScanPlanner 确定性最低执行图", () => {
     store.close();
   });
 
+  it("共享能力中与当前类别无关的 PARTIAL 不会生成 ERROR Finding", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "huntwarden-scan-plan-unrelated-partial-"));
+    directories.push(directory);
+    const store = await RuntimeStore.open(directory, "runtime.db");
+    const task = testTask();
+    task.checks = ["webshell"];
+    store.createTask(task);
+    const executor = new FakeExecutor({
+      get_capabilities: () => ({ ...capabilities(), partial: true, warnings: ["Tomcat 探针不可用"] }),
+      get_host_info: () => ({ hostname: "target" }),
+      discover_web_roots: () => [{ path: "/var/www/html", server: "nginx" }],
+      find_recent_web_files: () => [],
+    });
+    const config = testConfig(directory);
+    const tools = createSecurityTools({
+      task,
+      config,
+      store,
+      executor,
+      approvals: new ApprovalService(store),
+      evidence: new EvidenceStore(directory, store),
+    });
+
+    const result = await new ScanPlanner({ task, store, tools, maxLlmBytes: config.llmData.maxTextBytes }).run();
+
+    expect(result.outcomes).toEqual(expect.arrayContaining([
+      expect.objectContaining({ stepId: "capabilities", status: "partial" }),
+      expect.objectContaining({ stepId: "web-candidates", status: "success" }),
+    ]));
+    expect(store.listFindings(task.taskId).some((finding) => finding.status === "ERROR")).toBe(false);
+    expect(store.listFindings(task.taskId)).toEqual(expect.arrayContaining([
+      expect.objectContaining({ category: "webshell", status: "NO_FINDING" }),
+    ]));
+    store.close();
+  });
+
   it("最低只读工具失败时固化 ERROR Finding，不会把失败解释为安全", async () => {
     const directory = await mkdtemp(join(tmpdir(), "huntwarden-scan-plan-error-"));
     directories.push(directory);
