@@ -20,9 +20,16 @@ function capabilities() {
     protocolVersion: 1,
     helper: { name: "huntwarden-helper", version: "test" },
     platform: { system: "Linux", release: "test", architecture: "x64", python: "3.11" },
-    operations: ["get_capabilities", "get_host_info", "discover_web_roots", "find_recent_web_files"],
+    operations: ["get_capabilities", "get_host_info", "discover_web_roots", "find_recent_web_files", "list_java_processes"],
     artifactTransfer: { supported: true, protocolVersion: 1, maxBytes: 10 * 1024 * 1024 },
     features: { yara: true, javaAttach: false, tomcatProbe: false },
+    featureStatus: {
+      linuxProc: { status: "SUPPORTED" as const, reason: "Linux /proc 可读取" },
+      rootHelper: { status: "SUPPORTED" as const, reason: "Helper 以 root 运行" },
+      yara: { status: "SUPPORTED" as const, reason: "YARA 可用" },
+      javaAttach: { status: "UNSUPPORTED" as const, reason: "Java Attach 不可用" },
+      tomcatProbe: { status: "UNSUPPORTED" as const, reason: "Tomcat 探针不可用" },
+    },
     partial: false,
     warnings: [],
   };
@@ -65,6 +72,7 @@ describe("ScanPlanner 确定性最低执行图", () => {
     expect(store.getTask(task.taskId)?.toolCallCount).toBe(4);
     expect(first.minimumToolNames).toEqual(new Set(["get_capabilities", "get_host_info", "discover_web_roots", "find_recent_web_files"]));
     expect(first.promptContext).toContain("candidateRef");
+    expect(first.promptContext).not.toContain("list_java_processes");
     expect(first.promptContext).not.toContain("super-secret");
     expect(first.promptContext).toContain("[REDACTED]");
     expect(second.outcomes.every((outcome) => outcome.status === "not_applicable" || outcome.reused)).toBe(true);
@@ -82,7 +90,7 @@ describe("ScanPlanner 确定性最低执行图", () => {
     task.checks = ["webshell"];
     store.createTask(task);
     const executor = new FakeExecutor({
-      get_capabilities: () => ({ ...capabilities(), partial: true, warnings: ["Tomcat 探针不可用"] }),
+      get_capabilities: () => ({ ...capabilities(), operations: [...capabilities().operations, "list_java_processes"], partial: true, warnings: ["Tomcat 探针不可用"] }),
       get_host_info: () => ({ hostname: "target" }),
       discover_web_roots: () => [{ path: "/var/www/html", server: "nginx" }],
       find_recent_web_files: () => [],
@@ -100,7 +108,7 @@ describe("ScanPlanner 确定性最低执行图", () => {
     const result = await new ScanPlanner({ task, store, tools, maxLlmBytes: config.llmData.maxTextBytes }).run();
 
     expect(result.outcomes).toEqual(expect.arrayContaining([
-      expect.objectContaining({ stepId: "capabilities", status: "partial" }),
+      expect.objectContaining({ stepId: "capabilities", status: "success" }),
       expect.objectContaining({ stepId: "web-candidates", status: "success" }),
     ]));
     expect(store.listFindings(task.taskId).some((finding) => finding.status === "ERROR")).toBe(false);

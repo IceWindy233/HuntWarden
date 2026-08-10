@@ -2,6 +2,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import { Value } from "typebox/value";
 import { ApprovalService } from "../../src/agent/approval-service.js";
 import { EvidenceStore } from "../../src/evidence/evidence-store.js";
 import { FakeExecutor } from "../../src/executor/fake-executor.js";
@@ -162,6 +163,14 @@ describe("任务检测包边界", () => {
       approvals: new ApprovalService(store),
       evidence: new EvidenceStore(directory, store),
     });
+
+    const validFinding = {
+      category: "webshell", severity: "INFO", confidence: 1, status: "NO_FINDING",
+      title: "WebShell 结论", summary: "仅覆盖已选类别", evidenceRefs: [],
+    };
+    expect(Value.Check(tool.parameters, validFinding)).toBe(true);
+    expect(Value.Check(tool.parameters, { ...validFinding, category: "java_memory_shell" })).toBe(false);
+    expect(Value.Check(tool.parameters, { ...validFinding, evidenceRefs: ["EV-504e41f5"] })).toBe(false);
 
     await expect(tool.execute("call-out-of-scope", {
       category: "java_memory_shell",

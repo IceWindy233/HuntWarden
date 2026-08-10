@@ -1,8 +1,40 @@
 import { Type } from "typebox";
 import type { SecurityToolDefinition, SecurityToolResult } from "../../domain/types.js";
+import type { HostCapabilities } from "../../executor/operations.js";
 import { createSecurityTool } from "../tool-factory.js";
 import type { ToolDependencies } from "../dependencies.js";
 import { createReference } from "../reference-utils.js";
+
+function scopedCapabilities(deps: ToolDependencies, capabilities: HostCapabilities) {
+  const keys = new Set(["linuxProc", "rootHelper"]);
+  const booleanFeatures = new Set<string>();
+  if (deps.task.checks.includes("webshell")) { keys.add("yara"); booleanFeatures.add("yara"); }
+  if (deps.task.checks.includes("java_memory_shell")) {
+    keys.add("javaAttach"); keys.add("tomcatProbe"); keys.add("procVisibility");
+    booleanFeatures.add("javaAttach"); booleanFeatures.add("tomcatProbe");
+  }
+  if (deps.task.checks.includes("backdoor_account")) { keys.add("sudo"); keys.add("journal"); keys.add("auditd"); }
+  if (deps.task.checks.includes("linux_intrusion_triage")) { keys.add("procVisibility"); keys.add("journal"); keys.add("auditd"); }
+  const featureStatus = Object.fromEntries(Object.entries(capabilities.featureStatus ?? {}).filter(([key]) => keys.has(key)));
+  const features = Object.fromEntries(Object.entries(capabilities.features).filter(([key]) => booleanFeatures.has(key)));
+  const hasDetailedStatus = Boolean(capabilities.featureStatus && Object.keys(capabilities.featureStatus).length > 0);
+  const warnings = hasDetailedStatus
+    ? Object.values(featureStatus).filter((value) => value.status !== "SUPPORTED").map((value) => value.reason)
+    : capabilities.warnings;
+  return {
+    protocolVersion: capabilities.protocolVersion,
+    helper: capabilities.helper,
+    platform: capabilities.platform,
+    taskChecks: deps.task.checks,
+    artifactTransfer: capabilities.artifactTransfer,
+    features,
+    featureStatus,
+    ...(capabilities.runtime ? { runtime: capabilities.runtime } : {}),
+    ...(capabilities.securityContext ? { securityContext: capabilities.securityContext } : {}),
+    partial: hasDetailedStatus ? warnings.length > 0 : capabilities.partial,
+    warnings,
+  };
+}
 
 export function createHostTools(deps: ToolDependencies): SecurityToolDefinition[] {
   const common = [deps.store, deps.task.taskId, deps.config.llmData.maxTextBytes] as const;
@@ -15,10 +47,14 @@ export function createHostTools(deps: ToolDependencies): SecurityToolDefinition[
       risk: "READ", replayPolicy: "SAFE", timeoutMs: 15_000, auditEvent: "host_capabilities_collected",
       run: async (_id, _params, signal): Promise<SecurityToolResult> => {
         const capabilities = await deps.executor.invoke({ operation: "get_capabilities", params: {} }, signal);
+        deps.store.appendAudit({ taskId: deps.task.taskId, event: "host_capabilities_scoped_for_task", level: "debug", data: {
+          selectedChecks: deps.task.checks, availableOperationCount: capabilities.operations.length,
+        } });
+        const scoped = scopedCapabilities(deps, capabilities);
         return {
-          status: capabilities.partial ? "partial" : "success",
-          summary: { protocolVersion: capabilities.protocolVersion, helper: capabilities.helper, features: capabilities.features },
-          items: [capabilities], artifactRefs: [], warnings: capabilities.warnings,
+          status: scoped.partial ? "partial" : "success",
+          summary: { protocolVersion: scoped.protocolVersion, helper: scoped.helper, taskChecks: deps.task.checks, features: scoped.features },
+          items: [scoped], artifactRefs: [], warnings: scoped.warnings,
         };
       },
     }),

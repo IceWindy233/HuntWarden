@@ -1,5 +1,6 @@
 import { Type } from "typebox";
 import { createId } from "../../common/ids.js";
+import { InvalidArgumentError } from "../../common/errors.js";
 import type { Finding, SecurityToolDefinition, SecurityToolResult } from "../../domain/types.js";
 import { createSecurityTool } from "../tool-factory.js";
 import type { ToolDependencies } from "../dependencies.js";
@@ -8,26 +9,31 @@ const statuses = ["CONFIRMED", "HIGHLY_SUSPICIOUS", "SUSPICIOUS", "NO_FINDING", 
 const severities = ["CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"] as const;
 
 export function createRecordFindingTool(deps: ToolDependencies): SecurityToolDefinition {
+  const selectedCategories = [...new Set(deps.task.checks)];
+  if (selectedCategories.length === 0) throw new InvalidArgumentError("任务至少需要一个检测类别");
+  const categorySchema = selectedCategories.length === 1
+    ? Type.Literal(selectedCategories[0]!)
+    : Type.Union(selectedCategories.map((category) => Type.Literal(category)));
   return createSecurityTool(deps.store, deps.task.taskId, deps.config.llmData.maxTextBytes, {
     name: "record_finding", label: "记录安全发现",
-    description: "把已经由工具事实支持的结论保存为结构化 Finding。每个检测类别结束前必须调用；ERROR/NOT_CHECKED 也必须明确记录。高风险结论必须引用 Evidence ID。",
+    description: `把已经由工具事实支持的结论保存为结构化 Finding。只允许当前任务已选择的类别：${selectedCategories.join(", ")}。不得为未选择类别创建 NO_FINDING、NOT_CHECKED、ERROR 或任何其他结论。高风险结论必须引用完整 Evidence ID。`,
     parameters: Type.Object({
-      category: Type.Union([Type.Literal("webshell"), Type.Literal("java_memory_shell"), Type.Literal("backdoor_account"), Type.Literal("linux_persistence"), Type.Literal("linux_intrusion_triage")]),
+      category: categorySchema,
       severity: Type.Union(severities.map((value) => Type.Literal(value))),
       confidence: Type.Number({ minimum: 0, maximum: 1 }),
       status: Type.Union(statuses.map((value) => Type.Literal(value))),
       title: Type.String({ minLength: 1, maxLength: 200 }),
       summary: Type.String({ minLength: 1, maxLength: 8000 }),
-      evidenceRefs: Type.Array(Type.String({ pattern: "^EV-" }), { maxItems: 100 }),
+      evidenceRefs: Type.Array(Type.String({ pattern: "^EV-[0-9a-f-]{36}$" }), { maxItems: 100 }),
       recommendation: Type.Optional(Type.String({ maxLength: 8000 })),
     }, { additionalProperties: false }),
     risk: "LOCAL", replayPolicy: "SAFE", timeoutMs: 10_000, auditEvent: "finding_created", executionMode: "sequential",
     run: async (toolCallId, params): Promise<SecurityToolResult> => {
       if (!deps.task.checks.includes(params.category)) {
-        throw new Error(`不能为任务未选择的检测类别记录 Finding: ${params.category}`);
+        throw new InvalidArgumentError(`不能为任务未选择的检测类别记录 Finding: ${params.category}`);
       }
       for (const evidenceId of params.evidenceRefs) {
-        if (!deps.store.getEvidence(deps.task.taskId, evidenceId)) throw new Error(`Finding 引用了不存在或跨任务的 Evidence: ${evidenceId}`);
+        if (!deps.store.getEvidence(deps.task.taskId, evidenceId)) throw new InvalidArgumentError(`Finding 引用了不存在或跨任务的 Evidence: ${evidenceId}`);
       }
       if (["CONFIRMED", "HIGHLY_SUSPICIOUS"].includes(params.status) && params.evidenceRefs.length === 0) {
         throw new Error("CONFIRMED/HIGHLY_SUSPICIOUS 必须至少引用一个 Evidence");
