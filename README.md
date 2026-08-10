@@ -11,7 +11,7 @@ HuntWarden（猎卫）是面向安全分析师的 AI 主机安全调查与受控
 ## 已实现范围
 
 - Pi 低层 `Agent` Tool Loop；支持 Pi 内置多供应商 Provider 与自定义兼容端点，默认仍为 OpenAI Responses `gpt-5.6-terra` / `medium`。
-- Electron + React 全屏桌面 GUI：仪表盘、结构化配置中心、API Key 安全存储、模型检查、SSH 测试、新建任务、Agent 文本增量流式显示、任务归档与恢复、实时调查、Steering、审批、恢复、Evidence、审计和报告。
+- Electron + React 全屏桌面 GUI：仪表盘、结构化配置中心、API Key 安全存储、模型检查、SSH 测试、新建任务、Agent 文本增量流式显示、安全 GFM Markdown 预览、任务归档与恢复、实时调查、Steering、审批、恢复、Evidence、审计和报告。
 - 内置 DeepSeek 与 OpenAI Profile；可在 GUI 中切换 Pi 内置 Provider，或配置 OpenAI Responses/Completions、Anthropic Messages 兼容端点。
 - Renderer 启用 Chromium 沙箱、Context Isolation、严格 CSP 和固定 IPC 白名单；不能直接访问 Node.js、文件系统、SQLite、SSH 或凭据明文。
 - Ink 7 + React 19 全屏 TUI：新建、运行、Agent 文本增量流式显示、历史任务、Steering、审批、恢复、Finding、Evidence、审计和报告。

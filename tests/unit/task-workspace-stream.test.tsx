@@ -37,6 +37,25 @@ describe("TaskWorkspace Agent 流式预览", () => {
     expect(document.querySelector(".stream-cursor")).toBeTruthy();
   });
 
+  it("只对 Agent 消息应用 Markdown，分析师与工具输出保持纯文本", () => {
+    const task = { ...testTask(), status: "COMPLETED" as const };
+    const snapshot: TaskSnapshot = {
+      task,
+      findings: [], evidence: [], approvals: [], actionReceipts: [], reports: [], audit: [], toolRuns: [],
+      conversation: [
+        { role: "user", text: "## 不应成为标题", timestamp: 1 },
+        { role: "assistant", text: "## 已渲染标题\n\n- 条目一\n- 条目二", timestamp: 2 },
+        { role: "tool", toolName: "probe", text: "**原始工具文本**", timestamp: 3 },
+      ],
+    };
+
+    render(<TaskWorkspace snapshot={snapshot} refresh={vi.fn(async () => undefined)} notify={vi.fn()} />);
+
+    expect(screen.getByRole("heading", { name: "已渲染标题", level: 2 })).toBeTruthy();
+    expect(screen.getByText("## 不应成为标题").tagName).toBe("DIV");
+    expect(screen.getByText("**原始工具文本**").tagName).toBe("DIV");
+  });
+
   it("归档需要确认，并可从只读归档状态恢复", async () => {
     const archiveTask = vi.fn(async () => testTask());
     const restoreTask = vi.fn(async () => testTask());
