@@ -85,6 +85,12 @@ describe("TaskWorkspace Agent 流式预览", () => {
     render(<TaskWorkspace snapshot={snapshot} refresh={vi.fn(async () => undefined)} notify={vi.fn()} />);
 
     expect(screen.getByText("调查已完成，报告待确认")).toBeTruthy();
+    const workspace = document.querySelector(".workspace");
+    expect(workspace?.children).toHaveLength(6);
+    expect(workspace?.children[1]?.classList.contains("workspace-notices")).toBe(true);
+    expect(workspace?.children[3]?.classList.contains("task-tabs")).toBe(true);
+    expect(workspace?.children[4]?.classList.contains("task-content")).toBe(true);
+    expect(workspace?.children[5]?.classList.contains("steering-composer")).toBe(true);
     fireEvent.click(screen.getByRole("button", { name: "确认并生成报告" }));
     expect(generateReport).not.toHaveBeenCalled();
     confirm.mockReturnValue(true);

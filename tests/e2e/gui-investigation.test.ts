@@ -90,6 +90,12 @@ describe.skipIf(!enabled)("GUI 四场景只读调查与手动确认报告", () =
     const { page, snapshot: investigation, streamEvents } = await runInvestigation(scenario, port, category);
     expect(investigation.reports).toHaveLength(0);
     expect(await page.locator(".report-pending-banner").innerText()).toContain("报告待确认");
+    const [tabs, content, composer] = await Promise.all([
+      page.locator(".task-tabs").boundingBox(), page.locator(".task-content").boundingBox(), page.locator(".steering-composer").boundingBox(),
+    ]);
+    expect(tabs && content && composer).toBeTruthy();
+    expect(tabs!.y + tabs!.height).toBeLessThanOrEqual(content!.y + 1);
+    expect(content!.y + content!.height).toBeLessThanOrEqual(composer!.y + 1);
     page.once("dialog", async (dialog) => await dialog.accept());
     await page.getByRole("button", { name: "确认并生成报告" }).click();
     await expect.poll(async () => (await page.evaluate((id) => window.huntwarden.getTaskSnapshot(id), investigation.task.taskId)).reports.length, { timeout: 30_000 }).toBe(1);

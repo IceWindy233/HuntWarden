@@ -105,9 +105,11 @@ export function TaskWorkspace({ snapshot, refresh, notify, liveStream }: { snaps
       </div>
     </header>
 
-    {task.archivedAt ? <div className="archive-banner"><strong>任务已归档</strong><span>{formatTime(task.archivedAt)} · 当前为只读查看，所有取证与审计数据均保留。</span></div> : null}
-    {task.interruption?.recoveryRequired ? <div className="interruption-banner"><strong>检测到任务中断</strong><span>原状态 {task.interruption.previousStatus} · {formatTime(task.interruption.detectedAt)}。旧审批已失效，恢复后会先核对远程回执。</span></div> : null}
-    {!archived && !active && task.status !== "CREATED" && !task.interruption?.recoveryRequired && !hasReports ? <div className="report-pending-banner"><strong>{task.status === "COMPLETED" ? "调查已完成，报告待确认" : "任务未正常完成，可生成阶段性报告"}</strong><span>{task.status === "COMPLETED" ? "请先复核 Finding、Evidence 与检测覆盖，再手动确认生成报告。" : "报告将明确保留未检查项、错误状态和未完成原因。"}</span></div> : null}
+    <div className="workspace-notices">
+      {task.archivedAt ? <div className="archive-banner"><strong>任务已归档</strong><span>{formatTime(task.archivedAt)} · 当前为只读查看，所有取证与审计数据均保留。</span></div> : null}
+      {task.interruption?.recoveryRequired ? <div className="interruption-banner"><strong>检测到任务中断</strong><span>原状态 {task.interruption.previousStatus} · {formatTime(task.interruption.detectedAt)}。旧审批已失效，恢复后会先核对远程回执。</span></div> : null}
+      {!archived && !active && task.status !== "CREATED" && !task.interruption?.recoveryRequired && !hasReports ? <div className="report-pending-banner"><strong>{task.status === "COMPLETED" ? "调查已完成，报告待确认" : "任务未正常完成，可生成阶段性报告"}</strong><span>{task.status === "COMPLETED" ? "请先复核 Finding、Evidence 与检测覆盖，再手动确认生成报告。" : "报告将明确保留未检查项、错误状态和未完成原因。"}</span></div> : null}
+    </div>
 
     <div className="metrics-row">
       <Metric label="轮次" value={`${task.turnCount} / 30`} tone="blue" />
