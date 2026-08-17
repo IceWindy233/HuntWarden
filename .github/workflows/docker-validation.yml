@@ -1,0 +1,51 @@
+name: Docker Validation
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: docker-validation-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  docker-validation:
+    name: Five labs and dynamic Debian scenario
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      CI: "true"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: 22.19.0
+          cache: npm
+          package-manager-cache: true
+
+      - name: Set up Java
+        uses: actions/setup-java@03ad4de0992f5dab5e18fcb136590ce7c4a0ac95 # v5.6.0
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Validate five fixed labs
+        run: npm run test:docker
+
+      - name: Validate dynamic Debian scenario
+        run: npm run test:acceptance:real-world
+
+      - name: Remove test containers
+        if: always()
+        run: |
+          docker compose -f labs/docker-compose.yml down --remove-orphans || true
+          docker compose -f acceptance/real-world/docker-compose.yml down --remove-orphans || true

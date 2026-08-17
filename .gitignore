@@ -1,6 +1,7 @@
 node_modules/
 dist/
 out/
+release/
 .vite/
 coverage/
 playwright-report/
@@ -14,6 +15,7 @@ data/
 labs/.lab-state/
 labs/common/lab_authorized_key.pub
 labs/common/unknown_authorized_key.pub
+acceptance/real-world/.state/
 java/tomcat-probe/.gradle/
 java/tomcat-probe/build/
 *.log
