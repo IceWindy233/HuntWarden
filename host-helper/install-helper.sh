@@ -70,6 +70,13 @@ chmod 0440 "${DEFAULT_SUDOERS_PATH}"
 chown root:root "${DEFAULT_SUDOERS_PATH}"
 trap - EXIT
 
+# Rocky/Alma/RHEL 系在 SELinux Enforcing 下必须恢复发行版默认标签；
+# Debian/Ubuntu 通常没有 restorecon，此步骤因此保持可选且不改变权限模型。
+if command -v restorecon >/dev/null; then
+  restorecon -F "${DEFAULT_HELPER_PATH}" "${DEFAULT_SUDOERS_PATH}"
+  restorecon -RF "${DEFAULT_STATE_ROOT}" /opt/huntwarden
+fi
+
 "${DEFAULT_HELPER_PATH}" get_capabilities <<<'{}' >/dev/null
 echo "HuntWarden Helper 已安装/升级：${DEFAULT_HELPER_PATH}"
 echo "授权执行用户：${executor_user}"

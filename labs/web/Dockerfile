@@ -9,5 +9,6 @@ COPY labs/web/fixtures/ /var/www/html/
 COPY labs/web/fixtures/lab-webshell.php /tmp/lab-upload.php
 COPY labs/web/alternate-app/ /srv/alternate-app/
 COPY labs/web/huntwarden-lab.conf /etc/nginx/conf.d/huntwarden-lab.conf
-RUN chown -R secagent:secagent /home/secagent/.ssh && chmod 600 /home/secagent/.ssh/authorized_keys && chmod 755 /usr/local/libexec/huntwarden-helper && chown root:root /usr/local/libexec/huntwarden-helper && printf 'secagent ALL=(root) NOPASSWD: /usr/local/libexec/huntwarden-helper *\n' > /etc/sudoers.d/huntwarden && chmod 440 /etc/sudoers.d/huntwarden && printf '192.0.2.44 - - [09/Aug/2026:10:20:00 +0000] "POST /uploads/lab-upload.php HTTP/1.1" 200 42 "-" "HuntWarden-Lab"\n192.0.2.44 - - [09/Aug/2026:10:20:03 +0000] "GET /uploads/lab-upload.php?cmd=id HTTP/1.1" 200 42 "-" "HuntWarden-Lab"\n' > /var/log/nginx/access.log
-CMD ["/bin/bash", "-lc", "ssh-keygen -A && nginx && exec /usr/sbin/sshd -D -e"]
+COPY labs/web/entrypoint.sh /usr/local/bin/huntwarden-lab-web-entrypoint
+RUN chown -R secagent:secagent /home/secagent/.ssh && chmod 600 /home/secagent/.ssh/authorized_keys && chmod 755 /usr/local/libexec/huntwarden-helper /usr/local/bin/huntwarden-lab-web-entrypoint && chown root:root /usr/local/libexec/huntwarden-helper /usr/local/bin/huntwarden-lab-web-entrypoint && printf 'secagent ALL=(root) NOPASSWD: /usr/local/libexec/huntwarden-helper *\n' > /etc/sudoers.d/huntwarden && chmod 440 /etc/sudoers.d/huntwarden
+ENTRYPOINT ["/usr/local/bin/huntwarden-lab-web-entrypoint"]

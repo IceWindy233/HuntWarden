@@ -1,0 +1,11 @@
+name: huntwarden-real-world
+
+services:
+  target:
+    container_name: huntwarden-real-world-target
+    build:
+      context: ../..
+      dockerfile: acceptance/real-world/Dockerfile
+    ports:
+      - "2299:22"
+    stop_grace_period: 2s
