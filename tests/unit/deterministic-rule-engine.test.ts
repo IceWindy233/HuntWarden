@@ -190,6 +190,33 @@ describe("DeterministicRuleEngine", () => {
     store.close();
   });
 
+  it("PARTIAL 输入保留有 Evidence 的阳性 SUSPICIOUS，但降低置信度并声明覆盖限制", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "huntwarden-rule-partial-positive-"));
+    directories.push(directory);
+    const store = await RuntimeStore.open(directory, "runtime.db");
+    const task = testTask();
+    task.checks = ["linux_intrusion_triage"];
+    store.createTask(task);
+    const evidenceId = "EV-rule-partial-process";
+    putEvidence(store, evidenceId, task.taskId);
+
+    const result = new DeterministicRuleEngine(store).evaluate(task, [
+      ...preflight(),
+      outcome("suspicious-processes", [{
+        processRef: "PROC-risk", pid: 8123, exePath: "/tmp/.hidden", signals: ["temporary_executable"],
+      }], [evidenceId], "partial"),
+    ]);
+
+    expect(result).toMatchObject([{
+      category: "linux_intrusion_triage", status: "SUSPICIOUS", confidence: 0.7, evidenceRefs: [evidenceId],
+    }]);
+    expect(result[0]?.summary).toContain("最低扫描输入为 PARTIAL");
+    expect(store.listAudit(task.taskId)).toEqual(expect.arrayContaining([
+      expect.objectContaining({ event: "deterministic_rule_evaluated", data: expect.objectContaining({ inputsComplete: false }) }),
+    ]));
+    store.close();
+  });
+
   it("安恒情报命中只形成需主机事实佐证的 SUSPICIOUS，不单独确认为失陷", async () => {
     const directory = await mkdtemp(join(tmpdir(), "huntwarden-rule-ti-"));
     directories.push(directory);

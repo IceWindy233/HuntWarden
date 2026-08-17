@@ -19,6 +19,7 @@ import platform
 import pwd
 import re
 import secrets
+import shlex
 import shutil
 import socket
 import stat
@@ -35,7 +36,7 @@ ARTIFACT_TOKEN = re.compile(r"^[a-f0-9]{64}$")
 ARTIFACT_MAX_BYTES = 100 * 1024 * 1024
 ARTIFACT_TTL_SECONDS = 15 * 60
 LOG_SCAN_MAX_BYTES = 64 * 1024 * 1024
-HELPER_VERSION = "0.3.0"
+HELPER_VERSION = "0.3.1"
 PROBE_JAR = pathlib.Path("/opt/huntwarden/huntwarden-tomcat-probe.jar")
 SCRIPT_EXTENSIONS = {
     ".php", ".phtml", ".php5", ".phar", ".inc", ".jsp", ".jspx", ".asp", ".aspx",
@@ -256,6 +257,38 @@ def capability_state(status_value: str, reason: str) -> dict[str, str]:
     return {"status": status_value, "reason": reason}
 
 
+def os_release_info() -> dict[str, Any]:
+    """Parse fixed os-release metadata without evaluating it as shell code."""
+    values: dict[str, str] = {}
+    source = "unavailable"
+    for candidate in (pathlib.Path("/etc/os-release"), pathlib.Path("/usr/lib/os-release")):
+        try:
+            raw = candidate.read_text("utf-8", errors="replace")[:65536]
+        except OSError:
+            continue
+        source = str(candidate)
+        for line in raw.splitlines():
+            key, separator, encoded = line.partition("=")
+            if not separator or not re.fullmatch(r"[A-Z][A-Z0-9_]{0,63}", key):
+                continue
+            try:
+                parsed = shlex.split(encoded, comments=False, posix=True)
+                value = parsed[0] if len(parsed) == 1 else encoded.strip().strip("\"'")
+            except ValueError:
+                value = encoded.strip().strip("\"'")
+            values[key] = "".join(character for character in value if character >= " " and character != "\x7f")[:512]
+        break
+    return {
+        "id": values.get("ID", "unknown"),
+        "idLike": values.get("ID_LIKE", "").split()[:20],
+        "name": values.get("NAME", "unknown"),
+        "prettyName": values.get("PRETTY_NAME", values.get("NAME", "unknown")),
+        "versionId": values.get("VERSION_ID", "unknown"),
+        "versionCodename": values.get("VERSION_CODENAME", "unknown"),
+        "source": source,
+    }
+
+
 def linux_runtime_snapshot() -> tuple[dict[str, Any], dict[str, Any], dict[str, dict[str, str]], list[str]]:
     warnings: list[str] = []
     try:
@@ -412,6 +445,7 @@ def get_capabilities(_: dict[str, Any]) -> dict[str, Any]:
         "platform": {
             "system": platform.system(), "release": platform.release(),
             "architecture": platform.machine(), "python": platform.python_version(),
+            "distribution": os_release_info(),
         },
         "operations": sorted(OPERATIONS.keys()),
         "artifactTransfer": {"supported": True, "protocolVersion": 1, "maxBytes": ARTIFACT_MAX_BYTES},

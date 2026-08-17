@@ -20,6 +20,10 @@ describe("目标辅助程序边界", () => {
     expect(result.envelope).toMatchObject({ ok: true, result: {
       protocolVersion: 1,
       helper: { name: "huntwarden-helper" },
+      platform: { distribution: {
+        id: expect.any(String), idLike: expect.any(Array), name: expect.any(String),
+        prettyName: expect.any(String), versionId: expect.any(String), source: expect.any(String),
+      } },
       artifactTransfer: { supported: true, protocolVersion: 1 },
       runtime: { euid: expect.any(Number), currentUser: expect.any(String), rootHelper: expect.any(Boolean) },
       securityContext: { hidepid: expect.any(String), pidNamespace: expect.any(String) },

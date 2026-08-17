@@ -1,7 +1,21 @@
 export interface HostCapabilities {
   protocolVersion: number;
   helper: { name: string; version: string };
-  platform: { system: string; release: string; architecture: string; python: string };
+  platform: {
+    system: string;
+    release: string;
+    architecture: string;
+    python: string;
+    distribution?: {
+      id: string;
+      idLike: string[];
+      name: string;
+      prettyName: string;
+      versionId: string;
+      versionCodename: string;
+      source: string;
+    };
+  };
   operations: string[];
   artifactTransfer: { supported: boolean; protocolVersion: number; maxBytes: number };
   features: { yara: boolean; javaAttach: boolean; tomcatProbe: boolean };

@@ -64,7 +64,13 @@ export class DeterministicRuleEngine {
           (outcome.status === "success" || outcome.status === "partial") && normalizedDetails(outcome) !== undefined,
         );
       });
-      if (!preflightUsable || !context.complete(rule.requiredStepIds)) {
+      const requiredInputsUsable = rule.requiredStepIds.every((stepId) => {
+        const values = context.stepOutcomes(stepId);
+        return values.length > 0 && values.every((outcome) =>
+          (outcome.status === "success" || outcome.status === "partial") && normalizedDetails(outcome) !== undefined,
+        );
+      });
+      if (!preflightUsable || !requiredInputsUsable) {
         this.store.appendAudit({
           taskId: task.taskId,
           event: "deterministic_rule_skipped_incomplete",
@@ -73,7 +79,27 @@ export class DeterministicRuleEngine {
         });
         continue;
       }
-      const evaluation = rule.evaluate(context);
+      const inputsComplete = context.complete(rule.requiredStepIds);
+      const rawEvaluation = rule.evaluate(context);
+      const evaluation = rawEvaluation && !inputsComplete && rawEvaluation.status === "SUSPICIOUS"
+        ? {
+            ...rawEvaluation,
+            confidence: Math.min(rawEvaluation.confidence, 0.7),
+            counterEvidence: [...rawEvaluation.counterEvidence, "最低扫描输入为 PARTIAL；阳性事实仍保留，但未覆盖范围必须继续调查"],
+          }
+        : rawEvaluation;
+      if (!inputsComplete && evaluation?.status !== "SUSPICIOUS") {
+        this.store.appendAudit({
+          taskId: task.taskId,
+          event: "deterministic_rule_skipped_incomplete",
+          level: "warn",
+          data: {
+            ruleId: rule.ruleId, ruleVersion: rule.ruleVersion, category: rule.category,
+            requiredStepIds: required, reason: "PARTIAL 输入不得形成 NO_FINDING",
+          },
+        });
+        continue;
+      }
       if (!evaluation) {
         this.store.appendAudit({
           taskId: task.taskId,
@@ -108,7 +134,7 @@ export class DeterministicRuleEngine {
         host: task.target.host,
         category: rule.category,
         severity: evaluation.severity,
-        confidence: Math.min(evaluation.confidence, 0.85),
+        confidence: Math.min(evaluation.confidence, inputsComplete ? 0.85 : 0.7),
         status: evaluation.status,
         title: evaluation.title,
         summary: summary(rule, inputDigest, evaluation.basis, evaluation.counterEvidence),
@@ -128,6 +154,7 @@ export class DeterministicRuleEngine {
           category: rule.category,
           inputDigest,
           status: evaluation.status,
+          inputsComplete,
           findingId: finding.findingId,
           basis: evaluation.basis,
           counterEvidence: evaluation.counterEvidence,
