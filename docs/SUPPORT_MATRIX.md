@@ -1,6 +1,8 @@
 # HuntWarden 实战试用支持矩阵
 
-> 更新日期：2026-08-10。`已验证`仅表示仓库自动化或明确环境已通过；`待实机验收`不等同于不支持，而是不应在报告中宣称已验证。
+> 更新日期：2026-08-17。`已验证`仅表示仓库自动化或明确环境已通过；`待实机验收`不等同于不支持，而是不应在报告中宣称已验证。
+>
+> 最近基线：完整 build/test/probe/Docker/动态 Debian/GUI E2E/package 流程已通过；DBAPP TI 已使用真实 Key 完成人工在线验收；生产依赖审计为 0。Ubuntu 24.04 ARM64 与 Rocky Linux 9 x86_64/SELinux 的真实 VM 矩阵仍待执行。
 
 ## 目标与接入
 
@@ -18,7 +20,7 @@
 | --- | --- | --- |
 | Ubuntu 22.04 arm64/x86_64 | Docker 已验证 | 五套 Lab 使用 Ubuntu 22.04；真实 VM 仍需验收。 |
 | Ubuntu 24.04 | 待实机验收 | Helper 仅依赖 Python 标准库和固定 Linux 接口。 |
-| Debian 12 | 待实机验收 | dpkg 完整性路径已实现。 |
+| Debian 12 ARM64 | 动态容器场景已验证，待实机验收 | 非固定 Debian 12 场景 6/6 通过，覆盖发行版识别与行为样本；不等同于标准 systemd VM。 |
 | Rocky / AlmaLinux 9 | 待实机验收 | rpm、`secure` 日志和 SELinux 能力识别已实现。 |
 | Amazon Linux 2023 | 待实机验收 | rpm 路径已实现，尚无自动化 VM。 |
 
@@ -33,7 +35,7 @@ Helper 启动时返回 `SUPPORTED | PARTIAL | UNSUPPORTED | PERMISSION_DENIED` �
 | 后门账户 | UID 0、sudo/wheel、NSS 来源标识、账户状态、Key 指纹、登录历史、sudo/doas/polkit、有效 sshd 信任配置 | SSSD/LDAP 真实目录、云登录日志尚待 VM 验收。 |
 | Linux 持久化 | Cron、systemd service/timer/drop-in/generated/transient、SSH、Shell、at/anacron、SysV/rc.local、XDG、PAM、udev、modprobe、cloud-init、包管理 Hook、user linger | initramfs 内容解析和 transient unit 的 D-Bus 运行态详情尚未实现。 |
 | Linux 入侵分诊 | 稳定进程身份、进程树/FD/maps/socket、删除后运行、近期/特权文件、dpkg/rpm、动态加载、认证/audit 时间线 | journald 当前以能力识别与文件日志为主，尚未实现完整 journal cursor 采集。 |
-| 安恒威胁情报富化 | 当前任务 `SOCK-*` 公网外联引用、分析师预置 IP/域名/文件哈希、批量查询、本地缓存、Evidence 与 GUI 情报视图 | API 客户端和假响应测试已验证；真实 API Key、额度与生产数据质量需要用户在线验收。外部命中不能单独形成 `CONFIRMED`。 |
+| 安恒威胁情报富化 | 当前任务 `SOCK-*` 公网外联引用、分析师预置 IP/域名/文件哈希、批量查询、本地缓存、Evidence、审计与 GUI 情报视图；2026-08-10 使用真实 Key 完成人工在线验收 | 外部命中不能单独形成 `CONFIRMED`；情报数据质量仍需持续观察。 |
 
 ## 数据与处置边界
 

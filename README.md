@@ -1,12 +1,26 @@
 # HuntWarden
 
-HuntWarden（猎卫）是面向安全分析师的 AI 主机安全调查与受控处置 Agent。首期 MVP 通过 SSH 调用目标端白名单辅助程序，完成 WebShell、Tomcat 9/JDK 17 内存马、Linux 后门账户和 Linux 持久化调查；文件隔离与账户禁用必须逐动作审批。项目同时保留全屏 TUI，供自动化、无桌面环境和故障回退使用。
+[![CI](https://github.com/IceWindy233/HuntWarden/actions/workflows/ci.yml/badge.svg)](https://github.com/IceWindy233/HuntWarden/actions/workflows/ci.yml)
 
-桌面 GUI 的架构、安全边界与验收设计见 [`docs/GUI_MVP_IMPLEMENTATION_PLAN.md`](docs/GUI_MVP_IMPLEMENTATION_PLAN.md)。
-处置闭环的范围、命令和安全验收见 [`docs/REMEDIATION_CLOSURE_SPRINT.md`](docs/REMEDIATION_CLOSURE_SPRINT.md)。
-恢复、报告版本化与 Linux 持久化实现见 [`docs/RECOVERY_PERSISTENCE_SPRINT.md`](docs/RECOVERY_PERSISTENCE_SPRINT.md)。
+HuntWarden（猎卫）是面向安全分析师的 AI 主机安全调查与受控处置 Agent。首期 MVP 通过 SSH 调用目标端白名单辅助程序，完成 WebShell、Tomcat 9/JDK 17 内存马、Linux 后门账户、Linux 持久化和通用 Linux 入侵分诊；文件隔离与账户禁用必须逐动作审批。项目同时保留全屏 TUI，供自动化、无桌面环境和故障回退使用。
+
+**安全不变量：模型没有 Bash/Shell、不能扩展任务目标；SCAN 不执行写操作，REMEDIATE 的每个动作都必须由分析师单独审批。**
+
+五分钟本地验证：
+
+```bash
+npm ci
+npm run build
+npm test
+npm run lab:up
+npm run start:gui
+```
+
 从 Lab MVP 演进到真实主机实战可用版的长期任务基线见 [`docs/TODO_PLAN_REAL_WORLD.md`](docs/TODO_PLAN_REAL_WORLD.md)。
 当前已验证平台、能力降级与真实试用限制见 [`docs/SUPPORT_MATRIX.md`](docs/SUPPORT_MATRIX.md)。
+`v0.1.0` 的退出条件、验收证据和发布顺序见 [`docs/V0_1_0_RELEASE_PLAN.md`](docs/V0_1_0_RELEASE_PLAN.md)。
+真实 VM 的只读冒烟入口见 [`acceptance/vm/README.md`](acceptance/vm/README.md)。
+版本变化见 [`CHANGELOG.md`](CHANGELOG.md)，`v0.1.0` 发布说明草案见 [`docs/releases/v0.1.0.md`](docs/releases/v0.1.0.md)。
 
 ## 已实现范围
 
@@ -22,6 +36,7 @@ HuntWarden（猎卫）是面向安全分析师的 AI 主机安全调查与受控
 - Tomcat 运行时 Filter/Servlet/Listener 枚举、ClassLoader/CodeSource/ProtectionDomain、磁盘来源和只读 Class Dump；不清除、不重定义、不重启 JVM。
 - 特权账户、账户状态、SSH Key 指纹、登录历史和受控账户禁用。
 - Cron、systemd、SSH Authorized Keys、Shell 启动项，以及基于不透明引用的进程和网络关联调查；仅提供 READ/COLLECT 工具。
+- Linux 入侵分诊：稳定进程身份、进程树/FD/maps/socket、删除后运行、近期/特权文件、软件包完整性、动态加载、认证事件与时间线。
 - 安恒威胁情报受控富化：批量查询任务内已观测公网外联 IP、分析师预置域名/IP 与文件哈希，结果固化为 Evidence 并在 GUI“情报”页归因展示。
 - 由分析师确认后手动生成的不可变版本化中文 Markdown 报告、ID 引用校验、一次模型修复和确定性回退模板；支持历史版本切换与 Finder 定位。
 - 五套无害 Docker Lab 与 Pi Faux Provider 可重复 Agent 测试。
@@ -242,7 +257,7 @@ npm run test:gui:investigation
 npm run test:gui:recovery
 ```
 
-写操作测试会改变容器内的文件或账户状态。重新执行处置场景前，用以下命令删除并重建四个 Lab 容器；本地测试身份 Key 会保留，`known_hosts` 会按当前容器重新生成：
+写操作测试会改变容器内的文件或账户状态。重新执行处置场景前，用以下命令删除并重建五个 Lab 容器；本地测试身份 Key 会保留，`known_hosts` 会按当前容器重新生成：
 
 ```bash
 npm run lab:reset

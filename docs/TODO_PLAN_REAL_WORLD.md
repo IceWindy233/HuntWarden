@@ -2,9 +2,29 @@
 
 > 文档用途：冻结 HuntWarden 从 Docker Lab MVP 演进为真实主机专项检测与受控查杀 Agent 的功能路线，作为后续开发、上下文恢复和验收的唯一长期 TODO 基线。
 >
-> 最近更新：2026-08-09
+> 最近更新：2026-08-10
 >
-> 当前实施基线：Sprint 1～3 首轮功能切片（真实主机准入、Linux 分诊、确定性内核与四专项加深）；未完成项继续保留为 `[ ]`。
+> 当前实施基线：Sprint 1～3 首轮功能切片、DBAPP 威胁情报闭环与桌面端可用性收口已经完成；未完成项继续保留为 `[ ]`。
+>
+> `v0.1.0` 的短期收口和发布门禁单独冻结在 [`V0_1_0_RELEASE_PLAN.md`](V0_1_0_RELEASE_PLAN.md)；本文件继续作为长期功能路线。
+
+## 0. 当前进度快照
+
+截至 2026-08-10：
+
+- Sprint 1～3 的首轮功能切片已经落地，具备进入少量授权 Linux 主机只读试用的代码基础；真实发行版 VM 矩阵仍未验收，不能据此宣称生产平台兼容性已经完成。
+- 安恒威胁情报（DBAPP Threat Intelligence）已完成安全凭据、配置、受控 IOC 富化、Evidence、审计与 GUI 情报视图闭环，并已使用真实 Key 完成人工在线验收。
+- Agent/报告已支持安全 GFM Markdown 渲染；已修复完成态布局穿透、未选检测类别 Finding 固化和检测能力降级越界问题。
+- 2026-08-10 最近一次完整验收中，`build`、常规测试、Java 探针、Docker、三条 GUI E2E 和 macOS 应用打包均通过。
+
+当前工作队列按优先级冻结为：
+
+1. **真实 Linux 兼容性门禁**：Ubuntu 22.04/24.04、Debian 12、Rocky/AlmaLinux 9、Amazon Linux 2023 的只读验收和降级记录。
+2. **真实连接补强**：SSH Agent、加密私钥、ProxyJump，以及连接/操作/空闲/任务超时拆分。
+3. **Sprint 4A LocalExecutor**：先建立统一 Transport 语义，再复用现有 HostOperation 和 Helper。
+4. **Sprint 4B Collector/Offline Import**：一次性只读采集、完整性清单和安全离线导入。
+5. **Sprint 4C Container**：Docker/containerd 宿主机与容器关联调查。
+6. **Sprint 5 处置扩展**：恢复隔离/账户状态、持久化禁用与恢复、进程暂停/终止及动作后复扫。
 
 ## 1. 目标定义
 
@@ -36,6 +56,8 @@
 - [x] 单任务 Agent Tool Loop、Steering、逐动作审批、回执恢复和崩溃恢复。
 - [x] Finding、Evidence、审计日志、版本化 Markdown 报告。
 - [x] GUI/TUI 流式输出、任务归档、报告手动确认生成。
+- [x] Agent 消息与报告的安全 GFM Markdown 渲染，原始工具 JSON 保持等宽文本展示。
+- [x] 安恒威胁情报受控富化：公网 IP/域名/文件哈希、缓存、Evidence、审计和 GUI 情报视图。
 - [x] 五套 Docker Lab 与 Faux Provider 自动化验证。
 
 ## 3. 当前阻碍真实主机试用的 P0 缺口
@@ -152,6 +174,17 @@ interface TargetTransport {
 - [x] Provider 不可用时仍能完成最低调查并展示结构化结果。
 - [ ] 高风险 Finding 必须可以由结构化事实和规则重新计算。
 - [ ] 模型输出不能直接提升确定性规则的风险等级，必须补充 Evidence。
+
+### 4.3 外部威胁情报富化
+
+- [x] 首个 Provider 接入安恒威胁情报开放接口，Key 只进入系统安全存储或进程环境，不进入 YAML、模型上下文、Evidence 或报告。
+- [x] 网络查询只接受任务内 `SOCK-*` 引用和分析师预置的 IP/域名 IOC；文件查询只接受任务创建时由分析师预置的哈希 IOC。
+- [x] 私网、回环、链路本地、文档网段和其他保留地址在本地过滤，模型不能任意扩大查询集合。
+- [x] 批量查询、Profile 级缓存、额度感知的人工 API 测试、类型化错误、Evidence、审计和 GUI“情报”页已经接通。
+- [x] 外部情报命中不能单独形成 `CONFIRMED`，必须与主机侧 Evidence 结合。
+- [x] 使用真实 DBAPP TI Key 完成人工在线验收（2026-08-10）；自动化测试仍使用假客户端，不消耗在线额度。
+- [ ] 扩充恶意、良性和未知 IOC 的人工回归样本，并记录情报更新时间、命中差异和误报反馈。
+- [ ] 增加显式 opt-in 的 CI/发布前在线冒烟任务；默认 CI 继续禁止访问真实情报接口。
 
 ## 5. Sprint 1：真实主机准入层
 
@@ -409,8 +442,11 @@ Docker Lab 继续用于快速回归，但不能作为唯一实战验收。
 - [ ] SSH 断线、Evidence 下载中断和 Helper 超时。
 - [ ] 模型超时、Provider 不可用和预算耗尽。
 - [ ] 正常运维脚本、系统更新、APM Agent、动态框架类和合法特权容器作为阴性样本。
+- [x] 真实 DBAPP TI Key/API/任务富化人工在线验收；私网过滤和单独情报不得形成 `CONFIRMED` 的边界保持有效。
 
 ### 11.3 每个 Sprint 的共同 DoD
+
+> 本节是持续性发布门禁，不因某一次测试通过而永久关闭。最近一次完整执行结果记录在 11.4；新增功能后必须重新执行。
 
 - [ ] 每个类别明确输出 `CONFIRMED | HIGHLY_SUSPICIOUS | SUSPICIOUS | NO_FINDING | NOT_CHECKED | ERROR`。
 - [ ] 采集失败、无权限和依赖缺失绝不能输出 `NO_FINDING`。
@@ -426,31 +462,48 @@ Docker Lab 继续用于快速回归，但不能作为唯一实战验收。
 - [ ] 原始二进制、Class Dump、完整 SSH Key 和凭据永不上云。
 - [ ] 达到数量、时间或存储预算后停止并报告未完成范围。
 
+### 11.4 最近一次完整验收记录
+
+2026-08-10，以下命令均由使用者确认通过：
+
+```text
+npm run build                    PASS
+npm test                         PASS
+npm run probe:build              PASS
+npm run test:docker              PASS
+npm run test:gui:investigation   PASS
+npm run test:gui:remediation     PASS
+npm run test:gui:recovery        PASS
+npm run package:gui              PASS
+```
+
+该结果证明当前代码、五套 Docker Lab、三条 GUI 主流程和 macOS 未签名应用包形成一致闭环；它不替代第 11.1 节的真实 VM 兼容性验收，也不代表签名、公证或跨平台安装包已经完成。
+
 ## 12. 推荐实际开工顺序
 
 当前不要同时铺开 Windows、Kubernetes 和云平台。建议严格按以下顺序推进：
 
-1. **Sprint 1：真实主机准入层**
-   - Host Key 自动发现与人工信任。
-   - Helper 能力协商和非 root 降级。
-   - 修复超时和 Evidence 流式传输。
-   - 建立首批真实 Linux 支持矩阵。
-2. **Sprint 2：通用 Linux 入侵分诊**
-   - 进程、网络、文件、权限、认证日志和事件时间线。
-3. **Sprint 3：确定性调查内核与四专项加深**
-   - 最低必执行图、规则 Finding、Web/Java/账户/持久化扩展。
-4. **Sprint 4：LocalExecutor、离线 Collector 和容器调查**。
-5. **Sprint 5：可恢复处置和动作后复扫**。
-6. 根据真实试用反馈，在 **Windows** 与 **Kubernetes 深入支持**之间选择下一条主线。
+1. **已完成首轮：Sprint 1～3**
+   - Host Key 发现/人工信任、Helper 能力协商、Evidence 流式传输。
+   - Linux 入侵分诊、最低必执行图、确定性规则和四专项加深。
+   - DBAPP 威胁情报闭环与桌面端可用性收口。
+2. **当前退出门禁：真实 Linux VM 只读验收**
+   - 完成五发行版、两架构和典型权限/依赖缺失组合。
+   - 将每次结果回填 `SUPPORT_MATRIX.md`，不通过的路径形成明确兼容性 TODO。
+3. **Sprint 4A：LocalExecutor 与统一 Transport 基础**。
+4. **Sprint 4B：一次性 Collector 与离线导入**。
+5. **Sprint 4C：Docker/containerd 调查**。
+6. **Sprint 5：可恢复处置扩展和动作后复扫**。
+7. 根据真实试用反馈，在 **Windows** 与 **Kubernetes 深入支持**之间选择下一条主线。
 
-完成 Sprint 1～3 后，HuntWarden 才进入少量真实 Linux 主机只读试用阶段。完成 Sprint 5 后，才进入真实主机受控处置试用阶段。
+Sprint 1～3 的代码门禁已经通过，因此现在可以开始少量授权 Linux 主机的只读试用；只有完成真实 VM 矩阵后，才能把对应发行版从“待实机验收”提升为“已验证”。完成 Sprint 5 后，才进入真实主机扩展处置试用阶段。
 
 ## 13. 上下文恢复提示
 
 后续新会话或上下文压缩后，优先读取本文件，并遵循：
 
 1. 不把“生产级”重新解释为企业平台治理，本阶段只关注实战检测、目标接入、兼容性和查杀闭环。
-2. Sprint 1～3 首轮功能切片已经落地；当前下一项是 **五发行版真实 VM 只读验收、SSH 高级连接能力与剩余兼容性缺口**。
+2. Sprint 1～3、DBAPP 情报闭环和桌面端收口已经落地；当前下一项是 **五发行版真实 VM 只读验收、SSH 高级连接能力与 Sprint 4A LocalExecutor**。
 3. “host + port 自动解析指纹”是发现功能，绝不自动信任未知 Host Key。
 4. 在继续增加检测关键词前，先消除“工具成功但实际没有完整检查”的情况。
 5. 新 Transport、新检测工具和新处置动作必须继续保持结构化操作、目标绑定、不透明引用和逐动作审批。

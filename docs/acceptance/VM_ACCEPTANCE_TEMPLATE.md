@@ -1,0 +1,82 @@
+# HuntWarden 真实 VM 只读验收记录
+
+> 复制本文件后重命名为 `VM_<distro>_<version>_<arch>_<YYYY-MM-DD>.md`。只保存脱敏结果，不保存私钥、API Key、完整 SSH Key、真实凭据或原始敏感 Evidence。
+
+## 1. 结论
+
+- 结果：`PASS | PASS_WITH_LIMITATIONS | FAIL`
+- 验收人：
+- 时间：
+- HuntWarden commit：
+- 报告版本与 SHA-256：
+
+## 2. 目标身份
+
+| 项目 | 实际值 |
+| --- | --- |
+| 官方镜像来源 |  |
+| 镜像 ID/版本 |  |
+| 发行版 |  |
+| 架构 |  |
+| 内核 |  |
+| init/systemd |  |
+| SELinux/AppArmor |  |
+| Helper 版本 |  |
+| Host Key 带外核验 | `PASS/FAIL` |
+
+## 3. 能力与降级
+
+| 能力 | 状态 | 原因/证据 |
+| --- | --- | --- |
+| root Helper |  |  |
+| YARA |  |  |
+| journald |  |  |
+| auditd |  |  |
+| JDK Attach |  |  |
+| Tomcat Probe |  |  |
+| `/proc` 可见性 |  |  |
+
+确认：缺失依赖、权限不足或数据源缺失没有被描述为 `NO_FINDING`：`PASS/FAIL`。
+
+## 4. 检测包结果
+
+| 检测包 | QUICK | STANDARD | DEEP | FindingStatus | Evidence | 限制 |
+| --- | --- | --- | --- | --- | --- | --- |
+| WebShell |  |  |  |  |  |  |
+| Java 内存马 |  |  |  |  |  |  |
+| 后门账户 |  |  |  |  |  |  |
+| Linux 持久化 |  |  |  |  |  |  |
+| Linux 入侵分诊 |  |  |  |  |  |  |
+
+## 5. 样本与对照
+
+| 场景 | 预期 | 实际 | 结果 |
+| --- | --- | --- | --- |
+| 无害阳性样本 | 形成可追溯 Finding/Evidence |  |  |
+| 良性维护样本 | 不形成 HIGH/CRITICAL |  |  |
+| 夹具清理 | 两个固定文件均为 `ABSENT` |  |  |
+| 未选择类别 | 工具调用数为 0 |  |  |
+| SCAN 写操作 | 成功次数为 0 |  |  |
+
+## 6. 性能与预算
+
+| 项目 | 实际值 |
+| --- | --- |
+| QUICK 总耗时 |  |
+| STANDARD 总耗时 |  |
+| DEEP 总耗时 |  |
+| Tool Call 数 |  |
+| Evidence 数/总字节 |  |
+| 截断/预算停止原因 |  |
+
+## 7. 缺陷与后续
+
+| ID | 严重度 | 现象 | 复现 | 当前处理 |
+| --- | --- | --- | --- | --- |
+|  |  |  |  |  |
+
+## 8. 支持矩阵回填
+
+- [ ] 仅在证据充分时更新 `docs/SUPPORT_MATRIX.md`。
+- [ ] `PASS_WITH_LIMITATIONS` 的限制已经写入支持矩阵。
+- [ ] 临时 VM、Security Group、Key 和快照已销毁或按计划保留。
