@@ -74,7 +74,7 @@ export class RuntimeStore {
     const databasePath = join(baseDir, databaseFile);
     await mkdir(dirname(databasePath), { recursive: true, mode: 0o700 });
     const lockPath = `${databasePath}.writer.lock`;
-    const lockFd = await this.acquireWriterLock(lockPath);
+    const lockFd = await RuntimeStore.acquireWriterLock(lockPath);
     const previousUmask = process.umask(0o077);
     let store: RuntimeStore;
     try {

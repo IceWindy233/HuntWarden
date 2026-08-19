@@ -168,7 +168,9 @@ function EvidenceList({ snapshot, notify }: { snapshot: TaskSnapshot; notify: (m
 
 function ThreatIntelView({ snapshot }: { snapshot: TaskSnapshot }) {
   const evidence = snapshot.evidence.filter((item) => item.type.startsWith("dbapp_"));
-  const verdicts = evidence.flatMap((item) => {
+  // 情报判定来自 Evidence metadata，形状由 Provider 决定：显式标注索引签名，
+  // 否则 flatMap 会把元素类型收窄成 { evidenceId }，逐字段访问全部报错。
+  const verdicts: Record<string, unknown>[] = evidence.flatMap((item) => {
     const rows = item.metadata?.verdicts;
     return Array.isArray(rows) ? rows.flatMap((row) => row && typeof row === "object" ? [{ evidenceId: item.evidenceId, ...row as Record<string, unknown> }] : []) : [];
   });

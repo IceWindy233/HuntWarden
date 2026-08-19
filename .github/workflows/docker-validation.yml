@@ -1,7 +1,20 @@
 name: Docker Validation
 
 on:
+  # Kept as the manual full-matrix entry point.
   workflow_dispatch:
+  # Additionally mandatory on pull requests, but only when the target-side helper,
+  # the lab images or the Docker suite itself change. Ordinary commits stay out of
+  # this workflow because it needs five containers and runs for tens of minutes.
+  pull_request:
+    branches: [main]
+    paths:
+      - "host-helper/**"
+      - "labs/**"
+      - "tests/docker/**"
+      # Second step below validates the dynamic Debian scenario built from this
+      # directory, so it is an input of this workflow just like labs/**.
+      - "acceptance/real-world/**"
 
 permissions:
   contents: read

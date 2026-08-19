@@ -4,6 +4,7 @@
   "version": "0.1.0",
   "description": "AI-assisted Linux host investigation and controlled remediation agent with evidence, approvals, and crash recovery.",
   "author": "IceWindy",
+  "license": "MIT",
   "homepage": "https://github.com/IceWindy233/HuntWarden#readme",
   "repository": {
     "type": "git",
@@ -32,6 +33,10 @@
     "package:gui": "npm run build && electron-forge package",
     "make:gui": "npm run build && electron-forge make",
     "release:local": "bash scripts/build-release.sh",
+    "lint": "biome lint",
+    "lint:fix": "biome lint --write",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "typecheck:renderer": "tsc -p tsconfig.renderer.json --noEmit",
     "test": "vitest run",
     "audit:prod": "npm audit --omit=dev --audit-level=high",
     "test:unit": "vitest run tests/unit",
@@ -66,6 +71,7 @@
     "yaml": "2.9.0"
   },
   "devDependencies": {
+    "@biomejs/biome": "2.5.9",
     "@electron-forge/cli": "7.11.2",
     "@electron-forge/maker-dmg": "7.11.2",
     "@electron-forge/maker-zip": "7.11.2",
