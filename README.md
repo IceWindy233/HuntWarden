@@ -1,312 +1,155 @@
 # HuntWarden
 
 [![CI](https://github.com/IceWindy233/HuntWarden/actions/workflows/ci.yml/badge.svg)](https://github.com/IceWindy233/HuntWarden/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-HuntWarden（猎卫）是面向安全分析师的 AI 主机安全调查与受控处置 Agent。首期 MVP 通过 SSH 调用目标端白名单辅助程序，完成 WebShell、Tomcat 9/JDK 17 内存马、Linux 后门账户、Linux 持久化和通用 Linux 入侵分诊；文件隔离与账户禁用必须逐动作审批。项目同时保留全屏 TUI，供自动化、无桌面环境和故障回退使用。
+HuntWarden（猎卫）是面向安全分析师的 AI 主机安全调查与受控处置 Agent。它通过 SSH 调用目标主机上的白名单辅助程序，完成 WebShell、Tomcat 内存马、Linux 后门账户、Linux 持久化和通用 Linux 入侵分诊；文件隔离与账户禁用必须逐动作审批。
 
-**安全不变量：模型没有 Bash/Shell、不能扩展任务目标；SCAN 不执行写操作，REMEDIATE 的每个动作都必须由分析师单独审批。**
+## 为什么值得看
 
-五分钟本地验证：
+绝大多数 AI Agent 项目把 Shell 直接交给模型。HuntWarden 的核心设计前提是**模型不可信**：
 
-```bash
-npm ci
-npm run build
-npm test
-npm run lab:up
-npm run start:gui
+| 模型能做的 | 模型做不到的 |
+| --- | --- |
+| 调用 52 个语义固定的 Helper 操作 | 执行任意命令、Shell、PowerShell |
+| 用任务内不透明引用（`PROC-`/`CAND-`/`ACCT-`/`EV-`）继续深挖 | 提交任意路径、PID、网络目标或 IOC |
+| 在 `REMEDIATE` 模式请求写操作 | 绕过分析师审批直接落地写操作 |
+| 读取脱敏且不超过 64 KiB 的文本事实 | 拿到原始 Evidence、二进制或 Class Dump |
+| 扩展调查深度 | 缩减确定性最低执行图、扩大目标范围 |
+
+三条不变量由代码而非 Prompt 保证：
+
+- **`SCAN` 模式不注册写工具。** 不是运行时拒绝，而是工具集里根本不存在。
+- **每个写操作需要一次性票据**，绑定 `taskId + targetFingerprint + tool + argsDigest + actionId`，只能消费一次，进程重启前未消费的票据全部过期。
+- **`PARTIAL` / `ERROR` / `NOT_CHECKED` 永远不会被呈现为安全。** 采集失败、权限不足、依赖缺失都必须显式出现在报告里。
+
+## 架构
+
+```mermaid
+flowchart LR
+  subgraph 控制端
+    GUI[Electron + React GUI]
+    TUI[Ink TUI]
+    RT[Agent Runtime<br/>三层写门控]
+    SP[Scan Planner<br/>确定性最低执行图]
+    TOOLS[52 个结构化工具]
+    STORE[(SQLite<br/>Finding/Evidence/审计/回执)]
+  end
+  subgraph 目标主机
+    HELPER[Python Helper<br/>零依赖 · 固定操作名]
+  end
+  LLM[任意支持 Tool Call 的模型]
+
+  GUI --> RT
+  TUI --> RT
+  RT <--> LLM
+  RT --> SP
+  SP --> TOOLS
+  RT --> TOOLS
+  TOOLS -->|SSH: 固定 argv + stdin JSON| HELPER
+  HELPER -->|结构化 JSON / SFTP 分块 Artifact| TOOLS
+  TOOLS --> STORE
 ```
 
-从 Lab MVP 演进到真实主机实战可用版的长期任务基线见 [`docs/TODO_PLAN_REAL_WORLD.md`](docs/TODO_PLAN_REAL_WORLD.md)。
-当前已验证平台、能力降级与真实试用限制见 [`docs/SUPPORT_MATRIX.md`](docs/SUPPORT_MATRIX.md)。
-`v0.1.0` 的退出条件、验收证据和发布顺序见 [`docs/V0_1_0_RELEASE_PLAN.md`](docs/V0_1_0_RELEASE_PLAN.md)。
-真实 VM 的只读冒烟入口见 [`acceptance/vm/README.md`](acceptance/vm/README.md)。
-版本变化见 [`CHANGELOG.md`](CHANGELOG.md)，`v0.1.0` 发布说明草案见 [`docs/releases/v0.1.0.md`](docs/releases/v0.1.0.md)。
+模型介入之前，Scan Planner 先跑完每个检测类别的**确定性最低执行图**，覆盖状态由它维护。模型不可用时，最低调查依然产出结构化结果与兜底 Finding。
 
-## 已实现范围
+写操作的审批链路：
 
-- Pi 低层 `Agent` Tool Loop；支持 Pi 内置多供应商 Provider 与自定义兼容端点，默认仍为 OpenAI Responses `gpt-5.6-terra` / `medium`。
-- Electron + React 全屏桌面 GUI：仪表盘、结构化配置中心、API Key 安全存储、模型检查、SSH 测试、新建任务、Agent 文本增量流式显示、安全 GFM Markdown 预览、任务归档与恢复、实时调查、Steering、审批、恢复、Evidence、审计和报告。
-- 内置 DeepSeek 与 OpenAI Profile；可在 GUI 中切换 Pi 内置 Provider，或配置 OpenAI Responses/Completions、Anthropic Messages 兼容端点。
-- Renderer 启用 Chromium 沙箱、Context Isolation、严格 CSP 和固定 IPC 白名单；不能直接访问 Node.js、文件系统、SQLite、SSH 或凭据明文。
-- Ink 7 + React 19 全屏 TUI：新建、运行、Agent 文本增量流式显示、历史任务、Steering、审批、恢复、Finding、Evidence、审计和报告。
-- SQLite WAL/FULL 事件存储、单实例写锁、完整消息持久化、人工触发的崩溃恢复、工具幂等与写操作回执恢复；重启前未消费审批一律过期。
-- 严格 SSH 主机指纹校验；无密码配置、无自动接受未知 Host Key。
-- 固定操作名的 Python 辅助程序；不接受任意命令，不使用 Shell 执行参数。
-- WebShell 候选发现、YARA、脚本特征、日志关联、文件证据和受控隔离。
-- Tomcat 运行时 Filter/Servlet/Listener 枚举、ClassLoader/CodeSource/ProtectionDomain、磁盘来源和只读 Class Dump；不清除、不重定义、不重启 JVM。
-- 特权账户、账户状态、SSH Key 指纹、登录历史和受控账户禁用。
-- Cron、systemd、SSH Authorized Keys、Shell 启动项，以及基于不透明引用的进程和网络关联调查；仅提供 READ/COLLECT 工具。
-- Linux 入侵分诊：稳定进程身份、进程树/FD/maps/socket、删除后运行、近期/特权文件、软件包完整性、动态加载、认证事件与时间线。
-- 安恒威胁情报受控富化：批量查询任务内已观测公网外联 IP、分析师预置域名/IP 与文件哈希，结果固化为 Evidence 并在 GUI“情报”页归因展示。
-- 由分析师确认后手动生成的不可变版本化中文 Markdown 报告、ID 引用校验、一次模型修复和确定性回退模板；支持历史版本切换与 Finder 定位。
-- 五套无害 Docker Lab 与 Pi Faux Provider 可重复 Agent 测试。
+```mermaid
+sequenceDiagram
+  participant M as 模型
+  participant RT as Agent Runtime
+  participant A as 分析师
+  participant H as 目标端 Helper
 
-## 环境
+  M->>RT: quarantine_file(evidenceRef)
+  RT->>RT: 校验 mode / 配置白名单 / Evidence 存在
+  RT->>A: 请求一次性授权（含参数摘要与 actionId）
+  A-->>RT: 批准
+  RT->>H: 执行 + actionId
+  H->>H: 先落盘 STARTED 回执
+  H->>H: rename → chmod 000
+  H-->>RT: 确认回执 SUCCEEDED
+  RT->>RT: 票据置 CONSUMED（不可复用）
+  Note over RT,H: 崩溃恢复时先查远端回执；<br/>STARTED/UNKNOWN 一律要求重新审批，绝不盲目重放
+```
 
-- Node.js `>=22.19.0`
-- npm
-- Java 17+（构建 Tomcat 探针）
-- Docker Compose（仅 Lab 集成测试需要）
-- 实时模型运行需要所选供应商的 API 凭据，或本机无认证推理服务
+## 检测能力
 
-目标 Linux 主机至少需要 Python 3 并安装本项目的 `huntwarden-helper`。YARA、auditd/journald、root 权限和 JDK Attach 缺失时会按能力返回 `PARTIAL/ERROR`；Docker Lab 会自动提供各场景所需依赖。
+| 检测包 | 覆盖 |
+| --- | --- |
+| WebShell / Web 攻击链 | Nginx/Apache 有效配置与 Web Root、近期脚本/模板/WAR、上传临时目录、`.user.ini`/`.htaccess`、批量 YARA、Access Log 与 Web 进程关联 |
+| Java 内存马 | Tomcat Filter/Servlet/Listener/Valve/WebSocket、Spring MVC 映射与 Interceptor、ClassLoader/CodeSource/ProtectionDomain、只读 Class Dump（不清除、不重定义、不重启 JVM） |
+| 后门账户 | UID 0、sudo/wheel、NSS 来源、账户状态、SSH Key 指纹、登录历史、sudo/doas/polkit、有效 sshd 信任配置 |
+| Linux 持久化 | Cron、systemd service/timer/drop-in/generated/transient、at/anacron、SysV/rc.local、XDG、PAM、udev、modprobe、cloud-init、包管理 Hook |
+| Linux 入侵分诊 | 稳定进程身份、进程树/FD/maps/socket、删除后运行、近期与特权文件、dpkg/rpm 完整性、动态加载、按主机时区解析的认证与执行时间线 |
+| 外部情报 | 安恒威胁情报受控富化；只接受任务内 `SOCK-*` 引用与分析师预置 IOC，私网地址本地过滤，命中不能单独形成 `CONFIRMED` |
 
-## 安装与验证
+## 五分钟本地验证
+
+不需要 API Key，不连接任何真实主机：
 
 ```bash
 npm ci
 npm run build
-npm test
+npm test          # 128 通过 / 34 按环境跳过
+npm run lint
+npm run typecheck
+```
+
+带上 Docker 跑真实 SSH + Helper 链路（五套隔离 Lab，含真实文件隔离与账户禁用）：
+
+```bash
 npm run probe:build
-docker compose -f labs/docker-compose.yml config --quiet
-```
-
-`npm test` 不需要 OpenAI Key，也不连接真实主机；测试使用 Pi Faux Provider 和 FakeExecutor。
-
-## 配置
-
-默认配置在 `config/default.yaml`。复制并通过环境变量选择自定义配置：
-
-```bash
-cp config/default.yaml config/local.yaml
-HUNTWARDEN_CONFIG=./config/local.yaml npm run dev
-```
-
-敏感值只通过环境或受权限保护的本地文件提供。不要把私钥、Token 或运行时 `data/` 提交到版本库。
-
-### 模型供应商
-
-模型配置分为两类：
-
-- `source: builtin`：使用 Pi 0.84 内置适配器，可选 OpenAI、Anthropic、Google Gemini、Azure OpenAI、DeepSeek、OpenRouter、Moonshot、Z.AI、Bedrock 等。
-- `source: custom`：连接企业网关、LiteLLM、Ollama、vLLM、LM Studio 或其他兼容端点。支持 `openai-responses`、`openai-completions` 和 `anthropic-messages` 三种协议。
-
-查看当前依赖版本实际包含的供应商和模型 ID：
-
-```bash
-npm run model:list
-npm run model:list -- anthropic
-```
-
-使用内置 Anthropic Provider 时，只需替换默认配置中的 `model` 段，并设置对应环境变量：
-
-```yaml
-model:
-  source: builtin
-  provider: anthropic
-  model: claude-sonnet-4-5
-  thinkingLevel: medium
-```
-
-```bash
-export ANTHROPIC_API_KEY='...'
-HUNTWARDEN_CONFIG=./config/local.yaml npm run model:check
-```
-
-自定义 OpenAI Chat Completions 兼容网关示例：
-
-```yaml
-model:
-  source: custom
-  provider: company-gateway
-  model: security-model
-  thinkingLevel: off
-  protocol: openai-completions
-  baseUrl: https://llm-gateway.example.com/v1
-  authentication:
-    type: api-key-env
-    apiKeyEnv: HUNTWARDEN_LLM_API_KEY
-  reasoning: false
-  contextWindow: 131072
-  maxTokens: 16384
-  compatibility:
-    supportsDeveloperRole: false
-    supportsReasoningEffort: false
-    supportsStrictMode: false
-```
-
-```bash
-export HUNTWARDEN_LLM_API_KEY='...'
-HUNTWARDEN_CONFIG=./config/local.yaml npm run model:check
-```
-
-本机 Ollama、vLLM 等可使用 `http://127.0.0.1`/`http://localhost` 与 `authentication.type: none`；远程端点强制 HTTPS 且必须认证。YAML 只保存环境变量名，禁止保存真实密钥。所选模型必须支持函数/工具调用，否则无法运行 Agent Tool Loop。`model:check` 只检查配置、模型目录和凭据解析，不发起网络请求或输出密钥。
-
-### DeepSeek 配置档
-
-项目提供可直接使用的 `config/deepseek.yaml`，默认选择 `deepseek-v4-flash` 与 `high` 推理等级。切换高能力版本时，将模型 ID 改为 `deepseek-v4-pro`；当前 Pi 0.84 模型目录对两款 V4 接受的推理等级为 `off | high | max`。
-
-```bash
-export DEEPSEEK_API_KEY='在 DeepSeek Platform 创建的密钥'
-
-# 静态检查，不请求 API
-HUNTWARDEN_CONFIG=./config/deepseek.yaml npm run model:check
-
-# 发起一次小型真实请求，验证认证、流式响应和 Tool Call
-HUNTWARDEN_CONFIG=./config/deepseek.yaml npm run model:smoke
-
-# 启动完整 Agent
-HUNTWARDEN_CONFIG=./config/deepseek.yaml npm run dev
-```
-
-`model:smoke` 仅要求模型调用本地虚拟 `connection_probe`，不连接 SSH 主机、不执行安全检测或写操作；但会产生少量 API Token 费用。
-
-### 安恒威胁情报
-
-HuntWarden 通过安恒威胁情报开放接口 `https://ti.dbappsecurity.com.cn/oapi/v1/` 对调查事实做外部富化。该功能默认关闭，可在 GUI“配置中心 → 安恒威胁情报”中启用并将 `nti-` 开头的 API Key 保存到 HuntWarden 自己的系统安全存储；它不会读取 Codex Skill 的 `.apikey` 文件。TUI/命令行也可以使用环境变量：
-
-```bash
-export DBAPP_TI_API_KEY='nti-...'
-```
-
-安全边界：
-
-- 模型不能提交任意 IP、域名或哈希；网络查询只接受当前任务产生的 `SOCK-*` 引用，额外 IOC 只能由分析师在新建任务时提供。
-- 私网、回环、链路本地、文档网段和其他保留地址始终在本地过滤，不会上送。
-- 相同 IOC 按 Profile 配置在内存中缓存；未命中缓存的每次批量请求消耗 1 次安恒威胁情报额度。
-- 情报命中会记录来源“安恒威胁情报 (DBAPP Threat Intelligence)”和 Evidence，但不能单独形成 `CONFIRMED` 结论。
-- GUI“测试情报 API”会查询 `example.com`，只有在用户二次确认后执行，并消耗 1 次额度；自动化测试全部使用假客户端，不访问真实接口。
-
-## 启动 TUI
-
-先设置所选供应商的 API Key（以下为默认 OpenAI 配置）：
-
-```bash
-export OPENAI_API_KEY='...'
-npm run dev
-```
-
-在 TUI 中按 `n` 新建任务。YAML 提供私钥与 `known_hosts` 路径；向导收集目标、端口、SSH 用户、主机 SHA-256 指纹、模式和调查请求。
-
-也可以从命令行直接创建并启动：
-
-```bash
-npm run dev -- \
-  --host 127.0.0.1 \
-  --port 2222 \
-  --user secagent \
-  --fingerprint 'SHA256:...' \
-  --mode SCAN \
-  --request '排查四类主机安全风险并形成报告' \
-  --auto-start
-```
-
-恢复已有任务：
-
-```bash
-npm run dev -- --resume TASK-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
-```
-
-主要按键：
-
-- `n`：新建任务
-- `a`：开始当前任务
-- `i`：提交 Steering 输入
-- `y` / `n`：批准或拒绝当前一次性写操作
-- `r`：恢复中断任务
-- `g`：生成报告
-- `Tab`：切换任务、事件、发现和证据视图
-- `q`：退出
-
-## 启动桌面 GUI
-
-开发模式（Vite 热更新 + Electron）：
-
-```bash
-npm run dev:gui
-```
-
-生产构建后直接启动：
-
-```bash
-npm run start:gui
-```
-
-生成本机 `.app` 应用包；生成 zip/dmg 安装介质使用第二条命令：
-
-```bash
-npm run package:gui
-npm run make:gui
-```
-
-首次启动会在系统应用数据目录创建两个配置 Profile，并默认启用 DeepSeek。打开“配置中心”，输入 DeepSeek API Key 后可选择：
-
-- “系统安全存储持久化”：通过 Electron `safeStorage` 使用 macOS Keychain 加密保存；GUI 不提供读取明文的能力。
-- 取消持久化：密钥仅保存在当前桌面进程内存中，退出即丢失。
-
-保存后先执行“静态检查”，再执行“真实 Tool Call 冒烟”。冒烟请求只调用本地虚拟探针，不连接 SSH 或执行处置，但会产生少量模型费用。
-
-GUI 的活动 Profile、任务事件数据库、Evidence 和报告均位于 Electron `userData` 下；目录和文件分别限制为 `0700`、`0600`。SSH 私钥只保存绝对路径，不复制密钥内容。首次从旧版 SecHostAgent 启动 HuntWarden 时，应用会非破坏性复制旧配置与运行数据并保留原目录；由于 Electron `safeStorage` 密文绑定应用身份，API Key 不会跨品牌复制，需在 HuntWarden 中重新录入。已被早期迁移版本复制的旧密文会在重新保存同一 Provider 的 Key 时以 `0600` 权限备份并安全替换；`SECHOST_CONFIG` 仅作为旧脚本兼容变量继续读取。
-
-## Docker Lab
-
-启动脚本会临时生成登录 Key、容器 Host Key 和 `known_hosts`，构建 Java 探针并启动五套环境：
-
-```bash
 npm run lab:up
 npm run test:docker
 ```
 
-`npm run test:docker` 会先自动重置 Lab，再执行包含真实文件隔离和账户禁用的测试；若只想针对已经运行且状态已知的容器执行测试，可使用 `npm run test:docker:running`。
+完整的配置、启动与 Lab 说明见 [`docs/USAGE.md`](docs/USAGE.md)。
 
-处置闭环的 Electron GUI 自动化会为每个用例重置 Lab，使用仅在测试环境启用的 Pi Faux 脚本模型，并真实点击拒绝、二次确认和审计回执界面：
+## 范围与非范围
 
-```bash
-npm run test:gui:remediation
-npm run test:gui:investigation
-npm run test:gui:recovery
-```
+**在范围内**：单台 Linux 主机、SSH 接入、单活动任务、上述五类检测、WebShell 文件隔离与账户禁用两个写操作。
 
-写操作测试会改变容器内的文件或账户状态。重新执行处置场景前，用以下命令删除并重建五个 Lab 容器；本地测试身份 Key 会保留，`known_hosts` 会按当前容器重新生成：
+**刻意不做**：Windows、Kubernetes、批量 Hunt、多 Agent 编排、持续实时 EDR、企业 SSO/RBAC/多租户、SIEM 集成、自动网络隔离、内核 Rootkit 自动清除。长期方向记录在 [`docs/TODO_PLAN_REAL_WORLD.md`](docs/TODO_PLAN_REAL_WORLD.md)，它是路线图而非承诺。
 
-```bash
-npm run lab:reset
-```
+## 已知限制
 
-| 场景 | SSH | 应用 | 内容 |
-| --- | --- | --- | --- |
-| Lab-Web | `127.0.0.1:2222` | `http://127.0.0.1:8080` | 正常脚本、无害 WebShell 标记样本、关键词误报样本 |
-| Lab-Tomcat | `127.0.0.1:2223` | `http://127.0.0.1:8081/lab/` | Tomcat 9/JDK 17、无害动态 Filter、磁盘类删除后的 Dump 场景 |
-| Lab-Account | `127.0.0.1:2224` | — | 正常执行账户、测试 UID 0 账户、未知 SSH Key 指纹 |
-| Lab-Persistence | `127.0.0.1:2225` | — | 正常项、无害 Cron/systemd/SSH/Shell 持久化模拟及回环监听进程 |
-| Lab-Linux-IR | `127.0.0.1:2226` | — | 删除后运行、临时目录进程、本地模拟 C2、ld.so.preload、软件包变更与认证时间线 |
+诚实优于好看，以下均为当前真实状态：
 
-停止环境：
+- **检测质量尚未度量。** 验收语料全部是自造的惰性样本，规则在真实站点上的召回率与误报率未知。报告里的 `NO_FINDING` 不应被当作「已排查干净」。
+- **真实发行版 VM 矩阵未验收。** 仅 Ubuntu 22.04 经 Docker 验证，Debian 12 经动态容器场景验证。各平台状态见 [`docs/SUPPORT_MATRIX.md`](docs/SUPPORT_MATRIX.md)。
+- **Java 检测只在 Tomcat 9 / JDK 17 上验证过。**
+- **处置不可逆。** 没有 `restore_quarantined_file` / `restore_account_state`；`disable_account` 只锁定账户，不终止活动会话、不处理 `authorized_keys`，因此密钥型后门账户仍可登录。
+- **接入方式只有 SSH 私钥文件直连。** 不支持 SSH Agent、加密私钥与 ProxyJump。
+- **Helper 需要管理员预先安装**，不支持自动上传临时 Helper。
+- macOS arm64 未签名、未公证，无自动更新。
 
-```bash
-npm run lab:down
-```
+## 文档
 
-Lab 只允许在隔离开发环境使用。账户禁用与隔离测试会真实改变对应容器状态。
-
-## 安全与恢复语义
-
-- Agent 工具参数没有 host、任意路径、任意 PID 或命令字符串；后续调查使用任务内不透明引用。
-- 外部威胁情报工具同样受任务引用边界约束；不向模型返回 API Key，也不把私网地址发送给情报服务。
-- `SCAN` 模式在工具执行前硬阻断全部写操作。
-- `REMEDIATE` 模式仍要求绑定 `taskId + targetFingerprint + tool + argsDigest + actionId` 的一次性票据。
-- 文件隔离要求已有 Evidence，且远端当前哈希与审批时一致；仅同文件系统原子移动并设置 `000`。
-- 账户禁用永久拒绝 `root` 和当前 SSH 执行用户，保存前态并验证锁定/过期结果。
-- SAFE 工具按原 `toolCallId` 幂等恢复；NEVER 工具先查远端 `actionId` 回执。状态未知时必须重新审批，绝不自动重放。
-- 启动时遗留活动任务会转为 `ABORTED + recoveryRequired`；GUI 仅在分析师点击后恢复。报告以 `v1/v2/...` 不可变保存，旧版单文件报告懒迁移为 LEGACY。
-- 已结束任务可归档并恢复到当前列表；归档只改变列表可见性，Finding、Evidence、报告和审计记录不会被删除，活动或待恢复任务禁止归档。
-- 流式半成品只存在于当前进程与界面内存，完整 Assistant 消息仅在 `message_end` 后写入 SQLite；Thinking 和未完成的 Tool Call 参数不会发送到 GUI/TUI。
-- 模型只接收脱敏且最多 64 KiB 的文本；原始 Evidence、二进制和 Class Dump 不上传。
-- 数据目录为 `0700`，数据库、Evidence 和报告为 `0600`。首期不提供应用层加密或自动过期删除。
+| 文档 | 内容 |
+| --- | --- |
+| [`docs/USAGE.md`](docs/USAGE.md) | 环境、模型供应商配置、TUI/GUI 启动、Docker Lab、安全与恢复语义 |
+| [`docs/SUPPORT_MATRIX.md`](docs/SUPPORT_MATRIX.md) | 平台与能力的已验证 / 待验收状态 |
+| [`docs/TODO_PLAN_REAL_WORLD.md`](docs/TODO_PLAN_REAL_WORLD.md) | 长期功能路线 |
+| [`docs/V0_1_0_RELEASE_PLAN.md`](docs/V0_1_0_RELEASE_PLAN.md) | `v0.1.0` 退出条件与发布门禁 |
+| [`docs/adr/`](docs/adr/) | 架构决策记录 |
+| [`host-helper/README.md`](host-helper/README.md) | 目标端 Helper 的依赖、安装、升级与自检 |
+| [`CHANGELOG.md`](CHANGELOG.md) | 版本变化 |
 
 ## 目录
 
 ```text
-src/                 Agent、桌面 GUI、TUI、领域模型、存储、SSH、工具和报告
-assets/              桌面应用图标
-host-helper/         目标端固定操作辅助程序
-java/tomcat-probe/   Java 17 Attach/Agent 只读探针
-rules/yara/          项目测试规则
-labs/                Web、Tomcat、Account、Persistence Docker Lab
-tests/               单元和集成测试
+src/                 Agent Runtime、桌面 GUI、TUI、领域模型、存储、SSH、工具与报告
+host-helper/         目标端零依赖 Python Helper 与安装/自检/卸载脚本
+java/tomcat-probe/   Java 17 Attach 只读探针
+rules/yara/          WebShell YARA 规则
+labs/                五套隔离 Docker Lab
+acceptance/          真实 VM 与动态容器验收入口
+tests/               单元、集成、Docker、GUI E2E 与验收测试
 config/              YAML 配置
 ```
 
-## 明确限制
+## License
 
-首期只支持单台 Linux、SSH、Tomcat 9/JDK 17 和单活动任务。不支持 Windows、批量 Hunt、Velociraptor、多 Agent 或生产级密钥托管。
+[MIT](LICENSE)

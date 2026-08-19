@@ -2,29 +2,37 @@
 
 > 文档用途：冻结 HuntWarden 从 Docker Lab MVP 演进为真实主机专项检测与受控查杀 Agent 的功能路线，作为后续开发、上下文恢复和验收的唯一长期 TODO 基线。
 >
-> 最近更新：2026-08-10
->
-> 当前实施基线：Sprint 1～3 首轮功能切片、DBAPP 威胁情报闭环与桌面端可用性收口已经完成；未完成项继续保留为 `[ ]`。
->
-> `v0.1.0` 的短期收口和发布门禁单独冻结在 [`V0_1_0_RELEASE_PLAN.md`](V0_1_0_RELEASE_PLAN.md)；本文件继续作为长期功能路线。
+> 最近更新：2026-08-19
 
-## 0. 当前进度快照
+## 0. 当前状态
 
-截至 2026-08-10：
+已具备：
 
-- Sprint 1～3 的首轮功能切片已经落地，具备进入少量授权 Linux 主机只读试用的代码基础；真实发行版 VM 矩阵仍未验收，不能据此宣称生产平台兼容性已经完成。
-- 安恒威胁情报（DBAPP Threat Intelligence）已完成安全凭据、配置、受控 IOC 富化、Evidence、审计与 GUI 情报视图闭环，并已使用真实 Key 完成人工在线验收。
-- Agent/报告已支持安全 GFM Markdown 渲染；已修复完成态布局穿透、未选检测类别 Finding 固化和检测能力降级越界问题。
-- 2026-08-10 最近一次完整验收中，`build`、常规测试、Java 探针、Docker、三条 GUI E2E 和 macOS 应用打包均通过。
+- Sprint 1～3 的检测能力、确定性执行图、Finding/Evidence/审计/报告闭环。
+- 安全边界：52 个固定 Helper 操作、不透明引用、三层写门控、一次性审批票据；模型拿不到 Shell 或任意路径。
+- 数据正确性：主机时区感知的时间线、journald 与轮转日志采集、输出字节预算、Helper 墙钟 deadline 与遍历边界。
+- 工程门禁：Lint、core/renderer 双 typecheck、写操作与崩溃恢复不变量进必跑 CI、Helper 协议版本与 envelope 结构校验。
+- DBAPP 威胁情报受控富化，已用真实 Key 完成人工在线验收。
 
-当前工作队列按优先级冻结为：
+尚未具备：
 
-1. **真实 Linux 兼容性门禁**：Ubuntu 22.04/24.04、Debian 12、Rocky/AlmaLinux 9、Amazon Linux 2023 的只读验收和降级记录。
-2. **真实连接补强**：SSH Agent、加密私钥、ProxyJump，以及连接/操作/空闲/任务超时拆分。
-3. **Sprint 4A LocalExecutor**：先建立统一 Transport 语义，再复用现有 HostOperation 和 Helper。
-4. **Sprint 4B Collector/Offline Import**：一次性只读采集、完整性清单和安全离线导入。
-5. **Sprint 4C Container**：Docker/containerd 宿主机与容器关联调查。
-6. **Sprint 5 处置扩展**：恢复隔离/账户状态、持久化禁用与恢复、进程暂停/终止及动作后复扫。
+- 检测质量不可度量：验收语料全为惰性自造样本（无真实 WebShell、内存马与发行版输出快照），因此 11.3 的召回率与精确率目标无法计算。
+- 52 个 Helper 操作无 golden fixture，Helper 无 Python 单测，输出契约漂移在 CI 不可检出。
+- 真实发行版 VM 矩阵未验收。
+- 处置不可逆，且 `disable_account` 不处理密钥信任面。
+
+工作队列按优先级冻结为：
+
+1. **真实语料与误报基线**：真实 WebShell/内存马语料、真实 CMS 良性对照，产出可复算的召回率/精确率报告。
+2. **golden fixture 与 Helper Python 单测**：固化 52 个操作的输出契约与时间/预算/边界行为。
+3. **真实 Linux 兼容性门禁**：Ubuntu 22.04/24.04、Debian 12、Rocky/AlmaLinux 9、Amazon Linux 2023 的只读验收与降级记录。
+4. **处置补强**：`disable_account` 的会话终止与密钥信任面处置、动作后定向复扫。
+5. **Sprint 5 可逆处置**：`restore_quarantined_file` / `restore_account_state` 优先于其余处置动作。
+6. **真实连接补强**：SSH Agent、加密私钥、ProxyJump，以及连接/操作/空闲/任务超时拆分。
+7. **Sprint 4A LocalExecutor**：先建立统一 Transport 语义，再复用现有 HostOperation 和 Helper。
+8. **Sprint 4B Collector/Offline Import**：一次性只读采集、完整性清单和安全离线导入。
+9. **Sprint 4C Container**：Docker/containerd 宿主机与容器关联调查。
+10. **Sprint 5 处置扩展**：持久化禁用与恢复、进程暂停/终止。
 
 ## 1. 目标定义
 
@@ -60,7 +68,7 @@
 - [x] 安恒威胁情报受控富化：公网 IP/域名/文件哈希、缓存、Evidence、审计和 GUI 情报视图。
 - [x] 五套 Docker Lab 与 Faux Provider 自动化验证。
 
-## 3. 当前阻碍真实主机试用的 P0 缺口
+## 3. 真实主机准入的 P0 项
 
 ### 3.1 SSH 目标身份与连接
 
@@ -94,7 +102,8 @@
 - [x] 空数组不能单独推导为 `NO_FINDING`。
 - [ ] 未预装 Helper 时允许上传并运行非特权临时 Helper。
 - [ ] 需要 root 的检查明确降级为 `PARTIAL`，并提供管理员安装指引。
-- [ ] 提供 Debian/RPM Helper 安装、升级、卸载和自检脚本。
+- [x] 提供 Debian/RPM Helper 安装、卸载和自检脚本，并下发 YARA 规则与 Tomcat 探针、校验 Python 版本下限、支持幂等升级。
+- [x] 自检逐项报告 YARA、journald、auditd、JDK Attach、`/proc` 可见性与 SELinux/AppArmor 的能力状态及降级影响。
 
 ### 3.3 超时与 Evidence 传输
 
@@ -248,9 +257,10 @@ interface TargetTransport {
 - [x] `query_auth_events`
 - [x] `query_exec_events`
 - [x] `build_incident_timeline`
-- [ ] 读取 journald、`auth.log`/`secure`、auditd、wtmp/btmp 和 sudo 日志。
+- [x] 读取 journald、`auth.log`/`secure`（含轮转与 `.gz`）、auditd 日志，多源并存时去重合并。
+- [ ] 补齐 wtmp/btmp 与独立 sudo 日志来源。
 - [ ] 关联 SSH 登录、sudo/su、进程、文件、持久化和网络连接。
-- [x] 日志缺失、窗口截断和数据源缺失产生明确警告（轮转集合与时间跳变检测继续完善）。
+- [x] 日志缺失、窗口截断、数据源缺失与时间预算到期均产生明确警告并置 `PARTIAL`。
 
 ### 6.4 扫描预设
 
@@ -372,6 +382,16 @@ interface TargetTransport {
 
 ## 9. Sprint 5：受控查杀、恢复与复扫
 
+### 9.0 现有两个写动作的补强
+
+`quarantine_file` 与 `disable_account` 已具备两阶段回执、`actionId` 幂等、控制端永久拒绝 `root` 与当前 SSH 执行账户，以及恢复时的 `UNKNOWN` 状态保留。剩余缺口在补齐前不要新增处置动作。
+
+- [ ] `disable_account` 目前只执行 `usermod --lock --expiredate 1`，不终止活动会话、不处理 `authorized_keys` 与 `AuthorizedKeysCommand`/CA 信任：密钥型后门账户仍可登录，而回执报告 `SUCCEEDED`。需扩展为“锁定 + 会话终止 + 密钥信任面处置”，或在能力不足时明确降级并拒绝报告成功。
+- [ ] 两个动作执行后均无自动定向复扫，`disable_account` 亦未验证密钥面结果。复扫结论必须关联到 Action Receipt。
+- [ ] `restore_quarantined_file` / `restore_account_state` 缺失导致处置不可逆，应作为 Sprint 5 的第一批实现项。
+
+### 9.1 处置动作实现顺序
+
 按风险顺序实施：
 
 - [ ] `restore_quarantined_file`
@@ -464,46 +484,76 @@ Docker Lab 继续用于快速回归，但不能作为唯一实战验收。
 
 ### 11.4 最近一次完整验收记录
 
-2026-08-10，以下命令均由使用者确认通过：
+2026-08-17 的完整本地门禁为当前权威记录。执行范围：
 
 ```text
-npm run build                    PASS
-npm test                         PASS
-npm run probe:build              PASS
-npm run test:docker              PASS
-npm run test:gui:investigation   PASS
-npm run test:gui:remediation     PASS
-npm run test:gui:recovery        PASS
-npm run package:gui              PASS
+npm run build                        PASS
+npm test                             PASS（25 文件通过 / 7 跳过；88 项通过 / 34 跳过）
+npm run probe:build                  PASS
+npm run test:docker                  PASS（10/10）
+npm run test:acceptance:real-world   PASS（Debian 12 ARM64 动态场景 6/6）
+npm run test:gui:investigation       PASS（4/4）
+npm run test:gui:remediation         PASS（3/3）
+npm run test:gui:recovery            PASS（6/6）
+npm run package:gui                  PASS
+npm run release:local                PASS（macOS arm64 ZIP/DMG + 打包 .app 启动冒烟）
+npm run audit:prod                   PASS（运行时依赖漏洞 0）
 ```
 
 该结果证明当前代码、五套 Docker Lab、三条 GUI 主流程和 macOS 未签名应用包形成一致闭环；它不替代第 11.1 节的真实 VM 兼容性验收，也不代表签名、公证或跨平台安装包已经完成。
 
+### 11.5 验收与回归体系缺口
+
+11.4 的 PASS 记录只证明 Lab 与 GUI 主流程闭环，不证明检测质量。11.3 的召回率与精确率目标在下列缺口补齐前不可度量。
+
+**阳性语料不具备真实性**：三处阳性样本均被显式做成不可执行（`labs/web/fixtures/lab-webshell.php`、`acceptance/real-world/entrypoint.sh`、`acceptance/vm/install-safe-fixtures.sh` 仅含关键词字符串）；Tomcat 内存马样本是一个设置响应头的 Filter；`rules/yara/webshell.yar` 仅 5 条有效行为规则。
+
+- [ ] 建立隔离的真实语料库（真实 WebShell 家族、真实内存马注入、混淆/加密/无文件变体），与无害 Lab 样本分离管理并明确使用边界。
+- [ ] 建立良性对照基线：至少一套真实 CMS/框架代码库（如 WordPress、ThinkPHP、Spring Boot 应用）作为误报语料。
+- [ ] 产出可复算的召回率/精确率报告，作为 11.3 两项数值目标的度量口径。
+
+**部分测试面不在必跑 CI 内**：`docker-validation.yml` 仅在 `host-helper/**`、`labs/**`、`tests/docker/**` 变更时触发，三条 GUI E2E 与 VM 冒烟仍是发布前本机门禁。
+
+- [ ] 为 `src/desktop/electron-safe-storage-cipher.ts` 增加真实后端测试；当前单测使用 `TestCipher`，真实凭据加密路径零覆盖。
+
+**TS 与 Python 之间缺可回归的输出契约**：`tests/fixtures/` 为空目录；Helper 无 Python 单测，仅被 `tests/integration/host-helper.test.ts` 的 8 例覆盖 6 个操作。
+
+- [ ] 为全部 52 个操作固化 golden fixture，使 Helper 输出字段漂移在 CI 即可检出。
+- [ ] 增加 Helper Python 侧单测，优先覆盖日志解析、时区与年份推断、输出预算截断、deadline 到期、路径与过宽根校验、两个写动作。
+
+**覆盖率与代码质量门禁不完整**：69 个 `src` 模块中 29 个未被任何测试直接导入，含 `src/tui/App.tsx`、`src/renderer/components/SettingsView.tsx`、`src/agent/model-health.ts` 与 host/webshell/account/persistence/java 五个工具包。
+
+- [ ] 引入覆盖率采集与基线阈值，优先补齐五个检测工具包的行为断言。
+- [ ] 清零 Lint 的 19 条既有 warning（15 条 React 19 下多余的 `import React`、2 条未用参数、2 条 optional-chain 建议），随后把 `npm run lint` 改为 error-on-warnings。
+
 ## 12. 推荐实际开工顺序
 
-当前不要同时铺开 Windows、Kubernetes 和云平台。建议严格按以下顺序推进：
+按以下顺序推进，不要同时铺开 Windows、Kubernetes 和云平台。
 
-1. **已完成首轮：Sprint 1～3**
-   - Host Key 发现/人工信任、Helper 能力协商、Evidence 流式传输。
-   - Linux 入侵分诊、最低必执行图、确定性规则和四专项加深。
-   - DBAPP 威胁情报闭环与桌面端可用性收口。
-2. **当前退出门禁：真实 Linux VM 只读验收**
+1. **真实语料与误报基线**
+   - 真实 WebShell/内存马语料、真实 CMS 良性对照，产出可复算的召回率/精确率报告。
+   - 在此之前无法回答“检测结论可不可信”，也无法度量 11.3 的两项数值目标。
+2. **golden fixture 与 Helper Python 单测**
+   - 固化 52 个操作的输出契约，以及时区、输出预算、deadline、遍历边界的行为。
+3. **真实 Linux VM 只读验收**
    - 完成五发行版、两架构和典型权限/依赖缺失组合。
    - 将每次结果回填 `SUPPORT_MATRIX.md`，不通过的路径形成明确兼容性 TODO。
-3. **Sprint 4A：LocalExecutor 与统一 Transport 基础**。
-4. **Sprint 4B：一次性 Collector 与离线导入**。
-5. **Sprint 4C：Docker/containerd 调查**。
-6. **Sprint 5：可恢复处置扩展和动作后复扫**。
-7. 根据真实试用反馈，在 **Windows** 与 **Kubernetes 深入支持**之间选择下一条主线。
+4. **处置补强**：`disable_account` 的会话终止与密钥信任面处置、动作后定向复扫。
+5. **Sprint 5 可逆处置**：`restore_quarantined_file` / `restore_account_state` 优先于其余处置动作。
+6. **Sprint 4A：LocalExecutor 与统一 Transport 基础**。
+7. **Sprint 4B：一次性 Collector 与离线导入**。
+8. **Sprint 4C：Docker/containerd 调查**。
+9. 根据真实试用反馈，在 **Windows** 与 **Kubernetes 深入支持**之间选择下一条主线。
 
-Sprint 1～3 的代码门禁已经通过，因此现在可以开始少量授权 Linux 主机的只读试用；只有完成真实 VM 矩阵后，才能把对应发行版从“待实机验收”提升为“已验证”。完成 Sprint 5 后，才进入真实主机扩展处置试用阶段。
+当前短板是检测质量不可度量：语料全为惰性自造样本，规则在真实站点上的召回率与误报率未知。只读试用可以开始，但报告中的 `NO_FINDING` 暂不应被当作“已排查干净”。只有完成真实 VM 矩阵后，才能把对应发行版从“待实机验收”提升为“已验证”；完成 9.0 与 Sprint 5 后，才进入真实主机扩展处置试用阶段。
 
 ## 13. 上下文恢复提示
 
 后续新会话或上下文压缩后，优先读取本文件，并遵循：
 
 1. 不把“生产级”重新解释为企业平台治理，本阶段只关注实战检测、目标接入、兼容性和查杀闭环。
-2. Sprint 1～3、DBAPP 情报闭环和桌面端收口已经落地；当前下一项是 **五发行版真实 VM 只读验收、SSH 高级连接能力与 Sprint 4A LocalExecutor**。
-3. “host + port 自动解析指纹”是发现功能，绝不自动信任未知 Host Key。
-4. 在继续增加检测关键词前，先消除“工具成功但实际没有完整检查”的情况。
-5. 新 Transport、新检测工具和新处置动作必须继续保持结构化操作、目标绑定、不透明引用和逐动作审批。
+2. 未勾选项是唯一的待办来源。当前首项是真实语料与误报基线，不是新功能。
+3. 第 2 节的“已实现基线”指 Docker Lab 与本机门禁下成立；与 9.0、11.5 的未勾选项冲突时以后者为准。
+4. “host + port 自动解析指纹”是发现功能，绝不自动信任未知 Host Key。
+5. 在继续增加检测关键词前，先消除“工具成功但实际没有完整检查”的情况。Helper 输出超预算时会截断为 `partial`，报告必须如实呈现而不能当作已查完。
+6. 新 Transport、新检测工具和新处置动作必须继续保持结构化操作、目标绑定、不透明引用和逐动作审批。

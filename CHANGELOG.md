@@ -4,6 +4,24 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- 认证事件与时间线改为按目标主机时区解析 syslog 时间戳并推断年份，跨源事件按绝对时刻排序；此前非 UTC 主机的时间线整体偏移，跨年日志被丢弃。
+- WebShell YARA 规则与 Tomcat 探针由 `install-helper.sh` 下发到目标端并复核 SHA-256，规则路径改由配置提供；此前规则只存在于 Docker Lab，真实主机上 YARA 扫描必然失败。
+- 认证与执行事件新增 journald 采集，并覆盖 `auth.log`/`secure` 的轮转与 `.gz` 归档，多源并存时去重合并；此前 journald 主导的发行版返回空结果。
+- Helper 新增输出字节预算与墙钟 deadline：超预算截断并置 `PARTIAL`，到期返回已采集部分；目录遍历统一施加深度、访问数与文件系统边界限制，递归搜索拒绝 `/` 与伪文件系统根。
+- `list_process_connections` 合并为唯一强校验实现，工具装配增加名称唯一性不变量；此前默认全选五类检测会注册重名工具。
+- `quarantine_file` 改为两阶段回执，同一 `actionId` 幂等；`disable_account` 在控制端永久拒绝 `root` 与当前 SSH 执行账户。
+- 崩溃恢复在远端回执为 `STARTED`/`UNKNOWN` 时保留不确定性，不再无条件把任务归档为 `COMPLETED`。
+- Helper 的静默 `OSError` 跳过改为累积告警并置 `PARTIAL`，聚合类操作改为逐子采集器隔离降级。
+
+### Added
+
+- 控制端校验 Helper 协议版本与 envelope 结构，不兼容即拒绝任务。
+- 写操作与崩溃恢复不变量进入必跑 CI；新增 Lint 门禁与 core/renderer 双 typecheck 门禁。
+- `self-check-helper.sh` 逐项报告 YARA、journald、auditd、JDK Attach、`/proc` 可见性与 SELinux/AppArmor 的能力状态及降级影响。
+- `install-helper.sh` 校验 Python 3.8 下限并支持幂等升级，保留 Action Receipt。
+
 ### Planned
 
 - Ubuntu 24.04 ARM64 与 Rocky Linux 9 x86_64/SELinux 的授权真实 VM 验收。

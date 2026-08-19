@@ -1,0 +1,257 @@
+# HuntWarden 使用说明
+
+本文档收录 README 之外的操作细节：环境要求、模型供应商配置、TUI/GUI 启动、Docker Lab 与安全恢复语义。项目定位与架构见 [`README.md`](../README.md)。
+
+## 环境
+
+- Node.js `>=22.19.0`
+- npm
+- Java 17+（构建 Tomcat 探针）
+- Docker Compose（仅 Lab 集成测试需要）
+- 实时模型运行需要所选供应商的 API 凭据，或本机无认证推理服务
+
+目标 Linux 主机至少需要 Python 3 并安装本项目的 `huntwarden-helper`。YARA、auditd/journald、root 权限和 JDK Attach 缺失时会按能力返回 `PARTIAL/ERROR`；Docker Lab 会自动提供各场景所需依赖。
+
+## 安装与验证
+
+```bash
+npm ci
+npm run build
+npm test
+npm run probe:build
+docker compose -f labs/docker-compose.yml config --quiet
+```
+
+`npm test` 不需要 OpenAI Key，也不连接真实主机；测试使用 Pi Faux Provider 和 FakeExecutor。
+
+## 配置
+
+默认配置在 `config/default.yaml`。复制并通过环境变量选择自定义配置：
+
+```bash
+cp config/default.yaml config/local.yaml
+HUNTWARDEN_CONFIG=./config/local.yaml npm run dev
+```
+
+敏感值只通过环境或受权限保护的本地文件提供。不要把私钥、Token 或运行时 `data/` 提交到版本库。
+
+### 模型供应商
+
+模型配置分为两类：
+
+- `source: builtin`：使用 Pi 0.84 内置适配器，可选 OpenAI、Anthropic、Google Gemini、Azure OpenAI、DeepSeek、OpenRouter、Moonshot、Z.AI、Bedrock 等。
+- `source: custom`：连接企业网关、LiteLLM、Ollama、vLLM、LM Studio 或其他兼容端点。支持 `openai-responses`、`openai-completions` 和 `anthropic-messages` 三种协议。
+
+查看当前依赖版本实际包含的供应商和模型 ID：
+
+```bash
+npm run model:list
+npm run model:list -- anthropic
+```
+
+使用内置 Anthropic Provider 时，只需替换默认配置中的 `model` 段，并设置对应环境变量：
+
+```yaml
+model:
+  source: builtin
+  provider: anthropic
+  model: claude-sonnet-4-5
+  thinkingLevel: medium
+```
+
+```bash
+export ANTHROPIC_API_KEY='...'
+HUNTWARDEN_CONFIG=./config/local.yaml npm run model:check
+```
+
+自定义 OpenAI Chat Completions 兼容网关示例：
+
+```yaml
+model:
+  source: custom
+  provider: company-gateway
+  model: security-model
+  thinkingLevel: off
+  protocol: openai-completions
+  baseUrl: https://llm-gateway.example.com/v1
+  authentication:
+    type: api-key-env
+    apiKeyEnv: HUNTWARDEN_LLM_API_KEY
+  reasoning: false
+  contextWindow: 131072
+  maxTokens: 16384
+  compatibility:
+    supportsDeveloperRole: false
+    supportsReasoningEffort: false
+    supportsStrictMode: false
+```
+
+```bash
+export HUNTWARDEN_LLM_API_KEY='...'
+HUNTWARDEN_CONFIG=./config/local.yaml npm run model:check
+```
+
+本机 Ollama、vLLM 等可使用 `http://127.0.0.1`/`http://localhost` 与 `authentication.type: none`；远程端点强制 HTTPS 且必须认证。YAML 只保存环境变量名，禁止保存真实密钥。所选模型必须支持函数/工具调用，否则无法运行 Agent Tool Loop。`model:check` 只检查配置、模型目录和凭据解析，不发起网络请求或输出密钥。
+
+### DeepSeek 配置档
+
+项目提供可直接使用的 `config/deepseek.yaml`，默认选择 `deepseek-v4-flash` 与 `high` 推理等级。切换高能力版本时，将模型 ID 改为 `deepseek-v4-pro`；当前 Pi 0.84 模型目录对两款 V4 接受的推理等级为 `off | high | max`。
+
+```bash
+export DEEPSEEK_API_KEY='在 DeepSeek Platform 创建的密钥'
+
+# 静态检查，不请求 API
+HUNTWARDEN_CONFIG=./config/deepseek.yaml npm run model:check
+
+# 发起一次小型真实请求，验证认证、流式响应和 Tool Call
+HUNTWARDEN_CONFIG=./config/deepseek.yaml npm run model:smoke
+
+# 启动完整 Agent
+HUNTWARDEN_CONFIG=./config/deepseek.yaml npm run dev
+```
+
+`model:smoke` 仅要求模型调用本地虚拟 `connection_probe`，不连接 SSH 主机、不执行安全检测或写操作；但会产生少量 API Token 费用。
+
+### 安恒威胁情报
+
+HuntWarden 通过安恒威胁情报开放接口 `https://ti.dbappsecurity.com.cn/oapi/v1/` 对调查事实做外部富化。该功能默认关闭，可在 GUI“配置中心 → 安恒威胁情报”中启用并将 `nti-` 开头的 API Key 保存到 HuntWarden 自己的系统安全存储；它不会读取 Codex Skill 的 `.apikey` 文件。TUI/命令行也可以使用环境变量：
+
+```bash
+export DBAPP_TI_API_KEY='nti-...'
+```
+
+安全边界：
+
+- 模型不能提交任意 IP、域名或哈希；网络查询只接受当前任务产生的 `SOCK-*` 引用，额外 IOC 只能由分析师在新建任务时提供。
+- 私网、回环、链路本地、文档网段和其他保留地址始终在本地过滤，不会上送。
+- 相同 IOC 按 Profile 配置在内存中缓存；未命中缓存的每次批量请求消耗 1 次安恒威胁情报额度。
+- 情报命中会记录来源“安恒威胁情报 (DBAPP Threat Intelligence)”和 Evidence，但不能单独形成 `CONFIRMED` 结论。
+- GUI“测试情报 API”会查询 `example.com`，只有在用户二次确认后执行，并消耗 1 次额度；自动化测试全部使用假客户端，不访问真实接口。
+
+## 启动 TUI
+
+先设置所选供应商的 API Key（以下为默认 OpenAI 配置）：
+
+```bash
+export OPENAI_API_KEY='...'
+npm run dev
+```
+
+在 TUI 中按 `n` 新建任务。YAML 提供私钥与 `known_hosts` 路径；向导收集目标、端口、SSH 用户、主机 SHA-256 指纹、模式和调查请求。
+
+也可以从命令行直接创建并启动：
+
+```bash
+npm run dev -- \
+  --host 127.0.0.1 \
+  --port 2222 \
+  --user secagent \
+  --fingerprint 'SHA256:...' \
+  --mode SCAN \
+  --request '排查四类主机安全风险并形成报告' \
+  --auto-start
+```
+
+恢复已有任务：
+
+```bash
+npm run dev -- --resume TASK-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+```
+
+主要按键：
+
+- `n`：新建任务
+- `a`：开始当前任务
+- `i`：提交 Steering 输入
+- `y` / `n`：批准或拒绝当前一次性写操作
+- `r`：恢复中断任务
+- `g`：生成报告
+- `Tab`：切换任务、事件、发现和证据视图
+- `q`：退出
+
+## 启动桌面 GUI
+
+开发模式（Vite 热更新 + Electron）：
+
+```bash
+npm run dev:gui
+```
+
+生产构建后直接启动：
+
+```bash
+npm run start:gui
+```
+
+生成本机 `.app` 应用包；生成 zip/dmg 安装介质使用第二条命令：
+
+```bash
+npm run package:gui
+npm run make:gui
+```
+
+首次启动会在系统应用数据目录创建两个配置 Profile，并默认启用 DeepSeek。打开“配置中心”，输入 DeepSeek API Key 后可选择：
+
+- “系统安全存储持久化”：通过 Electron `safeStorage` 使用 macOS Keychain 加密保存；GUI 不提供读取明文的能力。
+- 取消持久化：密钥仅保存在当前桌面进程内存中，退出即丢失。
+
+保存后先执行“静态检查”，再执行“真实 Tool Call 冒烟”。冒烟请求只调用本地虚拟探针，不连接 SSH 或执行处置，但会产生少量模型费用。
+
+GUI 的活动 Profile、任务事件数据库、Evidence 和报告均位于 Electron `userData` 下；目录和文件分别限制为 `0700`、`0600`。SSH 私钥只保存绝对路径，不复制密钥内容。首次从旧版 SecHostAgent 启动 HuntWarden 时，应用会非破坏性复制旧配置与运行数据并保留原目录；由于 Electron `safeStorage` 密文绑定应用身份，API Key 不会跨品牌复制，需在 HuntWarden 中重新录入。已被早期迁移版本复制的旧密文会在重新保存同一 Provider 的 Key 时以 `0600` 权限备份并安全替换；`SECHOST_CONFIG` 仅作为旧脚本兼容变量继续读取。
+
+## Docker Lab
+
+启动脚本会临时生成登录 Key、容器 Host Key 和 `known_hosts`，构建 Java 探针并启动五套环境：
+
+```bash
+npm run lab:up
+npm run test:docker
+```
+
+`npm run test:docker` 会先自动重置 Lab，再执行包含真实文件隔离和账户禁用的测试；若只想针对已经运行且状态已知的容器执行测试，可使用 `npm run test:docker:running`。
+
+处置闭环的 Electron GUI 自动化会为每个用例重置 Lab，使用仅在测试环境启用的 Pi Faux 脚本模型，并真实点击拒绝、二次确认和审计回执界面：
+
+```bash
+npm run test:gui:remediation
+npm run test:gui:investigation
+npm run test:gui:recovery
+```
+
+写操作测试会改变容器内的文件或账户状态。重新执行处置场景前，用以下命令删除并重建五个 Lab 容器；本地测试身份 Key 会保留，`known_hosts` 会按当前容器重新生成：
+
+```bash
+npm run lab:reset
+```
+
+| 场景 | SSH | 应用 | 内容 |
+| --- | --- | --- | --- |
+| Lab-Web | `127.0.0.1:2222` | `http://127.0.0.1:8080` | 正常脚本、无害 WebShell 标记样本、关键词误报样本 |
+| Lab-Tomcat | `127.0.0.1:2223` | `http://127.0.0.1:8081/lab/` | Tomcat 9/JDK 17、无害动态 Filter、磁盘类删除后的 Dump 场景 |
+| Lab-Account | `127.0.0.1:2224` | — | 正常执行账户、测试 UID 0 账户、未知 SSH Key 指纹 |
+| Lab-Persistence | `127.0.0.1:2225` | — | 正常项、无害 Cron/systemd/SSH/Shell 持久化模拟及回环监听进程 |
+| Lab-Linux-IR | `127.0.0.1:2226` | — | 删除后运行、临时目录进程、本地模拟 C2、ld.so.preload、软件包变更与认证时间线 |
+
+停止环境：
+
+```bash
+npm run lab:down
+```
+
+Lab 只允许在隔离开发环境使用。账户禁用与隔离测试会真实改变对应容器状态。
+
+## 安全与恢复语义
+
+- Agent 工具参数没有 host、任意路径、任意 PID 或命令字符串；后续调查使用任务内不透明引用。
+- 外部威胁情报工具同样受任务引用边界约束；不向模型返回 API Key，也不把私网地址发送给情报服务。
+- `SCAN` 模式在工具执行前硬阻断全部写操作。
+- `REMEDIATE` 模式仍要求绑定 `taskId + targetFingerprint + tool + argsDigest + actionId` 的一次性票据。
+- 文件隔离要求已有 Evidence，且远端当前哈希与审批时一致；仅同文件系统原子移动并设置 `000`。
+- 账户禁用永久拒绝 `root` 和当前 SSH 执行用户，保存前态并验证锁定/过期结果。
+- SAFE 工具按原 `toolCallId` 幂等恢复；NEVER 工具先查远端 `actionId` 回执。状态未知时必须重新审批，绝不自动重放。
+- 启动时遗留活动任务会转为 `ABORTED + recoveryRequired`；GUI 仅在分析师点击后恢复。报告以 `v1/v2/...` 不可变保存，旧版单文件报告懒迁移为 LEGACY。
+- 已结束任务可归档并恢复到当前列表；归档只改变列表可见性，Finding、Evidence、报告和审计记录不会被删除，活动或待恢复任务禁止归档。
+- 流式半成品只存在于当前进程与界面内存，完整 Assistant 消息仅在 `message_end` 后写入 SQLite；Thinking 和未完成的 Tool Call 参数不会发送到 GUI/TUI。
+- 模型只接收脱敏且最多 64 KiB 的文本；原始 Evidence、二进制和 Class Dump 不上传。
+- 数据目录为 `0700`，数据库、Evidence 和报告为 `0600`。首期不提供应用层加密或自动过期删除。
+
