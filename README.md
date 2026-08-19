@@ -134,6 +134,8 @@ npm run test:docker
 | [`docs/TODO_PLAN_REAL_WORLD.md`](docs/TODO_PLAN_REAL_WORLD.md) | 长期功能路线 |
 | [`docs/V0_1_0_RELEASE_PLAN.md`](docs/V0_1_0_RELEASE_PLAN.md) | `v0.1.0` 退出条件与发布门禁 |
 | [`docs/adr/`](docs/adr/) | 架构决策记录 |
+| [`docs/acceptance/`](docs/acceptance/) | 真实 VM 验收模板与已完成的验收记录 |
+| [`acceptance/vm/README.md`](acceptance/vm/README.md) | 授权临时 VM 的只读冒烟入口与无害夹具 |
 | [`host-helper/README.md`](host-helper/README.md) | 目标端 Helper 的依赖、安装、升级与自检 |
 | [`CHANGELOG.md`](CHANGELOG.md) | 版本变化 |
 

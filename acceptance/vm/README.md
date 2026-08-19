@@ -55,7 +55,7 @@ npm run test:acceptance:vm
 
 不要把上述环境值保存到仓库文件。文档网段地址仅用于示例，必须替换为你自己的测试 VM。
 
-冒烟通过后，继续在 GUI 中完成五类单项调查、联合调查、无害阳性样本、良性对照和手动报告，并把结果回填 [`docs/SUPPORT_MATRIX.md`](../../docs/SUPPORT_MATRIX.md)。
+冒烟通过后，复制 [`docs/acceptance/VM_ACCEPTANCE_TEMPLATE.md`](../../docs/acceptance/VM_ACCEPTANCE_TEMPLATE.md)，继续在 GUI 中完成五类单项调查、联合调查、无害阳性样本、良性对照和手动报告，并把结果回填 [`docs/SUPPORT_MATRIX.md`](../../docs/SUPPORT_MATRIX.md)。
 
 ## 无害阳性与良性对照
 
