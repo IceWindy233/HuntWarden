@@ -104,7 +104,7 @@ describe.skipIf(!enabled)("Docker Lab-Linux-IR 通用入侵分诊", () => {
 
     const auth = await remote.invoke({ operation: "query_auth_events", params: { sinceHours: 168, maxEvents: 500 } });
     expect(auth.items.some((item) => item.eventType === "authentication_success" && item.sourceIp === "192.0.2.45")).toBe(true);
-    expect(JSON.stringify(auth)).not.toMatch(/password\s*[:=]\s*[^\[]/i);
+    expect(JSON.stringify(auth)).not.toMatch(/password\s*[:=]\s*[^[]/i);
 
     const executions = await remote.invoke({ operation: "query_exec_events", params: { sinceHours: 168, maxEvents: 500 } });
     expect(executions).toMatchObject({ partial: true });

@@ -64,7 +64,10 @@ export const ConfigSchema = Type.Object({
     modifiedWithinHours: Type.Integer({ minimum: 1 }),
     maxCandidateFiles: Type.Integer({ minimum: 1, maximum: 5000 }),
     maxFileSizeBytes: Type.Integer({ minimum: 1024 }),
+    /** 控制端本地的 YARA 规则源目录：安装脚本从此目录取规则下发到目标端 remoteRulePath。 */
     yaraRuleDir: Type.String(),
+    /** 目标端规则文件的绝对路径，由 host-helper/install-helper.sh 下发；不做本地路径解析。 */
+    remoteRulePath: Type.String({ minLength: 1, maxLength: 4096 }),
   }),
   java: Type.Object({
     supportedContainers: Type.Array(Type.Literal("tomcat")),
@@ -76,13 +79,19 @@ export const ConfigSchema = Type.Object({
   persistence: Type.Object({
     maxItemsPerSource: Type.Integer({ minimum: 1, maximum: 5000 }),
     includeUserScope: Type.Boolean(),
-    maxConnections: Type.Integer({ minimum: 1, maximum: 5000 }),
   }),
+  /**
+   * 采集数量上限。与 helper 侧 1.5 MiB 输出预算（host-helper MAX_OUTPUT_BYTES）和控制端
+   * 2 MiB 协议硬顶（src/executor/ssh-executor.ts MAX_OUTPUT_BYTES）同一量级：按每条结构化记录
+   * 约 200–400 B 估算，1.5 MiB 约容纳 3900–7800 条，因此上限统一收敛到 5000。
+   * helper 超预算会截断 items 并置 partial，所以这里的上限不是"防止传输失败"，
+   * 而是让预算在任务创建时就显式化，避免用户长期拿到被静默截断的 partial 结果。
+   */
   triage: Type.Object({
-    maxProcesses: Type.Integer({ minimum: 1, maximum: 10_000 }),
-    maxConnections: Type.Integer({ minimum: 1, maximum: 20_000 }),
-    maxFiles: Type.Integer({ minimum: 1, maximum: 50_000 }),
-    maxTimelineEvents: Type.Integer({ minimum: 1, maximum: 50_000 }),
+    maxProcesses: Type.Integer({ minimum: 1, maximum: 5000 }),
+    maxConnections: Type.Integer({ minimum: 1, maximum: 5000 }),
+    maxFiles: Type.Integer({ minimum: 1, maximum: 5000 }),
+    maxTimelineEvents: Type.Integer({ minimum: 1, maximum: 5000 }),
     maxArtifactBytes: Type.Integer({ minimum: 1024, maximum: 104_857_600 }),
   }),
   threatIntel: Type.Object({

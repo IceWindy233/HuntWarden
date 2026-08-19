@@ -189,7 +189,12 @@ describe.skipIf(!enabled)("Docker Lab 真实 SSH Tool Chain", () => {
     } });
     const listener = processes.find((item) => String(item.command).includes("listener.py") && String(item.executable).includes("python"));
     expect(listener).toBeTruthy();
-    const connections = await remote.invoke({ operation: "list_process_connections", params: { pid: Number(listener!.pid), maxConnections: 500 } });
+    // persistence 来源的进程同样携带完整稳定身份（helper find_related_processes 走 stable_process），
+    // 共享的 list_process_connections 因此可以统一强制复核，不再接受裸 PID 查询。
+    const connections = await remote.invoke({ operation: "list_process_connections", params: {
+      bootId: String(listener!.bootId), pid: Number(listener!.pid), startTicks: String(listener!.startTicks),
+      exeInode: String(listener!.exeInode), exeSha256: String(listener!.exeSha256), maxConnections: 500,
+    } });
     expect(connections.items.some((item) => String(item.local).endsWith(":45555") && item.state === "LISTEN")).toBe(true);
 
     const artifact = await remote.invoke({ operation: "collect_persistence_artifact", params: {

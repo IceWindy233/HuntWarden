@@ -136,7 +136,7 @@ export function createWebShellTools(deps: ToolDependencies): SecurityToolDefinit
       risk: "READ", replayPolicy: "SAFE", timeoutMs: 90_000, auditEvent: "yara_scan_completed",
       run: async (_id, params, signal): Promise<SecurityToolResult> => {
         const candidates = params.candidateRefs.map((ref) => requireReference<FileCandidateValue>(deps.store, deps.task.taskId, ref, "candidate"));
-        const result = await deps.executor.invoke({ operation: "yara_scan_files", params: { paths: candidates.map((v) => v.value.path), rulePath: "/opt/huntwarden/rules/webshell.yar" } }, signal);
+        const result = await deps.executor.invoke({ operation: "yara_scan_files", params: { paths: candidates.map((v) => v.value.path), rulePath: deps.config.webshell.remoteRulePath } }, signal);
         return { status: "success", summary: { scanned: result.length, matched: result.filter((v) => Array.isArray(v.matches) && v.matches.length).length }, items: result, artifactRefs: params.candidateRefs, warnings: [] };
       },
     }),

@@ -8,6 +8,7 @@ import { EvidenceStore } from "../../src/evidence/evidence-store.js";
 import { FakeExecutor } from "../../src/executor/fake-executor.js";
 import { RuntimeStore } from "../../src/storage/runtime-store.js";
 import { createTriageTools } from "../../src/tools/triage/tools.js";
+import { createProcessConnectionTool } from "../../src/tools/shared/process-connections.js";
 import { testConfig, testTask } from "../helpers.js";
 
 const directories: string[] = [];
@@ -32,14 +33,16 @@ async function fixture(executor: FakeExecutor) {
   const store = await RuntimeStore.open(directory, "runtime.db");
   const task = testTask();
   store.createTask(task);
-  const tools = createTriageTools({
+  const deps = {
     task,
     config: testConfig(directory),
     store,
     executor,
     approvals: new ApprovalService(store),
     evidence: new EvidenceStore(directory, store),
-  });
+  };
+  // list_process_connections 已提取为唯一共享实现，与 index.ts 的装配方式保持一致。
+  const tools = [...createTriageTools(deps), createProcessConnectionTool(deps)];
   return { directory, store, task, tools };
 }
 
@@ -64,7 +67,7 @@ describe("Linux 入侵分诊工具", () => {
 
     expect(executor.calls[1]).toEqual({ operation: "inspect_process_fds", params: {
       bootId: stable.bootId, pid: stable.pid, startTicks: stable.startTicks,
-      exeInode: stable.exeInode, exeSha256: stable.exeSha256, maxItems: 5000,
+      exeInode: stable.exeInode, exeSha256: stable.exeSha256, maxItems: 2500,
     } });
     expect(executor.calls[2]).toEqual({ operation: "list_process_connections", params: {
       bootId: stable.bootId, pid: stable.pid, startTicks: stable.startTicks,
@@ -140,7 +143,7 @@ describe("Linux 入侵分诊工具", () => {
     await quickTools.find(({ name }) => name === "query_auth_events")!.execute("triage-quick-auth", {}, undefined);
     expect(executor.calls).toEqual(expect.arrayContaining([
       { operation: "capture_volatile_snapshot", params: { maxProcesses: 500, maxConnections: 1250 } },
-      { operation: "query_auth_events", params: { sinceHours: 24, maxEvents: 2500 } },
+      { operation: "query_auth_events", params: { sinceHours: 24, maxEvents: 1250 } },
     ]));
 
     task.profile = "DEEP";

@@ -5,6 +5,19 @@ import type { ToolDependencies } from "../dependencies.js";
 import { createReference, requireReference } from "../reference-utils.js";
 import { createSecurityTool } from "../tool-factory.js";
 import { attachConnectionReferences } from "../../threat-intel/network-ioc.js";
+import { scaleForProfile } from "../shared/process-connections.js";
+
+/**
+ * 超时预算约定。
+ *
+ * 每个工具的 `timeoutMs` 是控制端预算；`SshExecutor` 由它派生目标端墙钟 deadline
+ * （`deadlineMs = timeoutMs - 5000`），Helper 到期返回**已采集部分** + `partial` + 原因，
+ * 而不是抛错丢弃数据。因此预算不必覆盖病态主机的最坏耗时，但必须让典型主机跑完，
+ * 否则分诊会稳定退化成一份内容极少的 `PARTIAL`，看起来正常实则漏检。
+ *
+ * 调这些数值时同时看 Helper 侧对应操作的成本：跨多个固定根聚合、或串联多个子采集器的操作
+ * 成本是单次读取的一个数量级以上，不能沿用默认 45s/60s。
+ */
 
 interface ProcessValue extends StableProcessIdentity {
   exePath?: string;
@@ -50,8 +63,7 @@ function partialResult(
 export function createTriageTools(deps: ToolDependencies): SecurityToolDefinition[] {
   const common = [deps.store, deps.task.taskId, deps.config.llmData.maxTextBytes] as const;
   const profile = deps.task.profile ?? "STANDARD";
-  const profileFactor = profile === "QUICK" ? 0.25 : profile === "DEEP" ? 1 : 0.5;
-  const scaled = (value: number, maximum: number) => Math.max(1, Math.min(maximum, Math.ceil(value * profileFactor)));
+  const scaled = (value: number, maximum: number) => scaleForProfile(profile, value, maximum);
   const timeWindowHours = Math.max(1, Math.min(8760, deps.task.timeWindowHours ?? 168));
   const maxProcesses = scaled(deps.config.triage.maxProcesses, 10_000);
   const maxConnections = scaled(deps.config.triage.maxConnections, 20_000);
@@ -160,24 +172,6 @@ export function createTriageTools(deps: ToolDependencies): SecurityToolDefinitio
       },
     }),
     createSecurityTool(...common, {
-      name: "list_process_connections",
-      label: "检查进程网络连接",
-      description: "只接受当前任务 processRef；Helper 必须复核 bootId、PID、startTicks、可执行文件 inode/SHA-256 后才读取该进程 socket。",
-      parameters: Type.Object({ processRef: processRefSchema }, { additionalProperties: false }),
-      risk: "READ", replayPolicy: "SAFE", timeoutMs: 45_000, auditEvent: "triage_process_connections_listed",
-      run: async (toolCallId, params, signal): Promise<SecurityToolResult> => {
-        const target = requireReference<ProcessValue>(deps.store, deps.task.taskId, params.processRef, "process");
-        const output = await deps.executor.invoke({ operation: "list_process_connections", params: {
-          ...stableRequest(target.value), maxConnections,
-        } }, signal);
-        const connections = attachConnectionReferences(deps.store, deps.task.taskId, output.items as Record<string, unknown>[], params.processRef);
-        const evidence = structuredEvidence(toolCallId, "list_process_connections", "triage_process_connections", params.processRef,
-          { processRef: params.processRef, ...output, items: connections.items });
-        return partialResult(output, { processRef: params.processRef, evidenceId: evidence.evidenceId, threatIntelEligible: connections.refs.length }, connections.items,
-          [params.processRef, ...connections.refs, evidence.evidenceId]);
-      },
-    }),
-    createSecurityTool(...common, {
       name: "collect_process_executable",
       label: "采集进程可执行文件",
       description: "只接受当前任务 processRef；Helper 复核 boot/PID/startTicks/inode/SHA-256 后，将可执行文件放入短期 Artifact spool，并由 SFTP 分块写入本地 Evidence。",
@@ -205,7 +199,8 @@ export function createTriageTools(deps: ToolDependencies): SecurityToolDefinitio
       label: "枚举近期可执行文件",
       description: "仅扫描 Helper 固定 Linux 目录，限定 168 小时、500 结果、单文件 100 MiB，并返回当前任务 executableRef。",
       parameters: Type.Object({}, { additionalProperties: false }),
-      risk: "READ", replayPolicy: "SAFE", timeoutMs: 120_000, auditEvent: "recent_executables_listed",
+      // 遍历 11 个固定根并逐文件 SHA-256；见文件头的预算约定。
+      risk: "READ", replayPolicy: "SAFE", timeoutMs: 180_000, auditEvent: "recent_executables_listed",
       run: async (toolCallId, _params, signal): Promise<SecurityToolResult> => {
         const output = await deps.executor.invoke({ operation: "list_recent_executables", params: { modifiedWithinHours: timeWindowHours, maxItems: maxFiles, maxFileSizeBytes: deps.config.triage.maxArtifactBytes } }, signal);
         const refs = output.items.map((value) => createReference(deps.store, deps.task.taskId, "file", "candidate", value as ExecutableValue));
@@ -219,7 +214,8 @@ export function createTriageTools(deps: ToolDependencies): SecurityToolDefinitio
       label: "枚举特权文件",
       description: "仅扫描 Helper 固定目录中的 setuid/setgid/capability 文件，结果有界且返回当前任务 executableRef。",
       parameters: Type.Object({}, { additionalProperties: false }),
-      risk: "READ", replayPolicy: "SAFE", timeoutMs: 120_000, auditEvent: "privileged_files_listed",
+      // 11 个 TRIAGE_ROOTS 各跑一次 getcap，是分诊里最贵的单次操作；见文件头的预算约定。
+      risk: "READ", replayPolicy: "SAFE", timeoutMs: 180_000, auditEvent: "privileged_files_listed",
       run: async (toolCallId, _params, signal): Promise<SecurityToolResult> => {
         const output = await deps.executor.invoke({ operation: "list_privileged_files", params: { maxItems: maxFiles } }, signal);
         const refs = output.items.map((value) => createReference(deps.store, deps.task.taskId, "file", "candidate", value as ExecutableValue));
@@ -290,7 +286,8 @@ export function createTriageTools(deps: ToolDependencies): SecurityToolDefinitio
       label: "构建入侵时间线",
       description: "在目标端合并固定认证、执行与近期可执行文件事实并按时间排序；任一来源缺失会保留 PARTIAL 和原因。",
       parameters: Type.Object({}, { additionalProperties: false }),
-      risk: "COLLECT", replayPolicy: "SAFE", timeoutMs: 150_000, auditEvent: "incident_timeline_built", executionMode: "sequential",
+      // 串联认证、执行与近期可执行文件三个子采集器；见文件头的预算约定。
+      risk: "COLLECT", replayPolicy: "SAFE", timeoutMs: 240_000, auditEvent: "incident_timeline_built", executionMode: "sequential",
       run: async (toolCallId, _params, signal): Promise<SecurityToolResult> => {
         const output = await deps.executor.invoke({ operation: "build_incident_timeline", params: { sinceHours: timeWindowHours, maxEvents: maxTimelineEvents } }, signal);
         const evidence = structuredEvidence(toolCallId, "build_incident_timeline", "incident_timeline", "fixed Linux triage sources", output as unknown as Record<string, unknown>);

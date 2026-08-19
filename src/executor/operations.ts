@@ -1,3 +1,11 @@
+import { SecurityError } from "../common/errors.js";
+
+/**
+ * Helper 协议单一事实源。控制端只接受该版本的 Helper Envelope 与能力清单；
+ * 目标端 `host-helper/huntwarden_helper.py` 的 `PROTOCOL_VERSION` 必须与此一致。
+ */
+export const REQUIRED_HELPER_PROTOCOL_VERSION = 1;
+
 export interface HostCapabilities {
   protocolVersion: number;
   helper: { name: string; version: string };
@@ -16,6 +24,12 @@ export interface HostCapabilities {
       source: string;
     };
   };
+  /** 目标主机时区：IANA 名（如 Asia/Shanghai），取不到时为 ±HH:MM 偏移。 */
+  timezone: string;
+  /** 目标主机相对 UTC 的偏移秒数，东为正。 */
+  utcOffsetSeconds: number;
+  /** 目标主机采集时刻，统一为带 Z 的 UTC ISO8601，用于评估与控制端的时间偏差。 */
+  hostTimeUtc: string;
   operations: string[];
   artifactTransfer: { supported: boolean; protocolVersion: number; maxBytes: number };
   features: { yara: boolean; javaAttach: boolean; tomcatProbe: boolean };
@@ -41,6 +55,33 @@ export interface HostCapabilities {
   };
   partial: boolean;
   warnings: string[];
+}
+
+/**
+ * 协议兼容闸门。`protocolVersion` 与 `helper.version` 是 helper 唯一的自述身份，
+ * 不兼容时必须拒绝任务：字段漂移一旦被当作"目标缺能力"静默降级，PARTIAL 结论就不可信。
+ */
+export function assertCompatibleHelper(capabilities: HostCapabilities): void {
+  const actual: unknown = capabilities.protocolVersion;
+  if (typeof actual !== "number" || !Number.isInteger(actual)) {
+    throw new SecurityError("UNSUPPORTED_ENVIRONMENT",
+      `目标端 helper 未上报有效的协议版本（protocolVersion=${String(actual)}），期望 ${REQUIRED_HELPER_PROTOCOL_VERSION}。`
+      + "请升级目标端 helper（host-helper/install-helper.sh）后重新发起任务。",
+      { actualProtocolVersion: actual, expectedProtocolVersion: REQUIRED_HELPER_PROTOCOL_VERSION });
+  }
+  if (actual !== REQUIRED_HELPER_PROTOCOL_VERSION) {
+    throw new SecurityError("UNSUPPORTED_ENVIRONMENT",
+      `目标端 helper 协议版本不兼容：实际 ${actual}，期望 ${REQUIRED_HELPER_PROTOCOL_VERSION}。`
+      + "请升级目标端 helper（host-helper/install-helper.sh）后重新发起任务。",
+      { actualProtocolVersion: actual, expectedProtocolVersion: REQUIRED_HELPER_PROTOCOL_VERSION });
+  }
+  const version: unknown = capabilities.helper?.version;
+  if (typeof version !== "string" || version.trim() === "") {
+    throw new SecurityError("UNSUPPORTED_ENVIRONMENT",
+      `目标端 helper 未上报版本号（helper.version=${String(version)}），视为协议不兼容（期望协议版本 ${REQUIRED_HELPER_PROTOCOL_VERSION}）。`
+      + "请升级目标端 helper（host-helper/install-helper.sh）后重新发起任务。",
+      { actualHelperVersion: version, expectedProtocolVersion: REQUIRED_HELPER_PROTOCOL_VERSION });
+  }
 }
 
 export interface RemoteArtifact {
@@ -139,7 +180,8 @@ export interface HostOperationMap {
   inspect_persistence_item: { input: { kind: string; path: string; username?: string; expectedSha256?: string }; output: Record<string, unknown> };
   find_related_processes: { input: { kind: string; path: string; commandHint?: string; expectedSha256?: string; maxProcesses: number }; output: Record<string, unknown>[] };
   list_process_connections: {
-    input: { pid: number; maxConnections: number } & Partial<StableProcessRequest>;
+    /** 必须携带完整稳定身份：裸 PID 查询存在 PID 复用风险。 */
+    input: StableProcessRequest & { maxConnections: number };
     output: { items: Record<string, unknown>[]; partial: boolean; warnings: string[] };
   };
   collect_persistence_artifact: { input: { kind: string; path: string; expectedSha256: string; maxBytes: number }; output: CollectedArtifactOutput };

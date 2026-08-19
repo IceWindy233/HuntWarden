@@ -129,6 +129,56 @@ describe("任务检测包边界", () => {
     store.close();
   });
 
+  it("默认全选五类检测时工具名唯一，且进程连接工具是强校验的唯一实现", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "huntwarden-tool-uniqueness-"));
+    directories.push(directory);
+    const store = await RuntimeStore.open(directory, "runtime.db");
+    const task = testTask("SCAN");
+    // 与 GUI NewTaskDialog 及 application.ts 的默认值一致：这是最常用、也曾唯一出问题的组合。
+    task.checks = ["webshell", "java_memory_shell", "backdoor_account", "linux_persistence", "linux_intrusion_triage"];
+    store.createTask(task);
+    const tools = createSecurityTools({
+      task,
+      config: testConfig(directory),
+      store,
+      executor: new FakeExecutor(),
+      approvals: new ApprovalService(store),
+      evidence: new EvidenceStore(directory, store),
+    });
+    const names = tools.map((tool) => tool.name);
+
+    expect(new Set(names).size).toBe(names.length);
+    expect(names.filter((name) => name === "list_process_connections")).toHaveLength(1);
+    const connections = tools.find((tool) => tool.name === "list_process_connections")!;
+    // 强校验版本：Helper 复核完整稳定身份，超时按 45s 计。
+    expect(connections.timeoutMs).toBe(45_000);
+    expect(connections.description).toContain("startTicks");
+    store.close();
+  });
+
+  it("只选持久化时仍注册进程连接工具，名称不重复", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "huntwarden-persistence-only-scope-"));
+    directories.push(directory);
+    const store = await RuntimeStore.open(directory, "runtime.db");
+    const task = testTask("SCAN");
+    task.checks = ["linux_persistence"];
+    store.createTask(task);
+    const names = createSecurityTools({
+      task,
+      config: testConfig(directory),
+      store,
+      executor: new FakeExecutor(),
+      approvals: new ApprovalService(store),
+      evidence: new EvidenceStore(directory, store),
+    }).map((tool) => tool.name);
+
+    expect(names.filter((name) => name === "list_process_connections")).toHaveLength(1);
+    expect(new Set(names).size).toBe(names.length);
+    expect(names).toContain("list_cron_entries");
+    expect(names).not.toContain("list_suspicious_processes");
+    store.close();
+  });
+
   it("按账户配置关闭 SSH Key 与登录历史工具", async () => {
     const directory = await mkdtemp(join(tmpdir(), "huntwarden-account-config-scope-"));
     directories.push(directory);

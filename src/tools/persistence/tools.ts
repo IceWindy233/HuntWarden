@@ -4,7 +4,6 @@ import type { SecurityToolDefinition, SecurityToolResult } from "../../domain/ty
 import type { ToolDependencies } from "../dependencies.js";
 import { createReference, requireReference } from "../reference-utils.js";
 import { createSecurityTool } from "../tool-factory.js";
-import { attachConnectionReferences } from "../../threat-intel/network-ioc.js";
 
 interface PersistenceValue {
   kind: "cron" | "systemd" | "ssh" | "shell" | "extended";
@@ -20,7 +19,6 @@ interface PersistenceValue {
 interface ProcessValue { bootId?: string; pid: number; startTicks?: string; exeInode?: string; exeSha256?: string; command?: string; executable?: string; [key: string]: unknown }
 
 const persistenceRefSchema = Type.String({ pattern: "^PERSIST-" });
-const processRefSchema = Type.String({ pattern: "^PROC-" });
 
 export function createPersistenceTools(deps: ToolDependencies): SecurityToolDefinition[] {
   const common = [deps.store, deps.task.taskId, deps.config.llmData.maxTextBytes] as const;
@@ -98,28 +96,6 @@ export function createPersistenceTools(deps: ToolDependencies): SecurityToolDefi
         return { status: "success", summary: { count: refs.length, evidenceId: evidence.evidenceId },
           items: refs.map(({ ref, value }) => ({ processRef: ref, ...value })),
           artifactRefs: [...refs.map((value) => value.ref), evidence.evidenceId], warnings: [] };
-      },
-    }),
-    createSecurityTool(...common, {
-      name: "list_process_connections", label: "关联进程网络连接",
-      description: "只接受当前任务的 processRef，返回该进程的监听与连接事实，最多采用配置上限。",
-      parameters: Type.Object({ processRef: processRefSchema }, { additionalProperties: false }),
-      risk: "READ", replayPolicy: "SAFE", timeoutMs: 30_000, auditEvent: "process_connections_listed",
-      run: async (toolCallId, params, signal): Promise<SecurityToolResult> => {
-        const process = requireReference<ProcessValue>(deps.store, deps.task.taskId, params.processRef, "process");
-        const stable = process.value.bootId && process.value.startTicks && process.value.exeInode && process.value.exeSha256
-          ? { bootId: process.value.bootId, startTicks: process.value.startTicks, exeInode: process.value.exeInode, exeSha256: process.value.exeSha256 }
-          : {};
-        const output = await deps.executor.invoke({ operation: "list_process_connections", params: {
-          pid: process.value.pid, ...stable, maxConnections: deps.config.persistence.maxConnections,
-        } }, signal);
-        const warnings = Array.isArray(output.warnings) ? output.warnings : [];
-        const connections = attachConnectionReferences(deps.store, deps.task.taskId, output.items as Record<string, unknown>[], params.processRef);
-        const evidence = deps.evidence.putStructured({ taskId: deps.task.taskId, host: deps.task.target.host, type: "process_connections",
-          source: `PID:${process.value.pid}`, tool: "list_process_connections", toolCallId,
-          metadata: { processRef: params.processRef, connections: connections.items, partial: output.partial, warnings } });
-        return { status: output.partial ? "partial" : "success", summary: { count: connections.items.length, threatIntelEligible: connections.refs.length, evidenceId: evidence.evidenceId },
-          items: connections.items, artifactRefs: [params.processRef, ...connections.refs, evidence.evidenceId], warnings };
       },
     }),
     createSecurityTool(...common, {

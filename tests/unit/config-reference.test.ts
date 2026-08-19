@@ -40,8 +40,8 @@ describe("配置与不透明引用", () => {
     delete legacy.triage;
     delete legacy.threatIntel;
     const migrated = normalizeConfig(legacy, "/tmp/huntwarden-config-migration/profile.yaml");
-    expect(migrated.persistence).toEqual({ maxItemsPerSource: 500, includeUserScope: true, maxConnections: 500 });
-    expect(migrated.triage).toEqual({ maxProcesses: 2_000, maxConnections: 5_000, maxFiles: 10_000, maxTimelineEvents: 10_000, maxArtifactBytes: 10_485_760 });
+    expect(migrated.persistence).toEqual({ maxItemsPerSource: 500, includeUserScope: true });
+    expect(migrated.triage).toEqual({ maxProcesses: 2_000, maxConnections: 5_000, maxFiles: 5_000, maxTimelineEvents: 5_000, maxArtifactBytes: 10_485_760 });
     expect(migrated.threatIntel).toEqual({
       enabled: false, provider: "dbapp-ti", baseUrl: "https://ti.dbappsecurity.com.cn/oapi/v1/", apiKeyEnv: "DBAPP_TI_API_KEY",
       timeoutSeconds: 15, maxBatchSize: 100, cacheTtlSeconds: 3_600, autoEnrichConnections: true, includePrivateAddresses: false,

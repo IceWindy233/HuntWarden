@@ -9,6 +9,8 @@ import { createRemediationTools } from "./remediation/tools.js";
 import { createPersistenceTools } from "./persistence/tools.js";
 import { createTriageTools } from "./triage/tools.js";
 import { createThreatIntelTools } from "./threat-intel/tools.js";
+import { createProcessConnectionTool } from "./shared/process-connections.js";
+import { SecurityError } from "../common/errors.js";
 
 export function createSecurityTools(deps: ToolDependencies): SecurityToolDefinition[] {
   const tools: SecurityToolDefinition[] = [...createHostTools(deps)];
@@ -19,7 +21,10 @@ export function createSecurityTools(deps: ToolDependencies): SecurityToolDefinit
   if (selected.has("backdoor_account")) tools.push(...createAccountTools(deps));
   if (selected.has("linux_persistence")) tools.push(...createPersistenceTools(deps));
   if (selected.has("linux_intrusion_triage")) tools.push(...createTriageTools(deps));
-  if (selected.has("linux_intrusion_triage") || selected.has("linux_persistence")) tools.push(...createThreatIntelTools(deps));
+  if (selected.has("linux_intrusion_triage") || selected.has("linux_persistence")) {
+    tools.push(createProcessConnectionTool(deps));
+    tools.push(...createThreatIntelTools(deps));
+  }
 
   tools.push(createRecordFindingTool(deps));
 
@@ -30,5 +35,29 @@ export function createSecurityTools(deps: ToolDependencies): SecurityToolDefinit
     tools.push(...createRemediationTools(deps).filter((tool) => allowedWriteTools.has(tool.name)));
   }
 
+  assertUniqueToolNames(tools);
   return tools;
+}
+
+/**
+ * 工具名唯一性不变量。
+ *
+ * 模型侧的函数名是工具的唯一标识：重名会让 `tools.find(name === )`（确定性执行图与写门控都依赖它）
+ * 静默命中先注册的那个实现，同时供应商侧对重复 function name 直接拒绝请求。
+ * 因此重名必须在装配期失败，而不是等到第一次模型调用。
+ */
+function assertUniqueToolNames(tools: readonly SecurityToolDefinition[]): void {
+  const seen = new Set<string>();
+  const duplicates = new Set<string>();
+  for (const tool of tools) {
+    if (seen.has(tool.name)) duplicates.add(tool.name);
+    seen.add(tool.name);
+  }
+  if (duplicates.size > 0) {
+    throw new SecurityError("INVALID_ARGUMENT", `工具装配产生重名工具：${[...duplicates].join("、")}`, {
+      duplicates: [...duplicates],
+      total: tools.length,
+      unique: seen.size,
+    });
+  }
 }

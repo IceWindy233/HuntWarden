@@ -11,11 +11,14 @@ export function testConfig(baseDir: string): AppConfig {
     },
     storage: { baseDir, databaseFile: "runtime.db" },
     llmData: { maxTextBytes: 65_536 },
-    webshell: { modifiedWithinHours: 168, maxCandidateFiles: 500, maxFileSizeBytes: 10 * 1024 * 1024, yaraRuleDir: `${baseDir}/rules` },
+    webshell: {
+      modifiedWithinHours: 168, maxCandidateFiles: 500, maxFileSizeBytes: 10 * 1024 * 1024,
+      yaraRuleDir: `${baseDir}/rules`, remoteRulePath: "/opt/huntwarden/rules/webshell.yar",
+    },
     java: { supportedContainers: ["tomcat"], allowClassDump: true, allowRuntimeModification: false, probeJar: `${baseDir}/probe.jar` },
     account: { checkAuthorizedKeys: true, checkLoginHistory: true },
-    persistence: { maxItemsPerSource: 500, includeUserScope: true, maxConnections: 500 },
-    triage: { maxProcesses: 2_000, maxConnections: 5_000, maxFiles: 10_000, maxTimelineEvents: 10_000, maxArtifactBytes: 10 * 1024 * 1024 },
+    persistence: { maxItemsPerSource: 500, includeUserScope: true },
+    triage: { maxProcesses: 2_000, maxConnections: 5_000, maxFiles: 5_000, maxTimelineEvents: 5_000, maxArtifactBytes: 10 * 1024 * 1024 },
     threatIntel: {
       enabled: false, provider: "dbapp-ti", baseUrl: "https://ti.dbappsecurity.com.cn/oapi/v1/",
       apiKeyEnv: "DBAPP_TI_API_KEY", timeoutSeconds: 15, maxBatchSize: 100, cacheTtlSeconds: 3_600,

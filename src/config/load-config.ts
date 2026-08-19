@@ -10,20 +10,46 @@ function resolveConfigPath(configDir: string, value: string): string {
 
 export interface ConfigIssue { path: string; message: string }
 
+/** 目标端 YARA 规则的出厂路径，由 host-helper/install-helper.sh 下发。 */
+const DEFAULT_REMOTE_RULE_PATH = "/opt/huntwarden/rules/webshell.yar";
+/** 与 ConfigSchema 的 triage 上限一致：旧 Profile 超限时收敛而不是拒绝加载。 */
+const TRIAGE_CEILINGS: Record<string, number> = {
+  maxProcesses: 5_000, maxConnections: 5_000, maxFiles: 5_000, maxTimelineEvents: 5_000,
+};
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
 function withIncrementalDefaults(input: unknown): unknown {
   if (!input || typeof input !== "object" || Array.isArray(input)) return input;
   const migrated = structuredClone(input) as Record<string, unknown>;
+  if (isRecord(migrated.webshell) && migrated.webshell.remoteRulePath === undefined) {
+    migrated.webshell.remoteRulePath = DEFAULT_REMOTE_RULE_PATH;
+  }
   if (migrated.persistence === undefined) {
-    migrated.persistence = { maxItemsPerSource: 500, includeUserScope: true, maxConnections: 500 };
+    migrated.persistence = { maxItemsPerSource: 500, includeUserScope: true };
+  }
+  if (isRecord(migrated.persistence)) {
+    // persistence.maxConnections 已退役：进程连接预算统一由 triage.maxConnections 与 Profile 系数提供。
+    migrated.persistence = Object.fromEntries(
+      Object.entries(migrated.persistence).filter(([key]) => key !== "maxConnections"),
+    );
   }
   if (migrated.triage === undefined) {
     migrated.triage = {
       maxProcesses: 2_000,
       maxConnections: 5_000,
-      maxFiles: 10_000,
-      maxTimelineEvents: 10_000,
+      maxFiles: 5_000,
+      maxTimelineEvents: 5_000,
       maxArtifactBytes: 10_485_760,
     };
+  }
+  if (isRecord(migrated.triage)) {
+    for (const [key, ceiling] of Object.entries(TRIAGE_CEILINGS)) {
+      const value = migrated.triage[key];
+      if (typeof value === "number" && value > ceiling) migrated.triage[key] = ceiling;
+    }
   }
   if (migrated.threatIntel === undefined) {
     migrated.threatIntel = {
@@ -66,17 +92,27 @@ function validateCustomModelEndpoint(config: AppConfig): void {
   config.model.baseUrl = endpoint.href.replace(/\/$/, "");
 }
 
+/** remoteRulePath 描述目标主机文件系统，绝不能参与控制端本地路径解析。 */
+function validateRemoteRulePath(config: AppConfig): void {
+  const value = config.webshell.remoteRulePath;
+  if (!value.startsWith("/") || value.includes("..") || value.includes("\0")) {
+    throw new Error("配置校验失败:\nwebshell.remoteRulePath 必须是目标端绝对路径，且不得包含 .. 或空字符");
+  }
+}
+
 export function normalizeConfig(input: unknown, sourcePath: string): AppConfig {
   const migrated = withIncrementalDefaults(input);
   const issues = getConfigIssues(migrated);
   if (issues.length > 0) throw new Error(`配置校验失败:\n${issues.map((issue) => `${issue.path}: ${issue.message}`).join("\n")}`);
   const config = structuredClone(migrated) as AppConfig;
   validateCustomModelEndpoint(config);
+  validateRemoteRulePath(config);
   const configDir = dirname(resolve(sourcePath));
   config.storage.baseDir = resolveConfigPath(configDir, config.storage.baseDir);
   config.executor.knownHostsPath = resolveConfigPath(configDir, config.executor.knownHostsPath);
   config.executor.privateKeyPath = resolveConfigPath(configDir, config.executor.privateKeyPath);
   config.webshell.yaraRuleDir = resolveConfigPath(configDir, config.webshell.yaraRuleDir);
+  // webshell.remoteRulePath 是目标端路径，此处刻意不做 resolveConfigPath。
   config.java.probeJar = resolveConfigPath(configDir, config.java.probeJar);
   return config;
 }

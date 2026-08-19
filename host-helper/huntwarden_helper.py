@@ -11,6 +11,7 @@ import base64
 import binascii
 import datetime as dt
 import glob
+import gzip
 import hashlib
 import json
 import os
@@ -26,17 +27,19 @@ import stat
 import subprocess
 import sys
 import tempfile
-from typing import Any, Callable
+import time
+import zlib
+from typing import Any, Callable, Iterator
 
 MAX_INPUT = 1024 * 1024
-MAX_TEXT = 2 * 1024 * 1024
+MAX_OUTPUT_BYTES = 1_572_864  # 1.5 MiB; leaves envelope headroom under the controller's 2 MiB transport cap
 RECEIPT_DIR = pathlib.Path("/var/lib/huntwarden/actions")
 ARTIFACT_DIR = pathlib.Path("/var/lib/huntwarden/artifacts") if os.geteuid() == 0 else pathlib.Path(tempfile.gettempdir()) / "huntwarden-artifacts"
 ARTIFACT_TOKEN = re.compile(r"^[a-f0-9]{64}$")
 ARTIFACT_MAX_BYTES = 100 * 1024 * 1024
 ARTIFACT_TTL_SECONDS = 15 * 60
 LOG_SCAN_MAX_BYTES = 64 * 1024 * 1024
-HELPER_VERSION = "0.3.1"
+HELPER_VERSION = "0.4.0"
 PROBE_JAR = pathlib.Path("/opt/huntwarden/huntwarden-tomcat-probe.jar")
 SCRIPT_EXTENSIONS = {
     ".php", ".phtml", ".php5", ".phar", ".inc", ".jsp", ".jspx", ".asp", ".aspx",
@@ -61,6 +64,34 @@ TRIAGE_ROOTS = tuple(pathlib.Path(value) for value in (
     "/opt", "/tmp", "/var/tmp", "/dev/shm", "/home",
 ))
 TRIAGE_SCAN_LIMIT = 50000
+DEADLINE_MIN_MS = 1000
+DEADLINE_MAX_MS = 600000
+DEADLINE_WARNING = "达到时间预算，结果不完整"
+TRANSPORT_KEYS = frozenset({"deadlineMs"})
+WALK_MAX_DEPTH = 12
+WALK_VISIT_LIMIT = 200000
+CLASS_SEARCH_MAX_DEPTH = 8
+CLASS_SEARCH_VISIT_LIMIT = 20000
+PSEUDO_FILESYSTEM_ROOTS = frozenset({"/proc", "/sys", "/dev", "/run"})
+PROCESS_CGROUP_MAX_ENTRIES = 32
+PROCESS_CGROUP_MAX_BYTES = 512
+PROCESS_ENV_NAME_LIMIT = 128
+SKIP_UNREADABLE = "路径因权限或 I/O 错误被跳过"
+SKIP_DEPTH = "目录因超过遍历深度上限被跳过"
+SKIP_BOUNDARY = "目录因跨越文件系统边界被跳过"
+SKIP_SYMLINK = "符号链接目录被跳过"
+SKIP_LOG_RECORD = "日志行因无法解析时间被跳过"
+JOURNAL_MAX_RECORDS = 5000
+JOURNAL_AUTH_FACILITIES = ("SYSLOG_FACILITY=4", "SYSLOG_FACILITY=10")
+JOURNAL_AUTH_COMMANDS = ("sshd", "sudo", "su", "login", "systemd-logind", "polkitd")
+AUTH_LOG_PATTERNS = ("/var/log/auth.log", "/var/log/auth.log.*", "/var/log/secure", "/var/log/secure-*", "/var/log/secure.*")
+AUDIT_LOG_PATTERNS = ("/var/log/audit/audit.log", "/var/log/audit/audit.log.*")
+LOG_FILE_LIMIT = 20
+SYSLOG_PRIORITY = re.compile(r"^<\d{1,3}>(?:\d\s+)?")
+SYSLOG_TRADITIONAL = re.compile(r"^([A-Z][a-z]{2}\s+\d{1,2}\s+\d{1,2}:\d{2}:\d{2})(?=\s|$)")
+SYSLOG_ISO = re.compile(r"^(\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:[.,]\d{1,9})?(?:[Zz]|[+-]\d{2}:?\d{2})?)(?=\s|$)")
+SYSLOG_HEADER = re.compile(r"^\S+\s+(?P<program>[A-Za-z0-9_.\-/]{1,64})(?:\[(?P<pid>\d{1,10})\])?:\s*(?P<message>.*)$")
+AUDIT_EPOCH = re.compile(r"msg=audit\((\d+(?:\.\d+)?):")
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
 SECRET_PATTERNS = (
     re.compile(r"(?i)\b(password|passwd|pwd|token|secret|cookie|authorization|api[_-]?key)\s*[:=]\s*([^\s;,]+)"),
@@ -76,8 +107,36 @@ class HelperError(Exception):
 
 
 def emit(payload: dict[str, Any]) -> None:
-    sys.stdout.write(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
+    text, size = serialized_output(payload)
+    sys.stdout.write(text if size <= MAX_OUTPUT_BYTES else budgeted_output(payload))
     sys.stdout.flush()
+
+
+def serialized_output(payload: dict[str, Any]) -> tuple[str, int]:
+    text = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+    return text, len(text.encode("utf-8"))
+
+
+def budgeted_output(payload: dict[str, Any]) -> str:
+    """Shrink the item list until the envelope fits the transport budget instead of losing it whole."""
+    result = payload.get("result")
+    items = result.get("items") if isinstance(result, dict) else None
+    if not isinstance(result, dict) or not isinstance(items, list) or not items:
+        raise HelperError("EVIDENCE_COLLECTION", f"结构化输出超过 {MAX_OUTPUT_BYTES} 字节传输预算，且没有可截断的 items 列表")
+    existing = result.get("warnings")
+    base = [str(value) for value in existing[:200]] if isinstance(existing, list) else []
+    original = len(items)
+    _, size = serialized_output(payload)
+    kept = max(1, int(original * MAX_OUTPUT_BYTES / size * 0.9))
+    while kept >= 1:
+        candidate = dict(payload)
+        candidate["result"] = {**result, "items": items[:kept], "partial": True,
+                               "warnings": [*base, f"输出达到 1.5 MiB 传输预算，已截断 {original - kept} 条结果"]}
+        text, size = serialized_output(candidate)
+        if size <= MAX_OUTPUT_BYTES:
+            return text
+        kept = kept - 1 if kept <= 8 else int(kept * 0.8)
+    raise HelperError("EVIDENCE_COLLECTION", f"单条结果已超过 {MAX_OUTPUT_BYTES} 字节传输预算")
 
 
 def read_request() -> dict[str, Any]:
@@ -112,9 +171,173 @@ def safe_int(value: Any, minimum: int, maximum: int, name: str) -> int:
     return value
 
 
+_DEADLINE: float | None = None
+_HOST_TIMEZONE: tuple[str, int] | None = None
+
+
+def install_deadline(request: dict[str, Any]) -> None:
+    """Establish the single wall-clock budget for this invocation from the request envelope."""
+    global _DEADLINE
+    value = request.get("deadlineMs")
+    _DEADLINE = None if value is None else time.monotonic() + safe_int(value, DEADLINE_MIN_MS, DEADLINE_MAX_MS, "deadlineMs") / 1000.0
+
+
+def deadline_exceeded() -> bool:
+    return _DEADLINE is not None and time.monotonic() >= _DEADLINE
+
+
+def remaining_timeout(default: int) -> int:
+    """Clamp a subprocess timeout so no external command outlives the operation budget."""
+    if _DEADLINE is None:
+        return default
+    return max(1, min(default, int(_DEADLINE - time.monotonic())))
+
+
+def now_utc() -> dt.datetime:
+    return dt.datetime.now(dt.timezone.utc)
+
+
+def utc_iso(value: dt.datetime | float) -> str:
+    """Render an absolute instant as UTC ISO8601 with a trailing Z so every source stays comparable."""
+    moment = value if isinstance(value, dt.datetime) else dt.datetime.fromtimestamp(value, dt.timezone.utc)
+    return moment.astimezone(dt.timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def host_timezone() -> tuple[str, int]:
+    """Resolve the target host's zone name and current UTC offset once per invocation."""
+    global _HOST_TIMEZONE
+    if _HOST_TIMEZONE is not None:
+        return _HOST_TIMEZONE
+    offset = int((dt.datetime.now().astimezone().utcoffset() or dt.timedelta(0)).total_seconds())
+    name = ""
+    configured = os.environ.get("TZ", "").strip().lstrip(":")
+    if "/" in configured and re.fullmatch(r"[A-Za-z][A-Za-z0-9_+-]*(?:/[A-Za-z0-9_+-]+){1,3}", configured):
+        name = configured
+    if not name:
+        try:
+            link = os.readlink("/etc/localtime")
+            name = link.split("/zoneinfo/", 1)[1] if "/zoneinfo/" in link else ""
+        except OSError:
+            # Fixed zone sources are tried in order; the ±HH:MM fallback below always yields a name.
+            name = ""
+    if not name:
+        try:
+            value = pathlib.Path("/etc/timezone").read_text("utf-8", errors="replace").strip()
+            name = value if "/" in value else ""
+        except OSError:
+            # Same ordered fallback as above.
+            name = ""
+    if not name:
+        name = f"{'+' if offset >= 0 else '-'}{abs(offset) // 3600:02d}:{abs(offset) % 3600 // 60:02d}"
+    _HOST_TIMEZONE = (name[:64], offset)
+    return _HOST_TIMEZONE
+
+
+def local_naive_to_utc(value: dt.datetime) -> dt.datetime | None:
+    """Interpret a zone-less host log timestamp in the host's own zone, honouring DST history."""
+    try:
+        return dt.datetime.fromtimestamp(time.mktime(value.timetuple()), dt.timezone.utc)
+    except (OverflowError, ValueError, OSError):
+        return None
+
+
+class SkipLedger:
+    """Aggregate skipped-path counts and one-off notes so degraded coverage is never silent."""
+
+    __slots__ = ("counts", "notes", "expired")
+
+    def __init__(self) -> None:
+        self.counts: dict[str, int] = {}
+        self.notes: list[str] = []
+        self.expired = False
+
+    def add(self, reason: str, count: int = 1) -> None:
+        self.counts[reason] = self.counts.get(reason, 0) + count
+
+    def note(self, message: str) -> None:
+        if message not in self.notes:
+            self.notes.append(message)
+
+    def expire(self) -> None:
+        self.expired = True
+
+    @property
+    def partial(self) -> bool:
+        return bool(self.counts) or bool(self.notes) or self.expired
+
+    def warnings(self) -> list[str]:
+        values = [f"{count} 个{reason}" for reason, count in sorted(self.counts.items())]
+        values.extend(self.notes)
+        if self.expired:
+            values.append(DEADLINE_WARNING)
+        return values
+
+
+def path_kind(path: pathlib.Path, ledger: SkipLedger, *, follow: bool = False) -> str:
+    """Classify a path without letting one unreadable entry abort the whole operation.
+
+    pathlib's is_file/is_dir raise PermissionError instead of swallowing it, so a single 0700 home
+    directory used to destroy an entire collection. Every failure is recorded as a skip instead.
+    """
+    try:
+        info = path.stat() if follow else path.lstat()
+    except OSError:
+        ledger.add(SKIP_UNREADABLE)
+        return "unavailable"
+    if stat.S_ISLNK(info.st_mode):
+        return "symlink"
+    if stat.S_ISDIR(info.st_mode):
+        return "directory"
+    return "file" if stat.S_ISREG(info.st_mode) else "other"
+
+
+def bounded_walk(root: pathlib.Path, ledger: SkipLedger, *, max_depth: int = WALK_MAX_DEPTH,
+                 visit_limit: int = WALK_VISIT_LIMIT) -> Iterator[tuple[pathlib.Path, list[str]]]:
+    """Walk a single filesystem under fixed depth, visit and deadline bounds, pruning links and pseudo roots."""
+    try:
+        root_info = root.stat()
+    except OSError:
+        ledger.add(SKIP_UNREADABLE)
+        return
+    if not stat.S_ISDIR(root_info.st_mode):
+        return
+    base = len(root.parts)
+    visited = 0
+    for directory, directories, files in os.walk(root, followlinks=False, onerror=lambda _error: ledger.add(SKIP_UNREADABLE)):
+        if deadline_exceeded():
+            ledger.expire()
+            return
+        current = pathlib.Path(directory)
+        depth = len(current.parts) - base
+        keep: list[str] = []
+        for name in directories:
+            if depth + 1 > max_depth:
+                ledger.add(SKIP_DEPTH)
+                continue
+            child = current / name
+            try:
+                info = child.lstat()
+            except OSError:
+                ledger.add(SKIP_UNREADABLE)
+                continue
+            if stat.S_ISLNK(info.st_mode):
+                ledger.add(SKIP_SYMLINK)
+            elif info.st_dev != root_info.st_dev or str(child) in PSEUDO_FILESYSTEM_ROOTS:
+                ledger.add(SKIP_BOUNDARY)
+            else:
+                keep.append(name)
+        directories[:] = keep
+        if visited + len(files) > visit_limit:
+            ledger.note(f"目录遍历达到 {visit_limit} 项上限，结果不完整")
+            yield current, files[:max(0, visit_limit - visited)]
+            return
+        visited += len(files)
+        yield current, files
+
+
 def run(argv: list[str], timeout: int = 25, check: bool = True) -> subprocess.CompletedProcess[str]:
     try:
-        result = subprocess.run(argv, text=True, capture_output=True, timeout=timeout, check=False)
+        result = subprocess.run(argv, text=True, capture_output=True, timeout=remaining_timeout(timeout), check=False)
     except subprocess.TimeoutExpired as exc:
         raise HelperError("TOOL_TIMEOUT", f"operation timed out: {argv[0]}") from exc
     if check and result.returncode != 0:
@@ -144,12 +367,14 @@ def prepare_artifact_dir() -> None:
     if not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode):
         raise HelperError("EVIDENCE_COLLECTION", "artifact spool is not a real directory")
     os.chmod(ARTIFACT_DIR, 0o711)
-    cutoff = dt.datetime.now(dt.timezone.utc).timestamp() - ARTIFACT_TTL_SECONDS
+    cutoff = now_utc().timestamp() - ARTIFACT_TTL_SECONDS
     for candidate in ARTIFACT_DIR.glob("*.artifact"):
         try:
             if candidate.stat().st_mtime < cutoff:
                 candidate.unlink()
         except OSError:
+            # Best-effort spool hygiene only: a stale artifact stays until the next TTL sweep and never
+            # affects the current operation's result, so it needs no warning channel.
             continue
 
 
@@ -184,12 +409,12 @@ def stage_artifact(source: pathlib.Path, maximum: int) -> dict[str, Any]:
     except Exception:
         destination.unlink(missing_ok=True)
         raise
-    expires = dt.datetime.now(dt.timezone.utc) + dt.timedelta(seconds=ARTIFACT_TTL_SECONDS)
+    expires = now_utc() + dt.timedelta(seconds=ARTIFACT_TTL_SECONDS)
     return {
         "artifactToken": token,
         "sha256": digest.hexdigest(),
         "size": size,
-        "expiresAt": expires.isoformat(),
+        "expiresAt": utc_iso(expires),
     }
 
 
@@ -218,12 +443,12 @@ def stage_artifact_bytes(data: bytes, maximum: int) -> dict[str, Any]:
     except Exception:
         destination.unlink(missing_ok=True)
         raise
-    expires = dt.datetime.now(dt.timezone.utc) + dt.timedelta(seconds=ARTIFACT_TTL_SECONDS)
+    expires = now_utc() + dt.timedelta(seconds=ARTIFACT_TTL_SECONDS)
     return {
         "artifactToken": token,
         "sha256": hashlib.sha256(data).hexdigest(),
         "size": len(data),
-        "expiresAt": expires.isoformat(),
+        "expiresAt": utc_iso(expires),
     }
 
 
@@ -242,6 +467,61 @@ def bounded_tail_lines(path: pathlib.Path, maximum_bytes: int = LOG_SCAN_MAX_BYT
                 yield raw.decode("utf-8", errors="replace").rstrip("\r\n")
 
     return iterator()
+
+
+def bounded_log_lines(path: pathlib.Path, ledger: SkipLedger, maximum_bytes: int = LOG_SCAN_MAX_BYTES) -> Iterator[str]:
+    """Yield lines from a plain or gzip log inside a fixed byte window and the operation deadline."""
+    counter = 0
+    if path.suffix == ".gz":
+        consumed = 0
+        try:
+            with gzip.open(path, "rb") as handle:
+                for raw in handle:
+                    consumed += len(raw)
+                    if consumed > maximum_bytes:
+                        ledger.note(f"{path} 解压后超过 64 MiB 扫描窗口，仅读取前段")
+                        return
+                    counter += 1
+                    if counter % 4096 == 0 and deadline_exceeded():
+                        ledger.expire()
+                        return
+                    yield raw.decode("utf-8", errors="replace").rstrip("\r\n")
+        except (OSError, EOFError, ValueError, zlib.error):
+            ledger.add(SKIP_UNREADABLE)
+        return
+    try:
+        info = path.stat()
+        lines = bounded_tail_lines(path, maximum_bytes)
+    except OSError:
+        ledger.add(SKIP_UNREADABLE)
+        return
+    if info.st_size > maximum_bytes:
+        ledger.note(f"{path} 超过 64 MiB，仅流式读取最新窗口")
+    try:
+        for line in lines:
+            counter += 1
+            if counter % 4096 == 0 and deadline_exceeded():
+                ledger.expire()
+                return
+            yield line
+    except OSError:
+        ledger.add(SKIP_UNREADABLE)
+
+
+def log_file_set(patterns: tuple[str, ...], ledger: SkipLedger) -> list[pathlib.Path]:
+    """Collect a log plus its rotated and gzip siblings, newest first, so rotation is never missed."""
+    found: dict[str, float] = {}
+    for pattern in patterns:
+        for name in sorted(glob.glob(pattern))[:200]:
+            try:
+                info = pathlib.Path(name).lstat()
+            except OSError:
+                ledger.add("轮转日志因权限或 I/O 错误未被读取")
+                continue
+            if stat.S_ISREG(info.st_mode):
+                found[name] = info.st_mtime
+    ordered = sorted(found.items(), key=lambda item: item[1], reverse=True)
+    return [pathlib.Path(name) for name, _ in ordered[:LOG_FILE_LIMIT]]
 
 
 def release_artifact(request: dict[str, Any]) -> dict[str, Any]:
@@ -265,6 +545,7 @@ def os_release_info() -> dict[str, Any]:
         try:
             raw = candidate.read_text("utf-8", errors="replace")[:65536]
         except OSError:
+            # The next fixed candidate is tried; when both fail "source": "unavailable" already states the gap.
             continue
         source = str(candidate)
         for line in raw.splitlines():
@@ -320,7 +601,7 @@ def linux_runtime_snapshot() -> tuple[dict[str, Any], dict[str, Any], dict[str, 
     try:
         cgroup = pathlib.Path("/proc/1/cgroup").read_text("utf-8", errors="replace")[:65536]
     except OSError:
-        pass
+        warnings.append("无法读取 /proc/1/cgroup，容器判定可能不准确")
     if pathlib.Path("/.dockerenv").exists() or "docker" in cgroup:
         runtime["container"] = "docker"
     elif pathlib.Path("/run/.containerenv").exists():
@@ -439,9 +720,13 @@ def get_capabilities(_: dict[str, Any]) -> dict[str, Any]:
         "tomcatProbe": capability_state("SUPPORTED" if probe else "UNSUPPORTED", f"Tomcat 探针位于 {PROBE_JAR}" if probe else f"Tomcat 探针缺失: {PROBE_JAR}"),
     })
     warnings.extend(context_warnings)
+    zone_name, zone_offset = host_timezone()
     return {
         "protocolVersion": 1,
         "helper": {"name": "huntwarden-helper", "version": HELPER_VERSION},
+        "timezone": zone_name,
+        "utcOffsetSeconds": zone_offset,
+        "hostTimeUtc": utc_iso(now_utc()),
         "platform": {
             "system": platform.system(), "release": platform.release(),
             "architecture": platform.machine(), "python": platform.python_version(),
@@ -463,7 +748,7 @@ def file_facts(path: pathlib.Path) -> dict[str, Any]:
     return {
         "path": str(path), "sha256": sha256_file(path), "size": info.st_size,
         "mode": format(stat.S_IMODE(info.st_mode), "04o"), "uid": info.st_uid, "gid": info.st_gid,
-        "mtime": dt.datetime.fromtimestamp(info.st_mtime, dt.timezone.utc).isoformat(),
+        "mtime": utc_iso(info.st_mtime),
     }
 
 
@@ -554,7 +839,8 @@ def receipt_path(value: str) -> pathlib.Path:
 
 def begin_receipt(value: str, operation: str, request: dict[str, Any]) -> dict[str, Any]:
     path = receipt_path(value)
-    incoming_digest = hashlib.sha256(json.dumps(request, sort_keys=True).encode()).hexdigest()
+    action_arguments = {key: item for key, item in request.items() if key not in TRANSPORT_KEYS}
+    incoming_digest = hashlib.sha256(json.dumps(action_arguments, sort_keys=True).encode()).hexdigest()
     if path.exists():
         existing = json.loads(path.read_text("utf-8"))
         if existing.get("operation") != operation or existing.get("argsDigest") != incoming_digest:
@@ -565,14 +851,14 @@ def begin_receipt(value: str, operation: str, request: dict[str, Any]) -> dict[s
         "operation": operation,
         "status": "STARTED",
         "argsDigest": incoming_digest,
-        "startedAt": dt.datetime.now(dt.timezone.utc).isoformat(),
+        "startedAt": utc_iso(now_utc()),
     }
     atomic_json(path, receipt)
     return receipt
 
 
 def finish_receipt(receipt: dict[str, Any], status_value: str, result: dict[str, Any]) -> dict[str, Any]:
-    receipt.update({"status": status_value, "result": result, "finishedAt": dt.datetime.now(dt.timezone.utc).isoformat()})
+    receipt.update({"status": status_value, "result": result, "finishedAt": utc_iso(now_utc())})
     atomic_json(receipt_path(str(receipt["actionId"])), receipt)
     return receipt
 
@@ -584,6 +870,7 @@ def java_binary(pid: int | None = None) -> str | None:
             if executable.name.startswith("java") and executable.is_file():
                 return str(executable)
         except OSError:
+            # Falls through to the fixed JDK candidates below; a null return already states the gap.
             pass
     discovered = shutil.which("java")
     if discovered:
@@ -653,6 +940,9 @@ def web_root_inventory() -> tuple[list[dict[str, Any]], list[str]]:
         if len(names) > 1000:
             warnings.append(f"{expression} 配置文件超过 1000 个，仅解析前 1000 个")
         for name in names[:1000]:
+            if deadline_exceeded():
+                warnings.append(DEADLINE_WARNING)
+                break
             try:
                 sources.append((text_file(pathlib.Path(name), 1024 * 1024), "nginx" if "nginx" in name else "apache", name))
             except OSError:
@@ -696,40 +986,59 @@ def is_web_artifact(path: pathlib.Path) -> bool:
     try:
         prefix = path.read_bytes()[:512].lower()
     except OSError:
+        # Unreadable candidates are counted by the caller's skipped/ledger accounting.
         return False
     return prefix.startswith(b"#!") or b"<?php" in prefix or b"<%@ page" in prefix
 
 
 def scan_recent_web_artifacts(roots: list[pathlib.Path], hours: int, maximum: int, max_size: int) -> dict[str, Any]:
-    cutoff = dt.datetime.now().timestamp() - hours * 3600
+    cutoff = now_utc().timestamp() - hours * 3600
     items: list[dict[str, Any]] = []
+    ledger = SkipLedger()
     warnings: list[str] = []
     visited = 0
     skipped = 0
+    limited = False
     for root in roots:
+        if limited or ledger.expired:
+            break
+        if deadline_exceeded():
+            ledger.expire()
+            break
         if not root.is_dir():
             skipped += 1
             continue
-        for directory, subdirs, files in os.walk(root, followlinks=False):
-            subdirs[:] = [name for name in subdirs if not (pathlib.Path(directory) / name).is_symlink()]
+        for directory, files in bounded_walk(root, ledger):
             for filename in files:
                 visited += 1
-                path = pathlib.Path(directory) / filename
+                if visited > WALK_VISIT_LIMIT:
+                    warnings.append(f"Web Artifact 遍历达到 {WALK_VISIT_LIMIT} 项上限")
+                    limited = True
+                    break
+                path = directory / filename
                 try:
                     info = path.lstat()
-                    if not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode) or info.st_mtime < cutoff or info.st_size > max_size or not is_web_artifact(path):
+                    if not stat.S_ISREG(info.st_mode) or info.st_mtime < cutoff or info.st_size > max_size or not is_web_artifact(path):
                         skipped += 1
                         continue
                     items.append({"path": str(path), "size": info.st_size, "inode": str(info.st_ino),
-                                  "mtime": dt.datetime.fromtimestamp(info.st_mtime, dt.timezone.utc).isoformat(), "sha256": sha256_file(path),
+                                  "mtime": utc_iso(info.st_mtime), "sha256": sha256_file(path),
                                   "extension": path.suffix.lower() or "none"})
-                except (OSError, PermissionError):
+                except OSError:
                     skipped += 1
+                    ledger.add(SKIP_UNREADABLE)
                     continue
                 if len(items) >= maximum:
                     warnings.append("Web Artifact 结果达到配置上限")
-                    return {"items": items, "partial": True, "warnings": warnings, "visited": visited, "skipped": skipped}
-    return {"items": items, "partial": False, "warnings": warnings, "visited": visited, "skipped": skipped}
+                    limited = True
+                    break
+            if limited:
+                break
+            if deadline_exceeded():
+                ledger.expire()
+                break
+    return {"items": items, "partial": limited or ledger.partial, "warnings": (warnings + ledger.warnings())[:200],
+            "visited": visited, "skipped": skipped}
 
 
 def find_recent_web_files(request: dict[str, Any]) -> list[dict[str, Any]]:
@@ -758,8 +1067,12 @@ def list_upload_temp_artifacts(request: dict[str, Any]) -> dict[str, Any]:
     maximum = safe_int(request.get("maxFiles"), 1, 5000, "maxFiles")
     max_size = safe_int(request.get("maxFileSizeBytes"), 1024, ARTIFACT_MAX_BYTES, "maxFileSizeBytes")
     roots = [root.resolve(strict=False) for root in WEB_TEMP_ROOTS if root.is_dir()]
+    config_ledger = SkipLedger()
     # PHP upload_tmp_dir is parsed only from root-owned fixed php.ini files.
     for name in glob.glob("/etc/php/**/php.ini", recursive=True)[:100]:
+        if deadline_exceeded():
+            config_ledger.expire()
+            break
         try:
             for line in bounded_tail_lines(pathlib.Path(name), 1024 * 1024):
                 match = re.match(r"^\s*upload_tmp_dir\s*=\s*([^;\s]+)", line)
@@ -768,9 +1081,12 @@ def list_upload_temp_artifacts(request: dict[str, Any]) -> dict[str, Any]:
                     if candidate.is_dir() and candidate not in roots:
                         roots.append(candidate)
         except OSError:
+            config_ledger.add("php.ini 因权限或 I/O 错误未被解析")
             continue
     result = scan_recent_web_artifacts(roots[:50], hours, maximum, max_size)
     result["roots"] = [str(root) for root in roots[:50]]
+    result["partial"] = bool(result["partial"]) or config_ledger.partial
+    result["warnings"] = (list(result["warnings"]) + config_ledger.warnings())[:200]
     return result
 
 
@@ -834,6 +1150,8 @@ def search_web_access_log(request: dict[str, Any]) -> list[dict[str, Any]]:
     matches = []
     for expression in ["/var/log/nginx/access*.log", "/var/log/apache2/access*.log", "/var/log/httpd/access_log*"]:
         for log_name in glob.glob(expression)[:100]:
+            if deadline_exceeded():
+                return matches
             try:
                 for line in bounded_tail_lines(pathlib.Path(log_name)):
                     if name in line:
@@ -841,6 +1159,8 @@ def search_web_access_log(request: dict[str, Any]) -> list[dict[str, Any]]:
                         if len(matches) >= maximum:
                             return matches
             except OSError:
+                # This operation's contract is a bare match list with no warning channel; an unreadable
+                # access log simply contributes no matches and the next fixed candidate is tried.
                 continue
     return matches
 
@@ -866,12 +1186,12 @@ def inspect_web_runtime_config(request: dict[str, Any]) -> dict[str, Any]:
     maximum = safe_int(request.get("maxItems"), 1, 1000, "maxItems")
     items: list[dict[str, Any]] = []
     warnings = list(discovery_warnings)
-    for directory, subdirs, files in os.walk(root, followlinks=False):
-        subdirs[:] = [name for name in subdirs if not (pathlib.Path(directory) / name).is_symlink()]
+    ledger = SkipLedger()
+    for directory, files in bounded_walk(root, ledger):
         for filename in files:
             if filename not in {".user.ini", ".htaccess", "web.config"}:
                 continue
-            path = pathlib.Path(directory) / filename
+            path = directory / filename
             try:
                 text = redact_secret_text(text_file(path), 65536)
                 facts = file_facts(path)
@@ -881,8 +1201,8 @@ def inspect_web_runtime_config(request: dict[str, Any]) -> dict[str, Any]:
             except OSError:
                 warnings.append(f"无法读取运行时配置: {path}")
             if len(items) >= maximum:
-                return {"items": items, "partial": True, "warnings": warnings + ["Web 运行时配置达到上限"]}
-    return {"items": items, "partial": bool(warnings), "warnings": warnings[:200]}
+                return {"items": items, "partial": True, "warnings": (warnings + ledger.warnings() + ["Web 运行时配置达到上限"])[:200]}
+    return {"items": items, "partial": bool(warnings) or ledger.partial, "warnings": (warnings + ledger.warnings())[:200]}
 
 
 def correlate_web_requests(request: dict[str, Any]) -> dict[str, Any]:
@@ -894,6 +1214,9 @@ def correlate_web_requests(request: dict[str, Any]) -> dict[str, Any]:
     log_names = [name for expression in ("/var/log/nginx/access*.log", "/var/log/apache2/access*.log", "/var/log/httpd/access_log*")
                  for name in glob.glob(expression)[:100]]
     for log_name in log_names:
+        if deadline_exceeded():
+            warnings.append(DEADLINE_WARNING)
+            break
         log_path = pathlib.Path(log_name)
         try:
             lines = bounded_tail_lines(log_path)
@@ -928,10 +1251,14 @@ def find_web_related_processes(request: dict[str, Any]) -> dict[str, Any]:
     web_signatures = ("nginx", "apache2", "httpd", "php-fpm", "catalina", "tomcat")
     items: list[dict[str, Any]] = []
     warnings: list[str] = []
+    ledger = SkipLedger()
     digest_cache: dict[tuple[int, int], str] = {}
     for proc in pathlib.Path("/proc").iterdir():
         if not proc.name.isdigit():
             continue
+        if deadline_exceeded():
+            ledger.expire()
+            break
         pid = int(proc.name)
         reasons: list[str] = []
         opened: list[dict[str, Any]] = []
@@ -950,6 +1277,7 @@ def find_web_related_processes(request: dict[str, Any]) -> dict[str, Any]:
                         reasons.append("deleted_web_file_open")
                         opened.append({"fd": fd.name, "target": target[:4096], "deleted": True})
                 except OSError:
+                    ledger.add("文件描述符因权限或 I/O 错误未被检查")
                     continue
             if not reasons:
                 continue
@@ -958,11 +1286,12 @@ def find_web_related_processes(request: dict[str, Any]) -> dict[str, Any]:
                           "relationship": sorted(set(reasons)), "openedFiles": opened[:100]})
         except HelperError as exc:
             warnings.append(f"PID {pid}: {exc}")
-        except (OSError, PermissionError):
+        except OSError:
+            ledger.add("进程因权限或 I/O 错误未被检查")
             continue
         if len(items) >= maximum:
-            return {"items": items, "partial": True, "warnings": warnings[:199] + ["Web 相关进程达到上限"]}
-    return {"items": items, "partial": bool(warnings), "warnings": warnings[:200]}
+            return {"items": items, "partial": True, "warnings": (warnings + ledger.warnings())[:199] + ["Web 相关进程达到上限"]}
+    return {"items": items, "partial": bool(warnings) or ledger.partial, "warnings": (warnings + ledger.warnings())[:200]}
 
 
 def collect_file(request: dict[str, Any]) -> dict[str, Any]:
@@ -1016,25 +1345,52 @@ def run_tomcat_probe(request: dict[str, Any]) -> dict[str, Any]:
     return value
 
 
+def acceptable_search_root(path: pathlib.Path) -> bool:
+    """Reject over-broad roots such as / and pseudo filesystems before any recursive on-disk search."""
+    parts = path.parts
+    return len(parts) >= 3 and parts[0] == "/" and parts[1] not in {"proc", "sys", "dev", "run"}
+
+
 def search_class_on_disk(request: dict[str, Any]) -> dict[str, Any]:
     pid = safe_int(request.get("pid"), 1, 2**31 - 1, "pid")
     class_name = request.get("className")
     if not isinstance(class_name, str) or not CLASS_NAME.fullmatch(class_name):
         raise HelperError("INVALID_ARGUMENT", "invalid className")
     relative = class_name.replace(".", "/") + ".class"
-    roots = [pathlib.Path(f"/proc/{pid}/cwd"), pathlib.Path("/usr/local/tomcat"), pathlib.Path("/opt/tomcat")]
-    matches = []
-    for root in roots:
+    target = pathlib.Path(relative).name
+    ledger = SkipLedger()
+    warnings: list[str] = []
+    matches: list[str] = []
+    seen: set[str] = set()
+    for root in (pathlib.Path(f"/proc/{pid}/cwd"), pathlib.Path("/usr/local/tomcat"), pathlib.Path("/opt/tomcat")):
+        if len(matches) >= 20 or ledger.expired:
+            break
         try:
-            resolved = root.resolve()
-            for candidate in resolved.glob(f"**/{pathlib.Path(relative).name}"):
+            resolved = root.resolve(strict=True)
+        except OSError:
+            ledger.add(SKIP_UNREADABLE)
+            continue
+        if str(resolved) in seen:
+            continue
+        seen.add(str(resolved))
+        if not acceptable_search_root(resolved):
+            warnings.append(f"拒绝在过宽的根目录搜索 Class: {resolved}")
+            continue
+        for directory, files in bounded_walk(resolved, ledger, max_depth=CLASS_SEARCH_MAX_DEPTH, visit_limit=CLASS_SEARCH_VISIT_LIMIT):
+            for filename in files:
+                if filename != target:
+                    continue
+                candidate = directory / filename
                 if str(candidate).endswith(relative):
                     matches.append(str(candidate))
                     if len(matches) >= 20:
                         break
-        except (OSError, PermissionError):
-            continue
-    return {"pid": pid, "className": class_name, "found": bool(matches), "paths": matches}
+            if len(matches) >= 20:
+                break
+    if not matches and (ledger.partial or warnings):
+        warnings.append("Class 磁盘搜索范围不完整，未搜索的路径可能仍包含该 Class")
+    return {"pid": pid, "className": class_name, "found": bool(matches), "paths": matches,
+            "partial": ledger.partial or bool(warnings), "warnings": (warnings + ledger.warnings())[:200]}
 
 
 def list_privileged_accounts(_: dict[str, Any]) -> list[dict[str, Any]]:
@@ -1050,6 +1406,8 @@ def list_privileged_accounts(_: dict[str, Any]) -> list[dict[str, Any]]:
         with pathlib.Path("/etc/passwd").open("r", encoding="utf-8", errors="replace") as handle:
             local_accounts.update(line.split(":", 1)[0] for line in handle if ":" in line)
     except OSError:
+        # accountSource degrades to "nss_directory" for every row, which is itself the visible signal;
+        # this operation's contract is a bare row list with no warning channel.
         pass
     rows = []
     for account in pwd.getpwall():
@@ -1064,17 +1422,21 @@ def list_privileged_accounts(_: dict[str, Any]) -> list[dict[str, Any]]:
 
 def inspect_privilege_delegation(request: dict[str, Any]) -> dict[str, Any]:
     maximum = safe_int(request.get("maxItems"), 1, 5000, "maxItems")
+    ledger = SkipLedger()
     candidates: list[tuple[str, pathlib.Path]] = [("sudoers", pathlib.Path("/etc/sudoers")), ("doas", pathlib.Path("/etc/doas.conf"))]
     for root, kind, pattern in ((pathlib.Path("/etc/sudoers.d"), "sudoers", "*"),
                                 (pathlib.Path("/etc/polkit-1/rules.d"), "polkit", "*.rules"),
                                 (pathlib.Path("/etc/polkit-1/localauthority"), "polkit", "*.pkla")):
-        if root.is_dir():
-            candidates.extend((kind, path) for path in root.rglob(pattern) if path.is_file() and not path.is_symlink())
+        if path_kind(root, ledger, follow=True) == "directory":
+            candidates.extend((kind, path) for path in root.rglob(pattern) if path_kind(path, ledger) == "file")
     items: list[dict[str, Any]] = []
     warnings: list[str] = []
     seen: set[str] = set()
     for kind, path in candidates:
-        if not path.is_file() or path.is_symlink():
+        if deadline_exceeded():
+            warnings.append(DEADLINE_WARNING)
+            break
+        if path_kind(path, ledger) != "file":
             continue
         try:
             resolved = path.resolve()
@@ -1094,8 +1456,8 @@ def inspect_privilege_delegation(request: dict[str, Any]) -> dict[str, Any]:
         except OSError:
             warnings.append(f"无法读取权限委派配置: {path}")
         if len(items) >= maximum:
-            return {"items": items, "partial": True, "warnings": warnings + ["权限委派配置达到上限"]}
-    return {"items": items, "partial": bool(warnings), "warnings": warnings[:200]}
+            return {"items": items, "partial": True, "warnings": (warnings + ledger.warnings() + ["权限委派配置达到上限"])[:200]}
+    return {"items": items, "partial": bool(warnings) or ledger.partial, "warnings": (warnings + ledger.warnings())[:200]}
 
 
 def inspect_account(request: dict[str, Any]) -> dict[str, Any]:
@@ -1147,21 +1509,36 @@ def get_login_history(request: dict[str, Any]) -> list[dict[str, Any]]:
 
 def list_cron_entries(request: dict[str, Any]) -> dict[str, Any]:
     maximum, include_user = persistence_limits(request)
+    ledger = SkipLedger()
     paths: list[pathlib.Path] = []
     for value in SYSTEM_PERSISTENCE_ROOTS["cron"]:
         candidate = pathlib.Path(value)
-        if candidate.is_file():
+        kind = path_kind(candidate, ledger, follow=True)
+        if kind == "file":
             paths.append(candidate)
-        elif candidate.is_dir():
-            paths.extend(item for item in candidate.rglob("*") if item.is_file() and not item.is_symlink())
+        elif kind == "directory":
+            paths.extend(item for item in candidate.rglob("*") if path_kind(item, ledger) == "file")
     if include_user:
         for spool in (pathlib.Path("/var/spool/cron/crontabs"), pathlib.Path("/var/spool/cron")):
-            if spool.is_dir():
-                paths.extend(item for item in spool.iterdir() if item.is_file() and not item.is_symlink())
+            if path_kind(spool, ledger, follow=True) != "directory":
+                continue
+            try:
+                entries = sorted(spool.iterdir())
+            except OSError:
+                ledger.add(SKIP_UNREADABLE)
+                continue
+            paths.extend(item for item in entries if path_kind(item, ledger) == "file")
     items: list[dict[str, Any]] = []
     seen: set[str] = set()
     for path in paths:
-        resolved = str(path.resolve())
+        if deadline_exceeded():
+            ledger.expire()
+            break
+        try:
+            resolved = str(path.resolve())
+        except OSError:
+            ledger.add(SKIP_UNREADABLE)
+            continue
         if resolved in seen:
             continue
         seen.add(resolved)
@@ -1169,13 +1546,14 @@ def list_cron_entries(request: dict[str, Any]) -> dict[str, Any]:
             facts = file_facts(path.resolve())
             lines = text_file(path).splitlines()
         except OSError:
+            ledger.add("Cron 配置因权限或 I/O 错误未被解析")
             continue
         periodic = next((name for name in ("hourly", "daily", "weekly", "monthly") if f"/cron.{name}/" in str(path)), None)
         if periodic:
             items.append({**facts, "kind": "cron", "line": 0, "schedule": f"@{periodic}", "username": "root",
                           "commandSummary": str(path.resolve()), "features": dangerous_features(text_file(path))})
             if len(items) >= maximum:
-                return {"items": items, "partial": True, "warnings": ["Cron 结果达到配置上限"]}
+                return {"items": items, "partial": True, "warnings": (ledger.warnings() + ["Cron 结果达到配置上限"])[:200]}
             continue
         for number, raw in enumerate(lines, 1):
             line = raw.strip()
@@ -1194,8 +1572,8 @@ def list_cron_entries(request: dict[str, Any]) -> dict[str, Any]:
             items.append({**facts, "kind": "cron", "line": number, "schedule": " ".join(fields[:schedule_fields]),
                           "username": username, "commandSummary": command, "features": dangerous_features(command)})
             if len(items) >= maximum:
-                return {"items": items, "partial": True, "warnings": ["Cron 结果达到配置上限"]}
-    return {"items": items, "partial": False, "warnings": []}
+                return {"items": items, "partial": True, "warnings": (ledger.warnings() + ["Cron 结果达到配置上限"])[:200]}
+    return {"items": items, "partial": ledger.partial, "warnings": ledger.warnings()[:200]}
 
 
 def parse_systemd_unit(path: pathlib.Path) -> dict[str, Any]:
@@ -1228,30 +1606,44 @@ def list_systemd_units(request: dict[str, Any]) -> dict[str, Any]:
     if include_user:
         roots.extend(pathlib.Path(account.pw_dir) / ".config/systemd/user" for account in interactive_accounts())
     items: list[dict[str, Any]] = []
+    ledger = SkipLedger()
     seen: set[str] = set()
     for root in roots:
-        if not root.is_dir():
+        if path_kind(root, ledger, follow=True) != "directory":
             continue
+        if deadline_exceeded():
+            ledger.expire()
+            break
         for path in root.rglob("*"):
-            if path.suffix not in {".service", ".timer"} or not path.is_file():
+            if deadline_exceeded():
+                ledger.expire()
+                break
+            if path.suffix not in {".service", ".timer"} or path_kind(path, ledger, follow=True) != "file":
                 continue
-            resolved = path.resolve()
+            try:
+                resolved = path.resolve()
+            except OSError:
+                ledger.add(SKIP_UNREADABLE)
+                continue
             if str(resolved) in seen:
                 continue
             seen.add(str(resolved))
             try:
-                enabled_links = [str(link) for link in pathlib.Path("/etc/systemd").rglob(path.name) if link.is_symlink()][:20]
+                enabled_links = [str(link) for link in pathlib.Path("/etc/systemd").rglob(path.name)
+                                 if path_kind(link, ledger) == "symlink"][:20]
                 drop_ins: list[dict[str, Any]] = []
                 dropin_dirs = [resolved.parent / f"{path.name}.d"]
-                dropin_dirs.extend(candidate for dropin_root in roots if dropin_root.is_dir()
-                                   for candidate in dropin_root.rglob(f"{path.name}.d") if candidate.is_dir())
+                dropin_dirs.extend(candidate for dropin_root in roots if path_kind(dropin_root, ledger, follow=True) == "directory"
+                                   for candidate in dropin_root.rglob(f"{path.name}.d")
+                                   if path_kind(candidate, ledger, follow=True) == "directory")
                 for dropin_dir in dict.fromkeys(dropin_dirs):
-                    if not dropin_dir.is_dir():
+                    if path_kind(dropin_dir, ledger, follow=True) != "directory":
                         continue
                     for override in sorted(dropin_dir.glob("*.conf"))[:100]:
                         try:
                             drop_ins.append({**file_facts(override.resolve()), **parse_systemd_unit(override.resolve())})
                         except OSError:
+                            ledger.add("systemd Drop-In 因权限或 I/O 错误未被解析")
                             continue
                 items.append({**file_facts(resolved), "kind": "systemd", "unit": path.name,
                               "scope": "user" if "/.config/systemd/user/" in str(resolved) else "system",
@@ -1259,12 +1651,13 @@ def list_systemd_units(request: dict[str, Any]) -> dict[str, Any]:
                               "generated": str(resolved).startswith("/run/systemd/generator"),
                               "transient": str(resolved).startswith("/run/systemd/transient"), **parse_systemd_unit(resolved)})
             except OSError:
+                ledger.add("systemd Unit 因权限或 I/O 错误未被解析")
                 continue
             if len(items) >= maximum:
-                return {"items": items, "partial": True, "warnings": ["systemd 结果达到配置上限"]}
-    manager_available = pathlib.Path("/run/systemd/system").is_dir()
+                return {"items": items, "partial": True, "warnings": (ledger.warnings() + ["systemd 结果达到配置上限"])[:200]}
+    manager_available = path_kind(pathlib.Path("/run/systemd/system"), ledger, follow=True) == "directory"
     warnings = [] if manager_available else ["systemd 管理器未运行；仅完成 Unit 文件与启用链接检查"]
-    return {"items": items, "partial": not manager_available, "warnings": warnings}
+    return {"items": items, "partial": not manager_available or ledger.partial, "warnings": (warnings + ledger.warnings())[:200]}
 
 
 def list_extended_persistence(request: dict[str, Any]) -> dict[str, Any]:
@@ -1275,12 +1668,21 @@ def list_extended_persistence(request: dict[str, Any]) -> dict[str, Any]:
             roots.extend((pathlib.Path(account.pw_dir) / ".config/autostart", pathlib.Path(account.pw_dir) / ".config/systemd/user"))
     items: list[dict[str, Any]] = []
     warnings: list[str] = []
+    ledger = SkipLedger()
     seen: set[str] = set()
     for root in roots:
-        candidates = [root] if root.is_file() else (item for item in root.rglob("*") if item.is_file() and not item.is_symlink()) if root.is_dir() else []
+        if deadline_exceeded():
+            warnings.append(DEADLINE_WARNING)
+            break
+        root_kind = path_kind(root, ledger, follow=True)
+        candidates: Any = [root] if root_kind == "file" else (
+            (item for item in root.rglob("*") if path_kind(item, ledger) == "file") if root_kind == "directory" else [])
         try:
             for path in candidates:
-                resolved = path.resolve()
+                if deadline_exceeded():
+                    warnings.append(DEADLINE_WARNING)
+                    break
+                resolved = path.resolve(strict=True)
                 if str(resolved) in seen:
                     continue
                 seen.add(str(resolved))
@@ -1305,7 +1707,7 @@ def list_extended_persistence(request: dict[str, Any]) -> dict[str, Any]:
             warnings.append(f"无权读取扩展持久化目录: {root}")
         except OSError:
             warnings.append(f"无法读取扩展持久化目录: {root}")
-    return {"items": items, "partial": bool(warnings), "warnings": warnings[:200]}
+    return {"items": items, "partial": bool(warnings) or ledger.partial, "warnings": (warnings + ledger.warnings())[:200]}
 
 
 def effective_sshd_config() -> dict[str, Any]:
@@ -1328,10 +1730,12 @@ def inspect_ssh_trust_configuration(_: dict[str, Any]) -> dict[str, Any]:
     roots = [pathlib.Path("/etc/ssh/sshd_config"), pathlib.Path("/etc/ssh/sshd_config.d")]
     files: list[dict[str, Any]] = []
     warnings: list[str] = []
+    ledger = SkipLedger()
     for root in roots:
-        candidates = [root] if root.is_file() else list(root.glob("*.conf"))[:500] if root.is_dir() else []
+        root_kind = path_kind(root, ledger, follow=True)
+        candidates = [root] if root_kind == "file" else list(root.glob("*.conf"))[:500] if root_kind == "directory" else []
         for path in candidates:
-            if not path.is_file() or path.is_symlink():
+            if path_kind(path, ledger) != "file":
                 continue
             try:
                 text = text_file(path, 1024 * 1024)
@@ -1361,49 +1765,57 @@ def inspect_ssh_trust_configuration(_: dict[str, Any]) -> dict[str, Any]:
             continue
         candidate = pathlib.Path(value)
         try:
-            if candidate.is_file() and not candidate.is_symlink():
+            if path_kind(candidate, ledger) == "file":
                 trust_files.append({"directive": key, **file_facts(candidate.resolve())})
         except OSError:
             warnings.append(f"无法核验 sshd 信任文件: {value}")
     if not effective.get("available"):
         warnings.append("sshd -T 未成功，effective 字段不完整")
     return {"items": files, "effective": effective, "trustFiles": trust_files,
-            "partial": bool(warnings), "warnings": warnings[:200]}
+            "partial": bool(warnings) or ledger.partial, "warnings": (warnings + ledger.warnings())[:200]}
 
 
 def list_ssh_persistence(request: dict[str, Any]) -> dict[str, Any]:
     maximum, include_user = persistence_limits(request)
     accounts = interactive_accounts() if include_user else []
     items: list[dict[str, Any]] = []
+    ledger = SkipLedger()
     for account in accounts:
         path = pathlib.Path(account.pw_dir) / ".ssh/authorized_keys"
-        if not path.is_file() or path.is_symlink():
+        if path_kind(path, ledger) != "file":
             continue
         try:
             facts = file_facts(path.resolve())
             keys = inspect_authorized_keys({"username": account.pw_name})
         except (OSError, KeyError):
+            ledger.add("用户 authorized_keys 因权限或 I/O 错误未被解析")
             continue
         for key in keys:
             items.append({**facts, "kind": "ssh", "username": account.pw_name, **key})
             if len(items) >= maximum:
-                return {"items": items, "partial": True, "warnings": ["SSH Key 结果达到配置上限"], "sshdConfig": effective_sshd_config()}
-    return {"items": items, "partial": False, "warnings": [], "sshdConfig": effective_sshd_config()}
+                return {"items": items, "partial": True, "warnings": (ledger.warnings() + ["SSH Key 结果达到配置上限"])[:200],
+                        "sshdConfig": effective_sshd_config()}
+    return {"items": items, "partial": ledger.partial, "warnings": ledger.warnings()[:200], "sshdConfig": effective_sshd_config()}
 
 
 def list_shell_startup_files(request: dict[str, Any]) -> dict[str, Any]:
     maximum, include_user = persistence_limits(request)
+    startup_ledger = SkipLedger()
     paths = [pathlib.Path("/etc/profile"), pathlib.Path("/etc/bash.bashrc")]
     for root in (pathlib.Path("/etc/profile.d"), pathlib.Path("/etc/zsh")):
-        if root.is_dir():
-            paths.extend(item for item in root.rglob("*") if item.is_file() and not item.is_symlink())
+        if path_kind(root, startup_ledger, follow=True) == "directory":
+            paths.extend(item for item in root.rglob("*") if path_kind(item, startup_ledger) == "file")
     if include_user:
         for account in interactive_accounts():
             paths.extend(pathlib.Path(account.pw_dir) / name for name in (".profile", ".bash_profile", ".bashrc", ".zprofile", ".zshrc"))
     items: list[dict[str, Any]] = []
+    ledger = startup_ledger
     seen: set[str] = set()
     for path in paths:
-        if not path.is_file() or path.is_symlink():
+        if deadline_exceeded():
+            ledger.expire()
+            break
+        if path_kind(path, ledger) != "file":
             continue
         try:
             resolved = path.resolve()
@@ -1414,10 +1826,11 @@ def list_shell_startup_files(request: dict[str, Any]) -> dict[str, Any]:
             suspicious = [line.strip()[:1024] for line in text.splitlines() if dangerous_features(line)][:20]
             items.append({**file_facts(resolved), "kind": "shell", "features": dangerous_features(text), "commandSummaries": suspicious})
         except OSError:
+            ledger.add("Shell 启动文件因权限或 I/O 错误未被解析")
             continue
         if len(items) >= maximum:
-            return {"items": items, "partial": True, "warnings": ["Shell 启动文件结果达到配置上限"]}
-    return {"items": items, "partial": False, "warnings": []}
+            return {"items": items, "partial": True, "warnings": (ledger.warnings() + ["Shell 启动文件结果达到配置上限"])[:200]}
+    return {"items": items, "partial": ledger.partial, "warnings": ledger.warnings()[:200]}
 
 
 def inspect_persistence_item(request: dict[str, Any]) -> dict[str, Any]:
@@ -1457,6 +1870,8 @@ def find_related_processes(request: dict[str, Any]) -> list[dict[str, Any]]:
             try:
                 stable = stable_process(int(process["pid"]), digest_cache)
             except (HelperError, OSError):
+                # This operation's contract is a bare match list with no warning channel; a process that
+                # exits or refuses inspection mid-scan simply cannot be proven related.
                 continue
             summary = redact_secret_text(command, 4096)
             matches.append({**stable, "command": summary, "commandSummary": summary, "executable": stable["exePath"], "matchedTokens": useful[:10]})
@@ -1488,6 +1903,7 @@ def list_process_connections(request: dict[str, Any]) -> dict[str, Any]:
     if not proc.is_dir():
         raise HelperError("INVALID_ARGUMENT", "process no longer exists")
     inodes: set[str] = set()
+    ledger = SkipLedger()
     try:
         for fd in (proc / "fd").iterdir():
             try:
@@ -1495,12 +1911,13 @@ def list_process_connections(request: dict[str, Any]) -> dict[str, Any]:
                 if match:
                     inodes.add(match.group(1))
             except OSError:
+                ledger.add("文件描述符因权限或 I/O 错误未被检查")
                 continue
     except OSError as exc:
         raise HelperError("PERMISSION_DENIED", "cannot inspect process descriptors") from exc
     states = {"01": "ESTABLISHED", "02": "SYN_SENT", "03": "SYN_RECV", "06": "TIME_WAIT", "07": "CLOSE", "08": "CLOSE_WAIT", "0A": "LISTEN"}
     items: list[dict[str, Any]] = []
-    warnings: list[str] = []
+    warnings: list[str] = ledger.warnings()
     for protocol, name, ipv6 in (("tcp", "/proc/net/tcp", False), ("tcp6", "/proc/net/tcp6", True), ("udp", "/proc/net/udp", False), ("udp6", "/proc/net/udp6", True)):
         path = pathlib.Path(name)
         if not path.is_file():
@@ -1515,8 +1932,8 @@ def list_process_connections(request: dict[str, Any]) -> dict[str, Any]:
             except (ValueError, OSError):
                 warnings.append(f"无法解析 {protocol} socket")
             if len(items) >= maximum:
-                return {"items": items, "partial": True, "warnings": warnings + ["网络连接结果达到配置上限"]}
-    return {"items": items, "partial": False, "warnings": warnings}
+                return {"items": items, "partial": True, "warnings": (warnings + ["网络连接结果达到配置上限"])[:200]}
+    return {"items": items, "partial": bool(warnings), "warnings": warnings[:200]}
 
 
 def collect_persistence_artifact(request: dict[str, Any]) -> dict[str, Any]:
@@ -1590,7 +2007,7 @@ def process_start_time(start_ticks: str) -> str | None:
             if line.startswith("btime ")
         )
         timestamp = boot_seconds + int(start_ticks) / int(clock_ticks)
-        return dt.datetime.fromtimestamp(timestamp, dt.timezone.utc).isoformat()
+        return utc_iso(timestamp)
     except (OSError, ValueError, StopIteration):
         return None
 
@@ -1607,6 +2024,7 @@ def process_launcher_path(pid: int) -> str | None:
     try:
         fields = pathlib.Path(f"/proc/{pid}/cmdline").read_bytes()[:65536].split(b"\0")[:3]
     except OSError:
+        # A missing cmdline means no launcher can be proven; the null return is the explicit answer.
         return None
     for raw in fields[1:]:
         value = raw.decode("utf-8", errors="replace")
@@ -1616,6 +2034,7 @@ def process_launcher_path(pid: int) -> str | None:
         try:
             resolved = candidate.resolve(strict=True)
         except OSError:
+            # Unresolvable interpreter arguments are simply not evidence of a launcher.
             continue
         roots = [root.resolve(strict=False) for root in TRIAGE_ROOTS]
         if any(resolved == root or is_within(resolved, root) for root in roots):
@@ -1645,10 +2064,10 @@ def process_environment_metadata(pid: int) -> dict[str, Any]:
         if re.search(r"AWS_|AZURE_|GOOGLE_|GCP_", upper): risks.add("cloud_variable_present")
         if upper in {"LD_PRELOAD", "LD_LIBRARY_PATH", "PYTHONPATH", "PERL5LIB", "RUBYLIB"}: risks.add("loader_influence_variable")
         if upper in {"HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY"}: risks.add("proxy_variable_present")
-        if len(names) >= 512:
+        if len(names) >= PROCESS_ENV_NAME_LIMIT:
             break
     return {"variableNames": sorted(set(names)), "riskLabels": sorted(risks),
-            "partial": len(raw) > 1024 * 1024 or len(names) >= 512}
+            "partial": len(raw) > 1024 * 1024 or len(names) >= PROCESS_ENV_NAME_LIMIT}
 
 
 def process_scope_metadata(pid: int) -> dict[str, Any]:
@@ -1663,14 +2082,23 @@ def process_scope_metadata(pid: int) -> dict[str, Any]:
         try:
             namespaces[name] = os.readlink(f"/proc/{pid}/ns/{name}")[:256]
         except OSError:
+            # An unreadable namespace link is absent from the map, which is itself the visible signal.
             continue
     cgroups: list[str] = []
+    cgroups_truncated = False
     try:
         with pathlib.Path(f"/proc/{pid}/cgroup").open("r", encoding="utf-8", errors="replace") as handle:
-            cgroups = [line.strip()[:4096] for _, line in zip(range(128), handle) if line.strip()]
+            for _, line in zip(range(PROCESS_CGROUP_MAX_ENTRIES + 1), handle):
+                value = line.strip()[:PROCESS_CGROUP_MAX_BYTES]
+                if not value:
+                    continue
+                if len(cgroups) >= PROCESS_CGROUP_MAX_ENTRIES:
+                    cgroups_truncated = True
+                    break
+                cgroups.append(value)
     except OSError:
-        pass
-    return {**links, "namespaces": namespaces, "cgroups": cgroups}
+        cgroups_truncated = True
+    return {**links, "namespaces": namespaces, "cgroups": cgroups, "cgroupsTruncated": cgroups_truncated}
 
 
 def stable_process(pid: int, digest_cache: dict[tuple[int, int], str] | None = None) -> dict[str, Any]:
@@ -1746,15 +2174,24 @@ def enumerate_stable_processes(maximum: int) -> tuple[list[dict[str, Any]], list
     items: list[dict[str, Any]] = []
     warnings: list[str] = []
     cache: dict[tuple[int, int], str] = {}
+    truncated = 0
     proc_entries = sorted((item for item in pathlib.Path("/proc").iterdir() if item.name.isdigit()), key=lambda item: int(item.name))
     for entry in proc_entries:
         if len(items) >= maximum:
-            return items, warnings + ["进程结果达到配置上限"], True
+            return items, warnings[:100] + ["进程结果达到配置上限"], True
+        if deadline_exceeded():
+            return items, warnings[:100] + [DEADLINE_WARNING], True
         try:
-            items.append(stable_process(int(entry.name), cache))
+            record = stable_process(int(entry.name), cache)
         except HelperError as exc:
             # Kernel threads and racing processes are expected, but inability to collect is explicit.
             warnings.append(f"PID {entry.name}: {str(exc)}")
+            continue
+        if record.get("cgroupsTruncated") or record["environment"]["partial"]:
+            truncated += 1
+        items.append(record)
+    if truncated:
+        warnings.append(f"{truncated} 个进程的 cgroups 或环境变量名列表因单条体积上限被截断")
     return items, warnings[:100], bool(warnings)
 
 
@@ -1763,6 +2200,8 @@ def read_global_connections(maximum: int) -> tuple[list[dict[str, Any]], list[st
     warnings: list[str] = []
     states = {"01": "ESTABLISHED", "02": "SYN_SENT", "03": "SYN_RECV", "06": "TIME_WAIT", "07": "CLOSE", "08": "CLOSE_WAIT", "0A": "LISTEN"}
     for protocol, name, ipv6 in (("tcp", "/proc/net/tcp", False), ("tcp6", "/proc/net/tcp6", True), ("udp", "/proc/net/udp", False), ("udp6", "/proc/net/udp6", True)):
+        if deadline_exceeded():
+            return items, warnings[:100] + [DEADLINE_WARNING], True
         path = pathlib.Path(name)
         if not path.is_file():
             warnings.append(f"{name} 不可用")
@@ -1802,6 +2241,8 @@ def capture_volatile_snapshot(request: dict[str, Any]) -> dict[str, Any]:
                     if match:
                         socket_owners[match.group(1)] = int(process["pid"])
                 except OSError:
+                    # A descriptor that vanishes mid-scan simply maps no socket owner; the unmapped
+                    # socket count below reports the resulting gap.
                     continue
         except PermissionError:
             process_warnings.append(f"PID {process['pid']}: 无权映射 socket 所有者")
@@ -1828,18 +2269,34 @@ def capture_volatile_snapshot(request: dict[str, Any]) -> dict[str, Any]:
     except (OSError, ValueError):
         process_warnings.append("无法读取 /proc/meminfo")
         process_partial = True
-    return {
-        "capturedAt": dt.datetime.now(dt.timezone.utc).isoformat(),
-        "bootId": boot_id(),
+    captured: dict[str, Any] = {
+        "capturedAt": utc_iso(now_utc()),
         "hostname": platform.node(),
-        "uptimeSeconds": float(pathlib.Path("/proc/uptime").read_text("ascii").split()[0]),
-        "loadAverage": list(os.getloadavg()),
         "memory": memory,
         "processes": processes,
         "connections": connections,
-        "partial": process_partial or connection_partial,
-        "warnings": (process_warnings + connection_warnings)[:200],
     }
+    try:
+        captured["bootId"] = boot_id()
+    except HelperError as exc:
+        captured["bootId"] = None
+        process_warnings.append(f"无法读取 boot 标识：{exc}")
+        process_partial = True
+    try:
+        captured["uptimeSeconds"] = float(pathlib.Path("/proc/uptime").read_text("ascii").split()[0])
+    except (OSError, ValueError, IndexError):
+        captured["uptimeSeconds"] = None
+        process_warnings.append("无法读取 /proc/uptime")
+        process_partial = True
+    try:
+        captured["loadAverage"] = list(os.getloadavg())
+    except OSError:
+        captured["loadAverage"] = []
+        process_warnings.append("无法读取系统负载")
+        process_partial = True
+    captured["partial"] = process_partial or connection_partial
+    captured["warnings"] = (process_warnings + connection_warnings)[:200]
+    return captured
 
 
 def suspicious_signals(process: dict[str, Any]) -> list[str]:
@@ -1860,6 +2317,8 @@ def suspicious_signals(process: dict[str, Any]) -> list[str]:
         if info.st_mode & stat.S_IWOTH:
             signals.append("world_writable_executable")
     except OSError:
+        # Signal probing is additive: an unreadable /proc/<pid>/exe only means this signal is unproven,
+        # and the process record itself already carries its own collection warnings.
         pass
     try:
         maps = pathlib.Path(f"/proc/{process['pid']}/maps").read_text("utf-8", errors="replace")
@@ -1868,6 +2327,7 @@ def suspicious_signals(process: dict[str, Any]) -> list[str]:
         if " (deleted)" in maps:
             signals.append("deleted_memory_mapping")
     except OSError:
+        # Same additive contract as above for the memory map probe.
         pass
     if int(process.get("ppid", 0)) > 0 and not pathlib.Path(f"/proc/{process['ppid']}").exists():
         signals.append("missing_parent")
@@ -1879,6 +2339,8 @@ def list_suspicious_processes(request: dict[str, Any]) -> dict[str, Any]:
     processes, warnings, partial = enumerate_stable_processes(maximum)
     items = []
     for process in processes:
+        if deadline_exceeded():
+            return {"items": items, "partial": True, "warnings": warnings + [DEADLINE_WARNING]}
         signals = suspicious_signals(process)
         if signals:
             items.append({**process, "signals": signals})
@@ -1992,10 +2454,12 @@ def executable_candidate(path: pathlib.Path, info: os.stat_result) -> bool:
     if info.st_mode & 0o111:
         return True
     try:
-        magic = path.open("rb").read(4)
-        return magic.startswith(b"\x7fELF") or magic.startswith(b"#!")
+        with path.open("rb") as handle:
+            magic = handle.read(4)
     except OSError:
+        # Unreadable candidates are recorded by scan_triage_files' ledger, not silently ignored here.
         return False
+    return magic.startswith(b"\x7fELF") or magic.startswith(b"#!")
 
 
 def triage_file_facts(path: pathlib.Path, info: os.stat_result | None = None) -> dict[str, Any]:
@@ -2003,46 +2467,53 @@ def triage_file_facts(path: pathlib.Path, info: os.stat_result | None = None) ->
     return {
         "path": str(path), "inode": str(current.st_ino), "sha256": sha256_file(path), "size": current.st_size,
         "mode": format(stat.S_IMODE(current.st_mode), "04o"), "uid": current.st_uid, "gid": current.st_gid,
-        "mtime": dt.datetime.fromtimestamp(current.st_mtime, dt.timezone.utc).isoformat(),
+        "mtime": utc_iso(current.st_mtime),
     }
 
 
 def scan_triage_files(predicate: Callable[[pathlib.Path, os.stat_result], bool]) -> tuple[list[tuple[pathlib.Path, os.stat_result]], list[str], bool]:
     candidates: list[tuple[pathlib.Path, os.stat_result]] = []
-    warnings: list[str] = []
+    ledger = SkipLedger()
     visited: set[tuple[int, int]] = set()
     scanned = 0
     for configured_root in TRIAGE_ROOTS:
+        if ledger.expired:
+            break
+        if deadline_exceeded():
+            ledger.expire()
+            break
         root = configured_root.resolve(strict=False)
         if not root.is_dir():
             continue
-        for directory, directories, files in os.walk(root, followlinks=False):
-            directories[:] = [name for name in directories if not (pathlib.Path(directory) / name).is_symlink()]
+        for directory, files in bounded_walk(root, ledger):
             for filename in files:
                 scanned += 1
                 if scanned > TRIAGE_SCAN_LIMIT:
-                    return candidates, warnings + ["文件扫描达到固定 50000 项上限"], True
-                path = pathlib.Path(directory) / filename
+                    return candidates, (ledger.warnings() + ["文件扫描达到固定 50000 项上限"])[:100], True
+                path = directory / filename
                 try:
                     info = path.lstat()
                     key = (info.st_dev, info.st_ino)
-                    if key in visited or not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode):
+                    if key in visited or not stat.S_ISREG(info.st_mode):
                         continue
                     visited.add(key)
                     if predicate(path, info):
                         candidates.append((path.resolve(strict=True), info))
                 except PermissionError:
-                    warnings.append(f"无权检查目录项: {directory}")
+                    ledger.add("目录项因权限不足未被检查")
                 except OSError:
-                    continue
-    return candidates, warnings[:100], bool(warnings)
+                    ledger.add(SKIP_UNREADABLE)
+            if deadline_exceeded():
+                ledger.expire()
+                break
+    return candidates, ledger.warnings()[:100], ledger.partial
 
 
 def list_recent_executables(request: dict[str, Any]) -> dict[str, Any]:
     hours = safe_int(request.get("modifiedWithinHours"), 1, 8760, "modifiedWithinHours")
     maximum = safe_int(request.get("maxItems"), 1, 50000, "maxItems")
     max_size = safe_int(request.get("maxFileSizeBytes"), 1, ARTIFACT_MAX_BYTES, "maxFileSizeBytes")
-    cutoff = dt.datetime.now(dt.timezone.utc).timestamp() - hours * 3600
+    cutoff = now_utc().timestamp() - hours * 3600
     candidates, warnings, partial = scan_triage_files(
         lambda path, info: info.st_mtime >= cutoff and info.st_size <= max_size and executable_candidate(path, info)
     )
@@ -2081,7 +2552,16 @@ def list_privileged_files(request: dict[str, Any]) -> dict[str, Any]:
         for root in TRIAGE_ROOTS:
             if not root.exists():
                 continue
-            result = run([getcap, "-r", str(root)], timeout=25, check=False)
+            if deadline_exceeded():
+                warnings.append(DEADLINE_WARNING)
+                partial = True
+                break
+            try:
+                result = run([getcap, "-r", str(root)], timeout=25, check=False)
+            except HelperError as exc:
+                warnings.append(f"getcap 扫描 {root} 超出时间预算: {exc}")
+                partial = True
+                break
             if result.returncode not in {0, 1}:
                 warnings.append(f"getcap 无法扫描 {root}")
                 partial = True
@@ -2172,6 +2652,10 @@ def inspect_dynamic_loader(request: dict[str, Any]) -> dict[str, Any]:
     partial = False
     seen: set[str] = set()
     for config_path in configured:
+        if deadline_exceeded():
+            warnings.append(DEADLINE_WARNING)
+            partial = True
+            break
         if not config_path.is_file() or config_path.is_symlink():
             continue
         try:
@@ -2214,117 +2698,368 @@ def inspect_dynamic_loader(request: dict[str, Any]) -> dict[str, Any]:
     return {"items": items, "partial": partial, "warnings": warnings[:200]}
 
 
-def parse_syslog_time(raw: str) -> dt.datetime | None:
+def parse_iso_time(raw: str) -> dt.datetime | None:
+    """Parse an RFC3339/RFC5424 stamp with its own offset, or in the host zone when it carries none."""
+    text = raw.strip().replace(",", ".")
+    if text[-1:] in {"z", "Z"}:
+        text = f"{text[:-1]}+00:00"
+    text = text.replace(" ", "T", 1)
+    fractional = re.match(r"^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})\.(\d+)(.*)$", text)
+    if fractional:
+        text = f"{fractional.group(1)}.{fractional.group(2)[:6].ljust(6, '0')}{fractional.group(3)}"
+    compact = re.match(r"^(.*[+-]\d{2})(\d{2})$", text)
+    if compact:
+        text = f"{compact.group(1)}:{compact.group(2)}"
     try:
-        parsed = dt.datetime.strptime(f"{dt.datetime.now(dt.timezone.utc).year} {raw}", "%Y %b %d %H:%M:%S")
-        return parsed.replace(tzinfo=dt.timezone.utc)
+        parsed = dt.datetime.fromisoformat(text)
     except ValueError:
         return None
+    return local_naive_to_utc(parsed) if parsed.tzinfo is None else parsed.astimezone(dt.timezone.utc)
+
+
+def parse_syslog_time(raw: str, reference: dt.datetime | None = None) -> dt.datetime | None:
+    """Resolve a syslog stamp to UTC in the host zone, inferring the year from a reference instant."""
+    text = raw.strip()
+    iso = SYSLOG_ISO.match(text)
+    if iso:
+        return parse_iso_time(iso.group(1))
+    match = SYSLOG_TRADITIONAL.match(text)
+    if not match:
+        return None
+    anchor = reference or now_utc()
+    horizon = anchor + dt.timedelta(hours=24)
+    candidates: list[dt.datetime] = []
+    for year in (anchor.year, anchor.year - 1):
+        try:
+            naive = dt.datetime.strptime(f"{year} {match.group(1)}", "%Y %b %d %H:%M:%S")
+        except ValueError:
+            continue
+        moment = local_naive_to_utc(naive)
+        if moment is not None:
+            candidates.append(moment)
+    if not candidates:
+        return None
+    return next((moment for moment in candidates if moment <= horizon), candidates[-1])
+
+
+def parse_log_record(line: str, reference: dt.datetime | None = None) -> dict[str, Any] | None:
+    """Split one syslog line into an absolute instant plus program, pid and message."""
+    text = SYSLOG_PRIORITY.sub("", line, count=1)
+    iso = SYSLOG_ISO.match(text)
+    traditional = None if iso else SYSLOG_TRADITIONAL.match(text)
+    if iso:
+        timestamp = parse_iso_time(iso.group(1))
+        remainder = text[iso.end(1):].lstrip()
+    elif traditional:
+        timestamp = parse_syslog_time(traditional.group(1), reference)
+        remainder = text[traditional.end(1):].lstrip()
+    else:
+        return None
+    if timestamp is None:
+        return None
+    header = SYSLOG_HEADER.match(remainder)
+    return {
+        "timestamp": timestamp,
+        "program": header.group("program") if header else None,
+        "pid": header.group("pid") if header else None,
+        "message": header.group("message") if header else remainder,
+        "auditType": "",
+    }
+
+
+def journal_binary() -> str | None:
+    """Return journalctl only when a journal store also exists, so callers never guess."""
+    binary = shutil.which("journalctl")
+    if not binary:
+        return None
+    if not (pathlib.Path("/run/log/journal").is_dir() or pathlib.Path("/var/log/journal").is_dir()):
+        return None
+    return binary
+
+
+def journal_text(value: Any) -> str:
+    """Decode a journal field that may arrive as text or as a byte array."""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list):
+        try:
+            return bytes(int(item) & 0xFF for item in value).decode("utf-8", errors="replace")
+        except (TypeError, ValueError):
+            return ""
+    return ""
+
+
+def journal_records(since: dt.datetime, maximum: int, matches: tuple[str, ...], ledger: SkipLedger) -> list[dict[str, Any]]:
+    """Read structured journald entries through a fixed argv projection; never through a shell."""
+    binary = journal_binary()
+    if binary is None:
+        return []
+    budget = max(1, min(maximum, JOURNAL_MAX_RECORDS))
+    since_local = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(since.timestamp()))
+    argv = [binary, "--output=json", "--no-pager", f"--since={since_local}", f"--lines={budget}", *matches]
+    try:
+        result = run(argv, timeout=20, check=False)
+    except HelperError as exc:
+        ledger.note(f"journalctl 未在时间预算内完成：{exc}")
+        return []
+    if result.returncode != 0:
+        ledger.note(f"journalctl 退出码 {result.returncode}，journald 事件不完整")
+        return []
+    records: list[dict[str, Any]] = []
+    for line in result.stdout.splitlines():
+        if not line.startswith("{"):
+            continue
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            ledger.add(SKIP_LOG_RECORD)
+            continue
+        if not isinstance(entry, dict):
+            continue
+        try:
+            moment = dt.datetime.fromtimestamp(int(str(entry.get("__REALTIME_TIMESTAMP"))) / 1_000_000, dt.timezone.utc)
+        except (TypeError, ValueError, OverflowError, OSError):
+            ledger.add(SKIP_LOG_RECORD)
+            continue
+        if moment < since:
+            continue
+        records.append({
+            "timestamp": moment,
+            "program": journal_text(entry.get("SYSLOG_IDENTIFIER")) or journal_text(entry.get("_COMM")) or None,
+            "pid": journal_text(entry.get("SYSLOG_PID")) or journal_text(entry.get("_PID")) or None,
+            "message": journal_text(entry.get("MESSAGE")),
+            "auditType": journal_text(entry.get("_AUDIT_TYPE_NAME")),
+        })
+    if len(records) >= budget:
+        ledger.note(f"journald 读取达到 {budget} 条上限，更早事件未纳入")
+    return records
+
+
+def auth_event_type(message: str, program: str | None) -> str:
+    if "Accepted " in message:
+        return "authentication_success"
+    if "Failed " in message or "failure" in message.lower():
+        return "authentication_failure"
+    if program == "sudo" or "sudo:" in message:
+        return "privilege_use"
+    return "other"
+
+
+def auth_event(record: dict[str, Any], source: str) -> dict[str, Any] | None:
+    message = str(record["message"])
+    program = record["program"]
+    event_type = auth_event_type(message, program)
+    if event_type == "other":
+        return None
+    user_match = re.search(r"(?:for (?:invalid user )?|sudo:\s*)([A-Za-z_][A-Za-z0-9_.-]{0,63})", message)
+    username = user_match.group(1) if user_match else None
+    if username is None and program == "sudo":
+        sudo_match = re.match(r"\s*([A-Za-z_][A-Za-z0-9_.-]{0,63})\s*:", message)
+        username = sudo_match.group(1) if sudo_match else None
+    ip_match = re.search(r"\bfrom\s+([0-9a-fA-F:.]{3,64})", message)
+    source_ip = ip_match.group(1) if ip_match else None
+    return {"timestamp": utc_iso(record["timestamp"]), "eventType": event_type,
+            "username": username, "sourceIp": source_ip, "program": program, "pid": record["pid"],
+            "summary": f"{event_type}; user={username or 'unknown'}; source={source_ip or 'local'}; program={program or 'unknown'}",
+            "source": source}
+
+
+def log_record_key(record: dict[str, Any]) -> tuple[int, str, str, str]:
+    """Identity used to merge journald and file log copies of the same event exactly once."""
+    return (int(record["timestamp"].timestamp()), str(record["program"] or ""),
+            str(record["pid"] or ""), str(record["message"])[:512])
 
 
 def query_auth_events(request: dict[str, Any]) -> dict[str, Any]:
     hours = safe_int(request.get("sinceHours"), 1, 8760, "sinceHours")
     maximum = safe_int(request.get("maxEvents"), 1, 50000, "maxEvents")
-    cutoff = dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=hours)
-    paths = [pathlib.Path("/var/log/auth.log"), pathlib.Path("/var/log/secure")]
-    items: list[dict[str, Any]] = []
+    cutoff = now_utc() - dt.timedelta(hours=hours)
+    ledger = SkipLedger()
     warnings: list[str] = []
-    available = False
-    for path in paths:
-        if not path.is_file():
-            continue
-        available = True
+    sources: list[str] = []
+    collected: list[tuple[dt.datetime, dict[str, Any]]] = []
+    seen: set[tuple[int, str, str, str]] = set()
+    ceiling = min(maximum * 2, 100000)
+    limited = False
+
+    def absorb(record: dict[str, Any], source: str) -> None:
+        nonlocal limited
+        if limited or record["timestamp"] < cutoff:
+            return
+        key = log_record_key(record)
+        if key in seen:
+            return
+        seen.add(key)
+        event = auth_event(record, source)
+        if event is None:
+            return
+        collected.append((record["timestamp"], event))
+        if len(collected) >= ceiling:
+            limited = True
+
+    if journal_binary() is not None:
+        sources.append("journald")
+        for matches in (JOURNAL_AUTH_FACILITIES, tuple(f"_COMM={name}" for name in JOURNAL_AUTH_COMMANDS)):
+            if limited:
+                break
+            if deadline_exceeded():
+                ledger.expire()
+                break
+            for record in journal_records(cutoff, maximum, matches, ledger):
+                absorb(record, "journald")
+    for path in log_file_set(AUTH_LOG_PATTERNS, ledger):
+        if limited:
+            break
+        if deadline_exceeded():
+            ledger.expire()
+            break
+        sources.append(str(path))
         try:
-            lines = bounded_tail_lines(path)
-        except PermissionError:
-            warnings.append(f"无权读取 {path}")
+            reference = dt.datetime.fromtimestamp(path.stat().st_mtime, dt.timezone.utc)
+        except OSError:
+            ledger.add(SKIP_UNREADABLE)
             continue
-        if path.stat().st_size > LOG_SCAN_MAX_BYTES:
-            warnings.append(f"{path} 超过 64 MiB，仅流式读取最新窗口")
-        for line in lines:
-            timestamp = parse_syslog_time(line[:15])
-            if timestamp is None or timestamp < cutoff:
+        for line in bounded_log_lines(path, ledger):
+            record = parse_log_record(line, reference)
+            if record is None:
                 continue
-            event_type = "other"
-            if "Accepted " in line:
-                event_type = "authentication_success"
-            elif "Failed " in line or "failure" in line.lower():
-                event_type = "authentication_failure"
-            elif "sudo:" in line:
-                event_type = "privilege_use"
-            if event_type == "other":
-                continue
-            user_match = re.search(r"(?:for (?:invalid user )?|sudo:\s*)([A-Za-z_][A-Za-z0-9_.-]{0,63})", line)
-            ip_match = re.search(r"\bfrom\s+([0-9a-fA-F:.]{3,64})", line)
-            program_match = re.search(r"\s([A-Za-z0-9_.-]+)(?:\[\d+\])?:", line[16:])
-            username = user_match.group(1) if user_match else None
-            source_ip = ip_match.group(1) if ip_match else None
-            program = program_match.group(1) if program_match else None
-            items.append({"timestamp": timestamp.isoformat(), "eventType": event_type,
-                          "username": username, "sourceIp": source_ip, "program": program,
-                          "summary": f"{event_type}; user={username or 'unknown'}; source={source_ip or 'local'}; program={program or 'unknown'}",
-                          "source": str(path)})
-            if len(items) >= maximum:
-                return {"items": items, "partial": True, "warnings": warnings + ["认证事件达到配置上限"]}
-    if not available:
-        warnings.append("auth.log/secure 不可用；未配置 journald 导出采集")
-    return {"items": items, "partial": bool(warnings), "warnings": warnings}
+            absorb(record, str(path))
+            if limited:
+                break
+    if not sources:
+        warnings.append("认证事件数据源不可用：journald 与 auth.log/secure 均不存在，本次结果不代表无异常")
+    if limited:
+        warnings.append("认证事件采集达到内部上限，仅保留最新事件")
+    collected.sort(key=lambda item: item[0])
+    items = [event for _, event in collected]
+    if len(items) > maximum:
+        items = items[-maximum:]
+        warnings.append("认证事件达到配置上限")
+    return {"items": items, "partial": bool(warnings) or ledger.partial,
+            "warnings": (warnings + ledger.warnings())[:200], "sources": sources[:LOG_FILE_LIMIT + 1]}
+
+
+def audit_field(text: str, name: str) -> str | None:
+    match = re.search(rf"\b{name}=(?:\"([^\"]*)\"|(\S+))", text)
+    return (match.group(1) or match.group(2)) if match else None
+
+
+def audit_exec_event(text: str, moment: dt.datetime, source: str) -> dict[str, Any]:
+    """Project one audit SYSCALL record; EXECVE a0..aN fields stay out because they carry secrets."""
+    return {"timestamp": utc_iso(moment), "eventType": "process_exec", "pid": audit_field(text, "pid"),
+            "ppid": audit_field(text, "ppid"), "uid": audit_field(text, "uid"), "auid": audit_field(text, "auid"),
+            "comm": redact_secret_text(audit_field(text, "comm") or "", 256),
+            "exe": redact_secret_text(audit_field(text, "exe") or "", 4096), "source": source}
 
 
 def query_exec_events(request: dict[str, Any]) -> dict[str, Any]:
     hours = safe_int(request.get("sinceHours"), 1, 8760, "sinceHours")
     maximum = safe_int(request.get("maxEvents"), 1, 50000, "maxEvents")
-    cutoff = dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=hours)
-    path = pathlib.Path("/var/log/audit/audit.log")
-    if not path.is_file():
-        return {"items": [], "partial": True, "warnings": ["audit.log 不可用；无法还原历史进程执行事件"]}
-    try:
-        lines = bounded_tail_lines(path)
-    except PermissionError:
-        return {"items": [], "partial": True, "warnings": ["无权读取 audit.log"]}
-    items: list[dict[str, Any]] = []
+    cutoff = now_utc() - dt.timedelta(hours=hours)
+    ledger = SkipLedger()
     warnings: list[str] = []
-    if path.stat().st_size > LOG_SCAN_MAX_BYTES:
-        warnings.append("audit.log 超过 64 MiB，仅流式读取最新窗口")
-    for line in lines:
-        if "type=SYSCALL" not in line:
-            continue
-        epoch_match = re.search(r"msg=audit\((\d+(?:\.\d+)?):", line)
-        if not epoch_match:
-            warnings.append("发现无法解析时间的 audit SYSCALL")
-            continue
-        timestamp = dt.datetime.fromtimestamp(float(epoch_match.group(1)), dt.timezone.utc)
-        if timestamp < cutoff:
-            continue
-        def audit_value(name: str) -> str | None:
-            match = re.search(rf"\b{name}=(?:\"([^\"]*)\"|(\S+))", line)
-            return (match.group(1) or match.group(2)) if match else None
-        # Deliberately excludes EXECVE/a0..aN fields because arguments frequently contain secrets.
-        items.append({"timestamp": timestamp.isoformat(), "eventType": "process_exec", "pid": audit_value("pid"),
-                      "ppid": audit_value("ppid"), "uid": audit_value("uid"), "auid": audit_value("auid"),
-                      "comm": redact_secret_text(audit_value("comm") or "", 256),
-                      "exe": redact_secret_text(audit_value("exe") or "", 4096), "source": str(path)})
-        if len(items) >= maximum:
-            return {"items": items, "partial": True, "warnings": warnings + ["进程执行事件达到配置上限"]}
-    return {"items": items, "partial": bool(warnings), "warnings": warnings[:200]}
+    sources: list[str] = []
+    collected: list[tuple[dt.datetime, dict[str, Any]]] = []
+    seen: set[tuple[str, str, str, str]] = set()
+    ceiling = min(maximum * 2, 100000)
+    limited = False
+
+    def absorb(moment: dt.datetime, event: dict[str, Any]) -> None:
+        nonlocal limited
+        if limited or moment < cutoff:
+            return
+        key = (str(event["timestamp"]), str(event["pid"] or ""), str(event["comm"]), str(event["exe"]))
+        if key in seen:
+            return
+        seen.add(key)
+        collected.append((moment, event))
+        if len(collected) >= ceiling:
+            limited = True
+
+    for path in log_file_set(AUDIT_LOG_PATTERNS, ledger):
+        if limited:
+            break
+        if deadline_exceeded():
+            ledger.expire()
+            break
+        sources.append(str(path))
+        for line in bounded_log_lines(path, ledger):
+            if "type=SYSCALL" not in line:
+                continue
+            match = AUDIT_EPOCH.search(line)
+            if not match:
+                ledger.add(SKIP_LOG_RECORD)
+                continue
+            try:
+                moment = dt.datetime.fromtimestamp(float(match.group(1)), dt.timezone.utc)
+            except (ValueError, OverflowError, OSError):
+                ledger.add(SKIP_LOG_RECORD)
+                continue
+            absorb(moment, audit_exec_event(line, moment, str(path)))
+            if limited:
+                break
+    if not limited and not ledger.expired and journal_binary() is not None:
+        records = journal_records(cutoff, maximum, ("_TRANSPORT=audit",), ledger)
+        if records:
+            sources.append("journald")
+        for record in records:
+            message = str(record["message"])
+            if record["auditType"] != "SYSCALL" and not message.startswith("SYSCALL") and "type=SYSCALL" not in message:
+                continue
+            absorb(record["timestamp"], audit_exec_event(message, record["timestamp"], "journald"))
+    if not sources:
+        warnings.append("auditd 与 journald audit 传输均不可用；无法还原历史进程执行事件，本次结果不代表无异常")
+    if limited:
+        warnings.append("进程执行事件采集达到内部上限，仅保留最新事件")
+    collected.sort(key=lambda item: item[0])
+    items = [event for _, event in collected]
+    if len(items) > maximum:
+        items = items[-maximum:]
+        warnings.append("进程执行事件达到配置上限")
+    return {"items": items, "partial": bool(warnings) or ledger.partial,
+            "warnings": (warnings + ledger.warnings())[:200], "sources": sources[:LOG_FILE_LIMIT + 1]}
+
+
+def timeline_instant(item: dict[str, Any]) -> float:
+    """Sort key based on the parsed absolute instant, never on the ISO string itself."""
+    moment = parse_iso_time(str(item.get("timestamp", "")))
+    return moment.timestamp() if moment is not None else 0.0
 
 
 def build_incident_timeline(request: dict[str, Any]) -> dict[str, Any]:
     hours = safe_int(request.get("sinceHours"), 1, 8760, "sinceHours")
     maximum = safe_int(request.get("maxEvents"), 1, 50000, "maxEvents")
-    auth = query_auth_events({"sinceHours": hours, "maxEvents": maximum})
-    executions = query_exec_events({"sinceHours": hours, "maxEvents": maximum})
-    recent = list_recent_executables({"modifiedWithinHours": hours, "maxItems": min(maximum, 500),
-                                      "maxFileSizeBytes": ARTIFACT_MAX_BYTES})
     items: list[dict[str, Any]] = []
-    items.extend({**item, "timelineSource": "auth"} for item in auth["items"])
-    items.extend({**item, "timelineSource": "exec"} for item in executions["items"])
-    items.extend({"timestamp": item["mtime"], "eventType": "file_modified", "timelineSource": "recent_executable",
-                  "path": item["path"], "inode": item["inode"], "sha256": item["sha256"], "signals": item["signals"]}
-                 for item in recent["items"])
-    items.sort(key=lambda item: str(item.get("timestamp", "")))
-    warnings = list(dict.fromkeys(auth["warnings"] + executions["warnings"] + recent["warnings"]))
-    partial = bool(auth["partial"] or executions["partial"] or recent["partial"])
+    warnings: list[str] = []
+    partial = False
+    collectors: tuple[tuple[str, str, Callable[[], dict[str, Any]]], ...] = (
+        ("auth", "认证事件", lambda: query_auth_events({"sinceHours": hours, "maxEvents": maximum})),
+        ("exec", "进程执行事件", lambda: query_exec_events({"sinceHours": hours, "maxEvents": maximum})),
+        ("recent_executable", "近期可执行文件",
+         lambda: list_recent_executables({"modifiedWithinHours": hours, "maxItems": min(maximum, 500),
+                                          "maxFileSizeBytes": ARTIFACT_MAX_BYTES})),
+    )
+    for source, label, collect in collectors:
+        if deadline_exceeded():
+            warnings.append(f"{label}未采集：{DEADLINE_WARNING}")
+            partial = True
+            continue
+        try:
+            result = collect()
+        except HelperError as exc:
+            warnings.append(f"{label}采集失败：{exc}")
+            partial = True
+            continue
+        partial = partial or bool(result["partial"])
+        warnings.extend(str(value) for value in result["warnings"])
+        if source == "recent_executable":
+            items.extend({"timestamp": item["mtime"], "eventType": "file_modified", "timelineSource": source,
+                          "path": item["path"], "inode": item["inode"], "sha256": item["sha256"], "signals": item["signals"]}
+                         for item in result["items"])
+        else:
+            items.extend({**item, "timelineSource": source} for item in result["items"])
+    items.sort(key=timeline_instant)
+    warnings = list(dict.fromkeys(warnings))
     if len(items) > maximum:
         items = items[-maximum:]
         warnings.append("事件时间线达到配置上限，仅保留最新事件")
@@ -2449,6 +3184,7 @@ def main() -> int:
         return 2
     try:
         request = read_request()
+        install_deadline(request)
         result = OPERATIONS[sys.argv[1]](request)
         emit({"ok": True, "result": result})
         return 0

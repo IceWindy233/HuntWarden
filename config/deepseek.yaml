@@ -29,6 +29,7 @@ webshell:
   maxCandidateFiles: 500
   maxFileSizeBytes: 10485760
   yaraRuleDir: ./rules/yara
+  remoteRulePath: /opt/huntwarden/rules/webshell.yar
 
 java:
   supportedContainers: [tomcat]
@@ -43,13 +44,12 @@ account:
 persistence:
   maxItemsPerSource: 500
   includeUserScope: true
-  maxConnections: 500
 
 triage:
   maxProcesses: 2000
   maxConnections: 5000
-  maxFiles: 10000
-  maxTimelineEvents: 10000
+  maxFiles: 5000
+  maxTimelineEvents: 5000
   maxArtifactBytes: 10485760
 
 threatIntel:
