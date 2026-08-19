@@ -47,9 +47,19 @@ export function createRemediationTools(deps: ToolDependencies): SecurityToolDefi
       parameters: Type.Object({ accountRef: Type.String({ pattern: "^ACCT-" }) }, { additionalProperties: false }),
       risk: "WRITE", replayPolicy: "NEVER", timeoutMs: 60_000, auditEvent: "account_disabled", executionMode: "sequential",
       run: async (_toolCallId, params, signal): Promise<SecurityToolResult> => {
+        const account = requireReference<AccountRefShape>(deps.store, deps.task.taskId, params.accountRef, "account");
+        // 永久拒绝必须发生在控制端、且在消费票据与落盘回执之前：目标端 helper 的同名校验
+        // 只在 helper 版本正确且未被替换时有效，不能作为唯一防线。
+        const username = account.value.username;
+        if (username === "root" || username === deps.task.target.username) {
+          throw new SecurityError("PERMISSION_DENIED", `永久拒绝禁用账户 ${username}：root 与当前 SSH 执行账户不可禁用`, {
+            username,
+            executorUsername: deps.task.target.username,
+            accountRef: params.accountRef,
+          });
+        }
         const ticket = deps.approvals.consume(deps.task, "disable_account", params);
         if (!ticket) throw new SecurityError("APPROVAL_REQUIRED", "缺少与本次参数完全匹配的一次性授权票据");
-        const account = requireReference<AccountRefShape>(deps.store, deps.task.taskId, params.accountRef, "account");
         const started: ActionReceipt = { actionId: ticket.actionId, taskId: deps.task.taskId, tool: "disable_account", targetFingerprint: deps.task.target.hostFingerprint, status: "STARTED", startedAt: new Date().toISOString() };
         deps.store.putActionReceipt(started);
         let result: Record<string, unknown>;

@@ -156,6 +156,30 @@ export class SecurityAgentRuntime extends EventEmitter {
     const last = messages.at(-1);
     if (last?.role === "user" || last?.role === "toolResult") await this.agent.continue();
     const completed = this.options.store.getTask(this.options.task.taskId) ?? this.options.task;
+    // 存在状态未知的写动作时，绝不能把任务归档为已完成：`recoveryRequired` 是分析师进入
+    // 恢复入口的唯一信号，清零它等于把撕裂的隔离/锁定动作静默归档。见 9.0。
+    const unresolved = this.options.store.listActionReceipts(this.options.task.taskId)
+      .filter((receipt) => receipt.status === "UNKNOWN");
+    if (unresolved.length > 0) {
+      completed.status = "ABORTED";
+      completed.interruption = {
+        previousStatus: completed.interruption?.previousStatus ?? "RECOVERING",
+        reason: "PROCESS_INTERRUPTED",
+        detectedAt: completed.interruption?.detectedAt ?? new Date().toISOString(),
+        recoveryRequired: true,
+      };
+      this.options.store.saveTask(completed);
+      this.options.store.appendAudit({
+        taskId: this.options.task.taskId,
+        event: "recovery_requires_manual_confirmation",
+        level: "warn",
+        data: {
+          unknownActionIds: unresolved.map((receipt) => receipt.actionId),
+          detail: `${unresolved.length} 个写动作状态未知，需人工确认目标端实际状态`,
+        },
+      });
+      return;
+    }
     completed.status = "COMPLETED";
     if (completed.interruption) completed.interruption.recoveryRequired = false;
     this.options.store.saveTask(completed);
@@ -317,6 +341,18 @@ export class SecurityAgentRuntime extends EventEmitter {
           this.appendRecoveredToolResult(record, result, remote.status === "FAILED");
           return;
         }
+        // 远端回执为 STARTED/UNKNOWN 时，本地必须落 UNKNOWN：这是 9.0 的撕裂窗口，
+        // 「动作从未开始」与「动作可能已半执行」在存储上必须可区分，否则报告与 GUI 读不出不确定性。
+        const local = this.options.store.getActionReceipt(actionId);
+        this.options.store.putActionReceipt({
+          actionId,
+          taskId: record.taskId,
+          tool: record.toolName,
+          targetFingerprint: this.options.task.target.hostFingerprint,
+          status: "UNKNOWN",
+          result: remote,
+          startedAt: local?.startedAt ?? previousApproval.createdAt,
+        });
       } catch (error) {
         this.options.store.appendAudit({
           taskId: record.taskId,
