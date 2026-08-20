@@ -28,7 +28,7 @@
 - [x] 新增发行版识别与 `PARTIAL` 规则修复后，完整本地门禁已经重新执行。
 - [x] 仓库已增加最小 GitHub Actions 工作流、手动 Docker 验证工作流和状态徽章；`975ea2d` 的远端 CI 已成功。
 - [x] Ubuntu 24.04 ARM64 完整依赖 GUI 验收和最低依赖降级补测均已完成；项目所有者确认 Rocky Linux 9 x86_64/SELinux 不属于 `v0.1.0` 发布门槛。
-- [ ] 已有 Release Notes 草案和本地发布资产校验和，但尚无最终 `v0.1.0` tag、GitHub Release 及基于最终 tag 生成的校验和。
+- [ ] Release Notes 与扩展门禁已经收口，但尚无最终 `v0.1.0` tag、GitHub Release 及基于最终发布提交生成的校验和。
 - [x] 项目所有者已采用 MIT License；`LICENSE`、README 徽章与 `package.json` 的 `license` 元数据一致，description、repository 与 author 已补齐。
 
 ### 2026-08-17 本地验证进度
@@ -56,7 +56,8 @@
 - [x] D1 正式报告：模型生成 v1，47 个完整 Finding/Evidence 引用全部有效，自动校验错误为 0；7 个有效 SCAN 任务远程写、审批与 Action Receipt 均为 0。
 - [x] VM 冒烟：4/4 通过；验收后固定夹具、VM、快照和专用 SSH Key 已按验收人确认清理。
 - [x] Ubuntu 最低依赖补测：VM 冒烟 4/4；GUI 任务 `TASK-4a7068b5-cb50-46ae-b4ca-c8c796a5b83e` 完成，YARA/JDK 缺失为 `NOT_CHECKED`，auditd 缺失保留 `PARTIAL/ERROR`，Approval/Action Receipt 均为 0；随后 VM 与临时凭据原路径清理。
-- [ ] 五套 Docker、动态 Debian、三条 GUI E2E 和 macOS 打包尚未在 `975ea2d` 最终候选上重跑；最近完整扩展门禁仍是 2026-08-17 的记录。
+- [x] 最终候选扩展门禁已重跑：五套 Docker 10/10、动态 Debian 6/6、GUI 调查 4/4、处置 3/3、恢复 6/6 均通过。恢复 E2E 同步校正为验证 `UNKNOWN` 写动作必须保持 `ABORTED + recoveryRequired` 的安全不变量。
+- [ ] macOS arm64 发布资产仍需从最终干净提交重新生成并复核 SHA-256。
 
 ## 2. v0.1.0 硬性退出条件
 
@@ -70,11 +71,11 @@
 - [x] `npm run build` 通过。
 - [x] `npm test` 通过：32 个文件通过、7 个按环境跳过；131 项通过、34 项跳过。
 - [x] `npm run probe:build` 通过。
-- [ ] `npm run test:docker` 最近于 2026-08-17 通过 10/10；Helper 0.4.2 合入后的最终候选仍需重跑。
-- [ ] `npm run test:acceptance:real-world` 最近于 2026-08-17 通过 6/6；最终候选仍需重跑。
-- [ ] `npm run test:gui:investigation` 最近于 2026-08-17 通过 4/4；最终候选仍需重跑。
-- [ ] `npm run test:gui:remediation` 最近于 2026-08-17 通过 3/3；最终候选仍需重跑。
-- [ ] `npm run test:gui:recovery` 最近于 2026-08-17 通过 6/6；最终候选仍需重跑。
+- [x] `npm run test:docker`：Helper 0.4.2 最终候选 10/10 通过；执行事件降级断言按当前安全提示校正为同时验证 `auditd` 与“本次结果不代表无异常”。
+- [x] `npm run test:acceptance:real-world`：Debian 12 ARM64 动态场景 6/6 通过。
+- [x] `npm run test:gui:investigation`：4/4 通过。
+- [x] `npm run test:gui:remediation`：3/3 通过。
+- [x] `npm run test:gui:recovery`：6/6 通过；覆盖四个调查中断点、远端写成功但本地未记账和报告阶段中断。
 - [ ] `npm run release:local` 最近于 2026-08-17 通过；最终 tag 前须重新生成 ZIP/DMG、复核 SHA-256 并隔离启动打包 `.app`。
 
 ### Gate B：真实 VM 只读验收
@@ -105,7 +106,7 @@
 - [x] 新增最小必跑工作流：Node.js 22.19、`npm ci`、build、默认测试和 Java 17 probe；Actions 固定到已核对版本的提交 SHA。
 - [x] Docker 与动态 Debian 验收采用独立手动工作流，避免普通提交不稳定和超长运行；Electron E2E 保持发布前本机门禁。
 - [x] 最小 CI 不读取真实模型 Key、DBAPP TI Key、SSH 私钥或用户本地配置。
-- [x] README 已接入对应工作流徽章；`dafd873` 的远端 CI 已完成且结论为 success。
+- [x] README 已接入对应工作流徽章；`f7f8050` 的远端 CI 已完成且结论为 success。
 - [x] 仓库所有者确认该个人项目采用直接更新 `main` 的轻量流程；发布前以干净工作树、完整本地门禁和 main CI 成功作为检查，不额外要求分支保护。
 
 ### Gate D：项目文档
@@ -166,9 +167,9 @@
 
 | 目标 | 权威证据 | 当前状态 |
 | --- | --- | --- |
-| 核心功能可构建 | 干净 checkout 的 CI 日志 | `dafd873` 远端 CI 成功；最终发布提交仍需成功 |
-| 五类检测和安全边界 | Vitest、Docker、GUI E2E 日志 | 默认测试当前通过；Docker/GUI 扩展门禁待最终候选重跑 |
-| 动态非固定样本能力 | `test:acceptance:real-world` 日志与报告 | 最近 6/6 通过；待最终候选重跑 |
+| 核心功能可构建 | 干净 checkout 的 CI 日志 | `f7f8050` 远端 CI 成功；最终发布提交仍需成功 |
+| 五类检测和安全边界 | Vitest、Docker、GUI E2E 日志 | Docker 10/10、GUI 4/4 + 3/3 + 6/6 通过 |
+| 动态非固定样本能力 | `test:acceptance:real-world` 日志与报告 | 最终候选 6/6 通过 |
 | Ubuntu 24.04 ARM64 | 独立 VM 验收记录、报告与脱敏日志 | 完整依赖与最低依赖均完成，`PASS_WITH_LIMITATIONS` |
 | Rocky 9 SELinux | 支持矩阵 | 待执行，非 `v0.1.0` 阻塞项 |
 | 威胁情报在线链 | DBAPP 人工在线验收记录，不保存 Key | 已完成 |
@@ -190,4 +191,4 @@
 
 ## 6. 下一动作
 
-最小 CI、Ubuntu 24.04 ARM64 完整依赖与最低依赖 GUI 验收、MIT 许可证和发布文档骨架均已完成。下一动作依次为：在最终候选上重跑 Docker、动态 Debian、三条 GUI E2E 与 macOS 打包；确认 main CI 成功并复核资产校验和；最后创建 `v0.1.0` annotated tag 与 GitHub Release。
+最小 CI、Ubuntu 24.04 ARM64 完整依赖与最低依赖 GUI 验收、Docker、动态 Debian、三条 GUI E2E、MIT 许可证和发布文档均已完成。下一动作依次为：提交测试与文档收口，确认最终 main CI 成功；从该干净提交生成 macOS arm64 资产并复核校验和；最后创建 `v0.1.0` annotated tag 与 GitHub Release。

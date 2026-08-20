@@ -4,6 +4,13 @@
 
 ## [Unreleased]
 
+### Planned
+
+- Rocky Linux 9 x86_64/SELinux 的授权真实 VM 兼容性验收（非 `v0.1.0` 阻塞项）。
+- `v0.1.0` 演示视频与脱敏截图。
+
+## [0.1.0] - 2026-08-20
+
 ### Fixed
 
 - 认证事件与时间线改为按目标主机时区解析 syslog 时间戳并推断年份，跨源事件按绝对时刻排序；此前非 UTC 主机的时间线整体偏移，跨年日志被丢弃。
@@ -25,15 +32,6 @@
 - `install-helper.sh` 校验 Python 3.8 下限并支持幂等升级，保留 Action Receipt。
 - Ubuntu 24.04.4 ARM64 完成真实 Electron GUI、DeepSeek Provider、严格 SSH Host Key 与 root Helper 只读验收：5 个 QUICK、1 个 STANDARD、1 个 DEEP 均完成，正式报告引用校验通过；平台状态为 `PASS_WITH_LIMITATIONS`。
 - Ubuntu 24.04.4 ARM64 完成最低依赖降级补测：缺少 YARA、auditd 与 JDK Attach 时分别保留 `NOT_CHECKED`、`PARTIAL/ERROR`，未把覆盖缺口误报为安全。
-
-### Planned
-
-- Rocky Linux 9 x86_64/SELinux 的授权真实 VM 兼容性验收（非 `v0.1.0` 阻塞项）。
-- `v0.1.0` 演示视频与脱敏截图。
-
-## [0.1.0] - Draft
-
-### Added
 
 - WebShell、Tomcat 9/JDK 17 内存马、Linux 后门账户、Linux 持久化和 Linux 入侵分诊五类检测包。
 - Electron GUI 与 Ink TUI，支持 Agent 流式输出、安全 GFM Markdown、Steering、任务归档和历史查看。

@@ -108,7 +108,8 @@ describe.skipIf(!enabled)("Docker Lab-Linux-IR 通用入侵分诊", () => {
 
     const executions = await remote.invoke({ operation: "query_exec_events", params: { sinceHours: 168, maxEvents: 500 } });
     expect(executions).toMatchObject({ partial: true });
-    expect(executions.warnings.join(" ")).toContain("audit.log");
+    expect(executions.warnings.join(" ")).toContain("auditd");
+    expect(executions.warnings.join(" ")).toContain("本次结果不代表无异常");
 
     const timeline = await remote.invoke({ operation: "build_incident_timeline", params: { sinceHours: 168, maxEvents: 5000 } });
     expect(timeline.items.some((item) => item.timelineSource === "auth")).toBe(true);

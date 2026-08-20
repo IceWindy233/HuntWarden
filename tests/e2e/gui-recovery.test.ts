@@ -100,7 +100,12 @@ function persistedTaskState(userDataDir: string, taskId: string): { status?: str
   }
 }
 
-async function relaunchAndRecover(userDataDir: string, taskId: string, decision: "deny" | "approve" | "none"): Promise<{ page: Page; completed: TaskSnapshot }> {
+async function relaunchAndRecover(
+  userDataDir: string,
+  taskId: string,
+  decision: "deny" | "approve" | "none",
+  expectedStatus: "COMPLETED" | "ABORTED" = "COMPLETED",
+): Promise<{ page: Page; completed: TaskSnapshot }> {
   const { page } = await launch(userDataDir);
   const interrupted = await snapshot(page, taskId);
   expect(interrupted.task).toMatchObject({ status: "ABORTED", interruption: { recoveryRequired: true } });
@@ -120,8 +125,14 @@ async function relaunchAndRecover(userDataDir: string, taskId: string, decision:
     if (current.task.status === "FAILED") {
       throw new Error(`恢复失败: ${JSON.stringify(current.audit.slice(-5))}`);
     }
+    if (expectedStatus === "ABORTED") {
+      return current.task.status === "ABORTED"
+        && current.audit.some((item) => item.event === "recovery_requires_manual_confirmation")
+        ? "ABORTED"
+        : "RECOVERING";
+    }
     return current.task.status;
-  }, { timeout: 45_000 }).toBe("COMPLETED");
+  }, { timeout: 45_000 }).toBe(expectedStatus);
   return { page, completed: await snapshot(page, taskId) };
 }
 
@@ -133,10 +144,15 @@ describe.skipIf(!enabled)("GUI 进程级崩溃恢复", () => {
       const { app, page } = await launch(userDataDir, crashAt);
       const taskId = await createAndStart(page);
       await waitForExit(app);
-      const { completed } = await relaunchAndRecover(userDataDir, taskId, "deny");
+      const expectedStatus = crashAt === "approval_waiting" ? "ABORTED" : "COMPLETED";
+      const { completed } = await relaunchAndRecover(userDataDir, taskId, "deny", expectedStatus);
       expect(new Set(completed.evidence.map((item) => item.evidenceId)).size).toBe(completed.evidence.length);
       expect(completed.reports).toHaveLength(0);
-      expect(completed.task.interruption?.recoveryRequired).toBe(false);
+      expect(completed.task.interruption?.recoveryRequired).toBe(crashAt === "approval_waiting");
+      if (crashAt === "approval_waiting") {
+        expect(completed.actionReceipts).toMatchObject([{ tool: "quarantine_file", status: "UNKNOWN" }]);
+        expect(completed.audit.some((item) => item.event === "recovery_requires_manual_confirmation")).toBe(true);
+      }
     }, 180_000);
   }
 
