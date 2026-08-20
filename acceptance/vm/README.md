@@ -2,6 +2,8 @@
 
 该入口用于 `v0.1.0` 的 Ubuntu 24.04 ARM64 与 Rocky Linux 9 x86_64/SELinux 验收。它只调用以下固定 READ 操作：
 
+最近一次已完成记录：[`Ubuntu 24.04.4 ARM64 GUI 只读验收`](../../docs/acceptance/VM_UBUNTU_24.04_ARM64_2026-08-20.md)，结果为 `PASS_WITH_LIMITATIONS`。该记录覆盖完整依赖下的真实 GUI/Provider/SSH 调查；发布 Gate 仍需补齐最低依赖降级遍历与 Rocky Linux 9 x86_64/SELinux。
+
 - `get_capabilities`
 - `get_host_info`
 - `capture_volatile_snapshot`

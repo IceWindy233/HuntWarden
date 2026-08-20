@@ -92,7 +92,7 @@ sequenceDiagram
 ```bash
 npm ci
 npm run build
-npm test          # 128 通过 / 34 按环境跳过
+npm test          # 131 通过 / 34 按环境跳过
 npm run lint
 npm run typecheck
 ```
@@ -118,7 +118,7 @@ npm run test:docker
 诚实优于好看，以下均为当前真实状态：
 
 - **检测质量尚未度量。** 验收语料全部是自造的惰性样本，规则在真实站点上的召回率与误报率未知。报告里的 `NO_FINDING` 不应被当作「已排查干净」。
-- **真实发行版 VM 矩阵未验收。** 仅 Ubuntu 22.04 经 Docker 验证，Debian 12 经动态容器场景验证。各平台状态见 [`docs/SUPPORT_MATRIX.md`](docs/SUPPORT_MATRIX.md)。
+- **真实发行版 VM 矩阵尚未完整。** Ubuntu 24.04 ARM64 已完成真实 GUI、Provider、SSH 和 root Helper 验收，结果为 `PASS_WITH_LIMITATIONS`；Ubuntu 22.04 仅经 Docker 验证，Debian 12 仅经动态容器场景验证，其余平台仍待实机验收。各平台状态见 [`docs/SUPPORT_MATRIX.md`](docs/SUPPORT_MATRIX.md)。
 - **Java 检测只在 Tomcat 9 / JDK 17 上验证过。**
 - **处置不可逆。** 没有 `restore_quarantined_file` / `restore_account_state`；`disable_account` 只锁定账户，不终止活动会话、不处理 `authorized_keys`，因此密钥型后门账户仍可登录。
 - **接入方式只有 SSH 私钥文件直连。** 不支持 SSH Agent、加密私钥与 ProxyJump。
@@ -135,6 +135,7 @@ npm run test:docker
 | [`docs/V0_1_0_RELEASE_PLAN.md`](docs/V0_1_0_RELEASE_PLAN.md) | `v0.1.0` 退出条件与发布门禁 |
 | [`docs/adr/`](docs/adr/) | 架构决策记录 |
 | [`docs/acceptance/`](docs/acceptance/) | 真实 VM 验收模板与已完成的验收记录 |
+| [`docs/acceptance/VM_UBUNTU_24.04_ARM64_2026-08-20.md`](docs/acceptance/VM_UBUNTU_24.04_ARM64_2026-08-20.md) | Ubuntu 24.04 ARM64 真实 GUI/Provider/SSH 验收结果与限制 |
 | [`acceptance/vm/README.md`](acceptance/vm/README.md) | 授权临时 VM 的只读冒烟入口与无害夹具 |
 | [`host-helper/README.md`](host-helper/README.md) | 目标端 Helper 的依赖、安装、升级与自检 |
 | [`CHANGELOG.md`](CHANGELOG.md) | 版本变化 |

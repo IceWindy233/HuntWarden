@@ -4,6 +4,8 @@
 >
 > 冻结日期：2026-08-17
 >
+> 最近更新：2026-08-20
+>
 > 本计划只定义 `v0.1.0` 的退出条件。LocalExecutor、离线 Collector、容器调查、Windows 和 Kubernetes 继续保留在长期路线，不阻塞本版本发布。
 
 ## 1. 当前证据基线
@@ -21,13 +23,13 @@
 
 ### 当前尚不能作为发布证据
 
-- [x] VM 验收入口、手动 Docker 工作流与发布材料均已形成可追溯本地提交；本轮收口提交等待推送。
+- [x] VM 验收入口、手动 Docker 工作流、发布材料与 Ubuntu 24.04 ARM64 验收修复均已提交并推送到 `origin/main`。
 - [ ] Debian 12 动态场景是容器化行为验收，不等同于完整 systemd VM 验收。
 - [x] 新增发行版识别与 `PARTIAL` 规则修复后，完整本地门禁已经重新执行。
-- [x] 仓库已增加最小 GitHub Actions 工作流、手动 Docker 验证工作流和状态徽章；远端首次运行仍待推送后确认。
-- [ ] 没有 Ubuntu 24.04 ARM64 与 Rocky Linux 9 x86_64/SELinux 的真实 VM 验收记录。
+- [x] 仓库已增加最小 GitHub Actions 工作流、手动 Docker 验证工作流和状态徽章；`975ea2d` 的远端 CI 已成功。
+- [ ] Ubuntu 24.04 ARM64 完整依赖 GUI 验收已完成，但最低依赖降级补测尚未执行；Rocky Linux 9 x86_64/SELinux 尚无真实 VM 验收记录。
 - [ ] 已有 Release Notes 草案和本地发布资产校验和，但尚无最终 `v0.1.0` tag、GitHub Release 及基于最终 tag 生成的校验和。
-- [ ] `package.json` 已补齐 description、repository 与 author；许可证仍需由项目所有者确认后写入。
+- [x] 项目所有者已采用 MIT License；`LICENSE`、README 徽章与 `package.json` 的 `license` 元数据一致，description、repository 与 author 已补齐。
 
 ### 2026-08-17 本地验证进度
 
@@ -42,9 +44,18 @@
 - [x] `npm run test:gui:recovery`：6/6 通过。
 - [x] `npm run package:gui`：PASS；随后从干净工作树运行 `npm run release:local`，生成 macOS arm64 ZIP/DMG 并实际启动打包 `.app`，未出现致命启动错误。
 - [x] `npm run audit:prod`：0 个运行时依赖漏洞；完整开发依赖审计仍有 Electron Forge 工具链告警，已在发布说明中区分。
-- [ ] 上述结果已在干净工作树复验，但仍需推送后由 GitHub CI 提供独立证据，不能用本机结果替代远端 Gate。
+- [x] 该批结果随后已推送；GitHub CI 在 `2569344` 与最新验收修复提交 `975ea2d` 上均成功。远端最小 CI 不替代 Docker、GUI E2E 与打包等本机扩展门禁。
 
 本轮 Docker 首次执行暴露了固定日期夹具会自然超出 24/168 小时时间窗的问题。Lab-Web 与 Lab-Linux-IR 已改为在容器启动时生成当前 UTC/本地系统日志时间并刷新测试文件 mtime，随后全量 Docker 回归通过；没有通过放宽检测时间窗规避缺陷。
+
+### 2026-08-20 增量验证进度
+
+- [x] `975ea2d` 的 GitHub CI：PASS；覆盖 `npm ci`、Lint、core/renderer typecheck、build、默认测试、Java probe 与生产依赖审计。
+- [x] `npm test`：32 个文件通过、7 个跳过；131 项通过、34 项跳过。
+- [x] Ubuntu 24.04.4 ARM64 完整依赖验收：真实 GUI、DeepSeek Provider、严格 SSH、Helper 0.4.2；5 个 QUICK、1 个 STANDARD、1 个 DEEP 均完成。
+- [x] D1 正式报告：模型生成 v1，47 个完整 Finding/Evidence 引用全部有效，自动校验错误为 0；7 个有效 SCAN 任务远程写、审批与 Action Receipt 均为 0。
+- [x] VM 冒烟：4/4 通过；验收后固定夹具、VM、快照和专用 SSH Key 已按验收人确认清理。
+- [ ] 五套 Docker、动态 Debian、三条 GUI E2E 和 macOS 打包尚未在 `975ea2d` 最终候选上重跑；最近完整扩展门禁仍是 2026-08-17 的记录。
 
 ## 2. v0.1.0 硬性退出条件
 
@@ -56,43 +67,44 @@
 - [x] `npm ci` 可以从干净工作树完成。
 - [x] `npm run audit:prod` 通过；构建工具链告警已单独记录，没有用生产依赖为 0 替代完整审计说明。
 - [x] `npm run build` 通过。
-- [x] `npm test` 通过：25 个文件通过、7 个按环境跳过；88 项通过、34 项跳过。
+- [x] `npm test` 通过：32 个文件通过、7 个按环境跳过；131 项通过、34 项跳过。
 - [x] `npm run probe:build` 通过。
-- [x] `npm run test:docker` 通过：10/10。
-- [x] `npm run test:acceptance:real-world` 通过：6/6。
-- [x] `npm run test:gui:investigation` 通过：4/4。
-- [x] `npm run test:gui:remediation` 通过：3/3。
-- [x] `npm run test:gui:recovery` 通过：6/6。
-- [x] `npm run release:local` 通过；ZIP/DMG 校验和复核成功，打包 `.app` 已完成隔离启动冒烟。
+- [ ] `npm run test:docker` 最近于 2026-08-17 通过 10/10；Helper 0.4.2 合入后的最终候选仍需重跑。
+- [ ] `npm run test:acceptance:real-world` 最近于 2026-08-17 通过 6/6；最终候选仍需重跑。
+- [ ] `npm run test:gui:investigation` 最近于 2026-08-17 通过 4/4；最终候选仍需重跑。
+- [ ] `npm run test:gui:remediation` 最近于 2026-08-17 通过 3/3；最终候选仍需重跑。
+- [ ] `npm run test:gui:recovery` 最近于 2026-08-17 通过 6/6；最终候选仍需重跑。
+- [ ] `npm run release:local` 最近于 2026-08-17 通过；最终 tag 前须重新生成 ZIP/DMG、复核 SHA-256 并隔离启动打包 `.app`。
 
 ### Gate B：真实 VM 只读验收
 
 `v0.1.0` 只要求两台差异最大的真实 VM；其余发行版仍标记为待验收。
 
-1. **Ubuntu 24.04 ARM64**
-   - AppArmor、dpkg、journald、arm64、标准 systemd VM。
-2. **Rocky Linux 9 x86_64 + SELinux Enforcing**
-   - rpm、`/var/log/secure`、SELinux、x86_64、标准 systemd VM。
+1. **Ubuntu 24.04 ARM64：部分完成**
+   - 完整依赖下的 AppArmor、dpkg、journald、arm64、标准 systemd VM 验收为 `PASS_WITH_LIMITATIONS`；详见 [`VM_UBUNTU_24.04_ARM64_2026-08-20.md`](acceptance/VM_UBUNTU_24.04_ARM64_2026-08-20.md)。
+   - 最低依赖下 YARA/auditd/JDK Attach 等能力缺失的独立降级遍历尚未执行，因此 Ubuntu 目标尚未完全关闭 Gate B。
+2. **Rocky Linux 9 x86_64 + SELinux Enforcing：待执行**
+   - 仍需覆盖 rpm、`/var/log/secure`、SELinux、x86_64、标准 systemd VM。
 
-每台 VM 必须保存：
-
-- [ ] 官方镜像来源、镜像 ID/版本、架构、内核和测试时间。
-- [ ] Host Key 带外核验记录；首次发现不能自动信任。
-- [ ] Helper 安装、自检、版本和权限结果。
-- [ ] 最低依赖下的能力降级结果。
-- [ ] 完整依赖下 QUICK、STANDARD、DEEP 的任务结果。
-- [ ] 五类检测分别运行时不存在未选择类别工具调用。
-- [ ] 至少一个无害阳性样本和一个良性对照。
-- [ ] Finding/Evidence/覆盖状态/报告引用正确。
-- [ ] SCAN 远程写成功次数为 0。
-- [ ] 结果回填 `docs/SUPPORT_MATRIX.md`，原始日志只保存脱敏副本。
+| 每台 VM 必须保存 | Ubuntu 24.04 ARM64 | Rocky 9 x86_64/SELinux |
+| --- | --- | --- |
+| 官方镜像来源、镜像 ID/版本、架构、内核和测试时间 | PASS | PENDING |
+| Host Key 带外核验；首次发现不自动信任 | PASS | PENDING |
+| Helper 安装、自检、版本和权限 | PASS（Helper 0.4.2） | PENDING |
+| 最低依赖下的能力降级 | **PENDING** | PENDING |
+| 完整依赖下 QUICK、STANDARD、DEEP | PASS | PENDING |
+| 五类单独运行时不存在未选择类别工具调用 | PASS | PENDING |
+| 无害阳性样本与良性对照 | PASS | PENDING |
+| Finding/Evidence/覆盖状态/报告引用 | PASS | PENDING |
+| SCAN 远程写成功次数为 0 | PASS | PENDING |
+| 支持矩阵与脱敏记录回填 | PASS | PENDING |
 
 ### Gate C：GitHub CI
 
 - [x] 新增最小必跑工作流：Node.js 22.19、`npm ci`、build、默认测试和 Java 17 probe；Actions 固定到已核对版本的提交 SHA。
 - [x] Docker 与动态 Debian 验收采用独立手动工作流，避免普通提交不稳定和超长运行；Electron E2E 保持发布前本机门禁。
 - [x] 最小 CI 不读取真实模型 Key、DBAPP TI Key、SSH 私钥或用户本地配置。
-- [x] README 已接入对应工作流徽章；推送前只能证明链接配置正确，远端状态仍待首次运行。
+- [x] README 已接入对应工作流徽章；`975ea2d` 的远端 CI 已完成且结论为 success。
 - [ ] 分支保护或发布前检查要求由仓库所有者确认。
 
 ### Gate D：项目文档
@@ -103,8 +115,8 @@
 
 ### Gate E：发布
 
-- [ ] 由项目所有者确认许可证；建议在 MIT 与 Apache-2.0 中选择，未确认前不擅自添加。
-- [ ] `package.json` 的 description、repository 和 author 已补齐；license 等待项目所有者确认。
+- [x] 项目所有者已采用 MIT License；仓库 `LICENSE` 与 README 徽章一致。
+- [x] `package.json` 的 description、repository、author 与 `license: MIT` 已补齐。
 - [x] 完成 `CHANGELOG.md` 与 `docs/releases/v0.1.0.md` 草案；发布时替换真实 VM 与最终门禁占位信息。
 - [x] 本地生成 macOS arm64 未签名 ZIP/DMG 并计算 SHA-256；正式 Release 必须从最终 tag 重新生成，不能直接复用预发布资产。
 - [x] Release Notes 草案已明确验证范围占位、未签名提示、已知限制、数据边界和安全警告；正式发布前只需回填最终证据。
@@ -153,10 +165,10 @@
 
 | 目标 | 权威证据 | 当前状态 |
 | --- | --- | --- |
-| 核心功能可构建 | 干净 checkout 的 CI 日志 | 本机通过，远端 CI 待首次运行 |
-| 五类检测和安全边界 | Vitest、Docker、GUI E2E 日志 | 本机完整门禁已通过 |
-| 动态非固定样本能力 | `test:acceptance:real-world` 日志与报告 | 6/6 通过，已提交待推送 |
-| Ubuntu 24.04 ARM64 | 独立 VM 验收记录、报告与脱敏日志 | 待执行 |
+| 核心功能可构建 | 干净 checkout 的 CI 日志 | `975ea2d` 远端 CI 成功 |
+| 五类检测和安全边界 | Vitest、Docker、GUI E2E 日志 | 默认测试当前通过；Docker/GUI 扩展门禁待最终候选重跑 |
+| 动态非固定样本能力 | `test:acceptance:real-world` 日志与报告 | 最近 6/6 通过；待最终候选重跑 |
+| Ubuntu 24.04 ARM64 | 独立 VM 验收记录、报告与脱敏日志 | 完整依赖 `PASS_WITH_LIMITATIONS`；最低依赖补测待执行 |
 | Rocky 9 SELinux | 独立 VM 验收记录、报告与脱敏日志 | 待执行 |
 | 威胁情报在线链 | DBAPP 人工在线验收记录，不保存 Key | 已完成 |
 | 项目文档 | README、支持矩阵、验收与发布文档 | 已完成 |
@@ -176,4 +188,4 @@
 
 ## 6. 下一动作
 
-R0 的本地验证、最小 CI、手动 Docker 工作流、授权 VM 冒烟、无害验收夹具、项目文档与本地发布链路均已完成并提交。当前分支领先远端，`git push --dry-run` 已成功；下一动作是在获得推送授权后触发首次远端 CI，并在获得本地 VM 资源授权后执行 Ubuntu 24.04 ARM64 与 Rocky Linux 9 x86_64/SELinux 的 Gate B。许可证、最终 tag 和 GitHub Release 在两项外部验收通过后完成。
+最小 CI、Ubuntu 24.04 ARM64 完整依赖 GUI 验收、MIT 许可证和发布文档骨架均已完成并推送。下一动作依次为：补齐 Ubuntu 最低依赖降级遍历；执行 Rocky Linux 9 x86_64/SELinux Gate B；在最终候选上重跑 Docker、动态 Debian、三条 GUI E2E 与 macOS 打包；确认 main 分支保护/发布前检查；最后创建 `v0.1.0` annotated tag 与 GitHub Release。
