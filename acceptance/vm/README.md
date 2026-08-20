@@ -25,7 +25,26 @@
 
 Rocky/Alma/RHEL 在 SELinux Enforcing 下安装时，`install-helper.sh` 会在系统提供 `restorecon` 时恢复 Helper、sudoers、状态目录和 Probe 的发行版默认标签。不要通过关闭 SELinux 让验收通过。
 
-## 执行
+## 一键准备（Multipass，本机 arm64）
+
+`bootstrap-multipass.sh` 把「起 VM → 注入公钥 → 带外核验 Host Key → 传仓库 → 安装 Helper 并自检 → 生成验收环境变量」串成一条命令。它不执行只读冒烟与 GUI 验收。
+
+```bash
+# 最低依赖那一遍：记录缺少 yara/auditd/JDK 时的能力降级
+acceptance/vm/bootstrap-multipass.sh
+
+# 补齐完整依赖后复检（Gate B 要求两遍都留档）
+acceptance/vm/bootstrap-multipass.sh --full-deps
+
+# 验收完成后销毁
+acceptance/vm/bootstrap-multipass.sh --destroy
+```
+
+指纹只经 `multipass exec` 的 hypervisor 通道读取，脚本内不使用 `ssh-keyscan`。私钥、`known_hosts` 与含真实地址的环境变量文件全部写入 `~/.huntwarden-vm`（`0700`，文件 `0600`），不进仓库。完整参数见 `--help`。
+
+Rocky Linux 9 x86_64 不在本脚本范围内：在 arm64 主机上它需要模拟，应改用云上或 x86 主机，按下节的手动步骤执行。
+
+## 手动执行只读冒烟
 
 Ubuntu 24.04 ARM64 示例：
 
