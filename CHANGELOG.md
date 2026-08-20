@@ -32,7 +32,6 @@
 - `install-helper.sh` 校验 Python 3.8 下限并支持幂等升级，保留 Action Receipt。
 - Ubuntu 24.04.4 ARM64 完成真实 Electron GUI、DeepSeek Provider、严格 SSH Host Key 与 root Helper 只读验收：5 个 QUICK、1 个 STANDARD、1 个 DEEP 均完成，正式报告引用校验通过；平台状态为 `PASS_WITH_LIMITATIONS`。
 - Ubuntu 24.04.4 ARM64 完成最低依赖降级补测：缺少 YARA、auditd 与 JDK Attach 时分别保留 `NOT_CHECKED`、`PARTIAL/ERROR`，未把覆盖缺口误报为安全。
-
 - WebShell、Tomcat 9/JDK 17 内存马、Linux 后门账户、Linux 持久化和 Linux 入侵分诊五类检测包。
 - Electron GUI 与 Ink TUI，支持 Agent 流式输出、安全 GFM Markdown、Steering、任务归档和历史查看。
 - 确定性最低扫描图、受控 Agent 工具循环、Finding、Evidence、审计与手动版本化 Markdown 报告。

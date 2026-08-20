@@ -57,7 +57,7 @@
 - [x] VM 冒烟：4/4 通过；验收后固定夹具、VM、快照和专用 SSH Key 已按验收人确认清理。
 - [x] Ubuntu 最低依赖补测：VM 冒烟 4/4；GUI 任务 `TASK-4a7068b5-cb50-46ae-b4ca-c8c796a5b83e` 完成，YARA/JDK 缺失为 `NOT_CHECKED`，auditd 缺失保留 `PARTIAL/ERROR`，Approval/Action Receipt 均为 0；随后 VM 与临时凭据原路径清理。
 - [x] 最终候选扩展门禁已重跑：五套 Docker 10/10、动态 Debian 6/6、GUI 调查 4/4、处置 3/3、恢复 6/6 均通过。恢复 E2E 同步校正为验证 `UNKNOWN` 写动作必须保持 `ABORTED + recoveryRequired` 的安全不变量。
-- [ ] macOS arm64 发布资产仍需从最终干净提交重新生成并复核 SHA-256。
+- [x] `7a59a3e` 干净提交已通过 `npm run release:local`：重新完成依赖安装、生产依赖审计、构建、默认测试、Java Probe 与 Electron Forge 打包；ZIP/DMG 的 SHA-256 复核通过，打包 `.app` 以隔离用户目录完成原生 arm64 启动冒烟。
 
 ## 2. v0.1.0 硬性退出条件
 
@@ -76,7 +76,7 @@
 - [x] `npm run test:gui:investigation`：4/4 通过。
 - [x] `npm run test:gui:remediation`：3/3 通过。
 - [x] `npm run test:gui:recovery`：6/6 通过；覆盖四个调查中断点、远端写成功但本地未记账和报告阶段中断。
-- [ ] `npm run release:local` 最近于 2026-08-17 通过；最终 tag 前须重新生成 ZIP/DMG、复核 SHA-256 并隔离启动打包 `.app`。
+- [x] `npm run release:local`：`7a59a3e` 干净提交通过；生成 macOS arm64 ZIP/DMG，`SHA256SUMS` 复核通过，隔离启动打包 `.app` 通过。
 
 ### Gate B：真实 VM 只读验收
 
@@ -119,7 +119,7 @@
 
 - [x] 项目所有者已采用 MIT License；仓库 `LICENSE` 与 README 徽章一致。
 - [x] `package.json` 的 description、repository、author 与 `license: MIT` 已补齐。
-- [x] 完成 `CHANGELOG.md` 与 `docs/releases/v0.1.0.md` 草案；发布时替换真实 VM 与最终门禁占位信息。
+- [x] 完成 `CHANGELOG.md` 与 `docs/releases/v0.1.0.md`，真实 VM、最终扩展门禁与已知限制均已回填。
 - [x] 本地生成 macOS arm64 未签名 ZIP/DMG 并计算 SHA-256；正式 Release 必须从最终 tag 重新生成，不能直接复用预发布资产。
 - [x] Release Notes 草案已明确验证范围占位、未签名提示、已知限制、数据边界和安全警告；正式发布前只需回填最终证据。
 - [ ] 在干净提交上创建 annotated tag `v0.1.0`，推送后创建 GitHub Release。
@@ -191,4 +191,4 @@
 
 ## 6. 下一动作
 
-最小 CI、Ubuntu 24.04 ARM64 完整依赖与最低依赖 GUI 验收、Docker、动态 Debian、三条 GUI E2E、MIT 许可证和发布文档均已完成。下一动作依次为：提交测试与文档收口，确认最终 main CI 成功；从该干净提交生成 macOS arm64 资产并复核校验和；最后创建 `v0.1.0` annotated tag 与 GitHub Release。
+最小 CI、Ubuntu 24.04 ARM64 完整依赖与最低依赖 GUI 验收、Docker、动态 Debian、三条 GUI E2E、macOS arm64 打包/启动冒烟、MIT 许可证和发布文档均已完成。下一动作依次为：提交最终发布证据并确认 main CI 成功；从该最终提交重新生成资产；创建 `v0.1.0` annotated tag 与 GitHub Release，并从 Release 下载复核。
