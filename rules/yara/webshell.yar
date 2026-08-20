@@ -33,9 +33,8 @@ rule HuntWarden_PHP_Request_To_Command_Chain
         $php = "<?php" ascii nocase
         $input = /\$_(GET|POST|REQUEST|COOKIE)\s*\[/ ascii nocase
         $exec = /\b(system|shell_exec|passthru|popen|proc_open)\s*\(/ ascii nocase
-        $redirect = /2\s*>\s*&\s*1/ ascii
     condition:
-        filesize < 10MB and $php and $input and $exec and ($redirect or 3 of them)
+        filesize < 10MB and $php and $input and $exec
 }
 
 rule HuntWarden_JSP_Request_To_Process_Chain

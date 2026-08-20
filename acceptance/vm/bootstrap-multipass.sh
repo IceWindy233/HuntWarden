@@ -227,7 +227,12 @@ step "阶段 2：传输仓库并安装 Helper"
 echo "传输仓库到 ${vm_name}:${REMOTE_REPO} ..."
 repo_tar="$(mktemp -t huntwarden-repo)"
 trap 'rm -f "${repo_tar}"' EXIT
-tar -C "${repo_root}" \
+# COPYFILE_DISABLE=1 与 --no-xattrs/--no-mac-metadata 阻止 bsdtar 写入 macOS 扩展属性；
+# 否则 GNU tar 解包时会为几乎每个文件打印一行
+# `Ignoring unknown extended header keyword 'LIBARCHIVE.xattr.com.apple.*'`，
+# 数百行噪声会把安装与自检的真实输出淹掉。
+COPYFILE_DISABLE=1 tar -C "${repo_root}" \
+  --no-xattrs --no-mac-metadata --no-fflags \
   --exclude='./node_modules' --exclude='./.git' --exclude='./out' --exclude='./dist' \
   --exclude='./release' --exclude='./data' --exclude='./labs/.lab-state' \
   -cf "${repo_tar}" .
