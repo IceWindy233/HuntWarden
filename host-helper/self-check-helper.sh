@@ -75,7 +75,9 @@ CAPABILITY_MAP = {
              "控制端无法以 root 身份调用 Helper，所有需要特权的采集都会被拒绝"),
     "procVisibility": ("/proc 进程可见性 (hidepid)", "core",
                        "非当前用户的进程不可见，可疑进程、进程连接与 Java 内存马检测漏报"),
-    "yara": ("YARA 引擎", "core",
+    # YARA 是可降级依赖，不是核心能力：项目安全不变量要求缺失时相关工具返回 PARTIAL，
+    # 而不是判定目标不可调查。把它列为 core 会让「最低依赖下的降级验收」永远无法通过。
+    "yara": ("YARA 引擎", "optional",
              "WebShell 规则扫描不可用，只剩启发式特征，已知家族漏报且误报率上升"),
     "journal": ("journald", "optional",
                 "journald 主导发行版（Rocky/RHEL/Alma）的认证与执行事件缺失，后门账户维度与事件时间线不完整"),

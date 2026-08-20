@@ -152,6 +152,26 @@ else
   multipass launch "${image}" --name "${vm_name}" --cpus "${cpus}" --memory "${memory}" --disk "${disk}"
 fi
 
+# multipass launch/start 在实例进入 Running 时即返回，但它自己与 VM 之间的 SSH 通道
+# 还要几秒才可达；紧接着执行 transfer/exec 会得到
+# `ssh connection failed: 'Failed to connect: No route to host'`。
+# 因此必须显式等待就绪，而不是假定 launch 返回就等于可用。
+wait_ready() {
+  local attempts=60
+  local index
+  for ((index = 1; index <= attempts; index++)); do
+    if multipass exec "${vm_name}" -- true >/dev/null 2>&1; then
+      ((index > 1)) && echo "VM 在第 ${index} 次探测时就绪。"
+      return 0
+    fi
+    sleep 2
+  done
+  fail "VM ${vm_name} 在 $((attempts * 2)) 秒内未就绪；请检查 multipass list 与 multipass info ${vm_name}"
+}
+
+echo "等待 VM 就绪..."
+wait_ready
+
 # 两种独立解析并校验，避免依赖某一版 multipass 的输出列序。
 vm_ip="$(multipass info "${vm_name}" --format csv 2>/dev/null | awk -F, 'NR==2 {print $3}')"
 if [[ ! ${vm_ip} =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]]; then

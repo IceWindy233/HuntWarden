@@ -2845,17 +2845,42 @@ def auth_event_type(message: str, program: str | None) -> str:
     return "other"
 
 
+# 按优先级依次尝试，而不是用一个含 `sudo:\s*` 分支的大 alternation。
+# 后者对 `pam_unix(sudo:session): session opened for user root(uid=0) by ubuntu(uid=1000)`
+# 会命中最左侧的 `sudo:` 并把用户名解析成 "session"，报告里出现无意义的账户名。
+AUTH_USER_PATTERNS = (
+    # 显式 key=value 最可靠，PAM 的 authentication failure 行只有这一种线索。
+    re.compile(r"\buser=([A-Za-z_][A-Za-z0-9_.$-]{0,63})"),
+    # sshd 的 `for ubuntu` / `for invalid user admin`，以及 PAM 的 `for user root`。
+    re.compile(r"\bfor (?:(?:invalid|illegal) )?(?:user )?([A-Za-z_][A-Za-z0-9_.$-]{0,63})\b"),
+    # systemd-logind 的 `New session 38 of user ubuntu.`
+    re.compile(r"\bof user ([A-Za-z_][A-Za-z0-9_.$-]{0,63})\b"),
+    # sudo 的命令行记录 `  ubuntu : PWD=... ; USER=root ; COMMAND=...`
+    re.compile(r"^\s*([A-Za-z_][A-Za-z0-9_.$-]{0,63})\s*:\s*(?:PWD|TTY|USER)="),
+    # PAM 会话行的发起者 `by ubuntu(uid=1000)`
+    re.compile(r"\bby ([A-Za-z_][A-Za-z0-9_.$-]{0,63})\(uid="),
+)
+
+
+def auth_username(message: str, program: str | None) -> str | None:
+    for pattern in AUTH_USER_PATTERNS:
+        found = pattern.search(message)
+        if found:
+            return found.group(1)
+    if program in {"sudo", "su"}:
+        opening = re.match(r"\s*([A-Za-z_][A-Za-z0-9_.$-]{0,63})\s*:", message)
+        if opening:
+            return opening.group(1)
+    return None
+
+
 def auth_event(record: dict[str, Any], source: str) -> dict[str, Any] | None:
     message = str(record["message"])
     program = record["program"]
     event_type = auth_event_type(message, program)
     if event_type == "other":
         return None
-    user_match = re.search(r"(?:for (?:invalid user )?|sudo:\s*)([A-Za-z_][A-Za-z0-9_.-]{0,63})", message)
-    username = user_match.group(1) if user_match else None
-    if username is None and program == "sudo":
-        sudo_match = re.match(r"\s*([A-Za-z_][A-Za-z0-9_.-]{0,63})\s*:", message)
-        username = sudo_match.group(1) if sudo_match else None
+    username = auth_username(message, program)
     ip_match = re.search(r"\bfrom\s+([0-9a-fA-F:.]{3,64})", message)
     source_ip = ip_match.group(1) if ip_match else None
     return {"timestamp": utc_iso(record["timestamp"]), "eventType": event_type,
@@ -2864,10 +2889,16 @@ def auth_event(record: dict[str, Any], source: str) -> dict[str, Any] | None:
             "source": source}
 
 
-def log_record_key(record: dict[str, Any]) -> tuple[int, str, str, str]:
-    """Identity used to merge journald and file log copies of the same event exactly once."""
+def log_record_key(record: dict[str, Any]) -> tuple[int, str, str]:
+    """Identity used to merge journald and file log copies of the same event exactly once.
+
+    PID is deliberately excluded. journald exposes `_PID` for every entry, but the file log
+    only carries a PID when the program prints `name[pid]:` — `sudo:` and `su:` do not.
+    Keying on PID therefore never matched the two copies of the same sudo event and every
+    such event was counted twice, which also burned the event budget at double rate.
+    """
     return (int(record["timestamp"].timestamp()), str(record["program"] or ""),
-            str(record["pid"] or ""), str(record["message"])[:512])
+            str(record["message"])[:512])
 
 
 def query_auth_events(request: dict[str, Any]) -> dict[str, Any]:
