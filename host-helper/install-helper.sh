@@ -10,6 +10,9 @@ readonly DEFAULT_RULE_PATH="/opt/huntwarden/rules/webshell.yar"
 readonly DEFAULT_PROBE_PATH="/opt/huntwarden/huntwarden-tomcat-probe.jar"
 readonly DEFAULT_SUDOERS_PATH="/etc/sudoers.d/huntwarden"
 readonly DEFAULT_STATE_ROOT="/var/lib/huntwarden"
+# SFTP 需要穿越状态根目录才能读取随机 token 命名的 Artifact；目录本身不可列举。
+# actions/ 与 quarantine/ 仍分别保持 0700，不会因父目录的 execute bit 暴露内容。
+readonly STATE_ROOT_MODE="0711"
 # Helper 依赖 pathlib.Path.unlink(missing_ok=) 等 Python 3.8 才有的 API，
 # 低于此版本会在运行期崩溃，因此安装期即拒绝。
 readonly REQUIRED_PYTHON="3.8"
@@ -149,7 +152,8 @@ fi
 
 # install -d 对已存在目录只校正属主与权限，不会清空内容，因此升级安全。
 install -d -o root -g root -m 0755 "$(dirname "${DEFAULT_HELPER_PATH}")" "${DEFAULT_OPT_ROOT}" "${DEFAULT_RULE_DIR}"
-install -d -o root -g root -m 0700 "${DEFAULT_STATE_ROOT}" "${DEFAULT_STATE_ROOT}/actions"
+install -d -o root -g root -m "${STATE_ROOT_MODE}" "${DEFAULT_STATE_ROOT}"
+install -d -o root -g root -m 0700 "${DEFAULT_STATE_ROOT}/actions"
 install -d -o root -g "$(id -gn "${executor_user}")" -m "${ARTIFACT_DIR_MODE}" "${DEFAULT_STATE_ROOT}/artifacts"
 install -o root -g root -m 0755 "${helper_source}" "${DEFAULT_HELPER_PATH}"
 

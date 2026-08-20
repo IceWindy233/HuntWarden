@@ -2,7 +2,7 @@
 
 > 文档用途：冻结 HuntWarden 从 Docker Lab MVP 演进为真实主机专项检测与受控查杀 Agent 的功能路线，作为后续开发、上下文恢复和验收的唯一长期 TODO 基线。
 >
-> 最近更新：2026-08-19
+> 最近更新：2026-08-20
 
 ## 0. 当前状态
 
@@ -18,7 +18,7 @@
 
 - 检测质量不可度量：验收语料全为惰性自造样本（无真实 WebShell、内存马与发行版输出快照），因此 11.3 的召回率与精确率目标无法计算。
 - 52 个 Helper 操作无 golden fixture，Helper 无 Python 单测，输出契约漂移在 CI 不可检出。
-- 真实发行版 VM 矩阵未验收。
+- Ubuntu 24.04 ARM64 已完成真实 GUI/Provider/SSH VM 只读验收（`PASS_WITH_LIMITATIONS`）；其余发行版、架构与受限能力组合未验收。
 - 处置不可逆，且 `disable_account` 不处理密钥信任面。
 
 工作队列按优先级冻结为：
@@ -445,7 +445,9 @@ Docker Lab 继续用于快速回归，但不能作为唯一实战验收。
 
 ### 11.1 真实 VM
 
-- [ ] Ubuntu 22.04/24.04。
+- [x] Ubuntu 24.04 ARM64（2026-08-20，真实 GUI + DeepSeek + SSH，记录见 `docs/acceptance/VM_UBUNTU_24.04_ARM64_2026-08-20.md`）。
+- [ ] Ubuntu 24.04 x86_64。
+- [ ] Ubuntu 22.04 ARM64/x86_64。
 - [ ] Debian 12。
 - [ ] Rocky/AlmaLinux 9 + SELinux Enforcing。
 - [ ] Amazon Linux 2023。
@@ -545,7 +547,7 @@ npm run audit:prod                   PASS（运行时依赖漏洞 0）
 8. **Sprint 4C：Docker/containerd 调查**。
 9. 根据真实试用反馈，在 **Windows** 与 **Kubernetes 深入支持**之间选择下一条主线。
 
-当前短板是检测质量不可度量：语料全为惰性自造样本，规则在真实站点上的召回率与误报率未知。只读试用可以开始，但报告中的 `NO_FINDING` 暂不应被当作“已排查干净”。只有完成真实 VM 矩阵后，才能把对应发行版从“待实机验收”提升为“已验证”；完成 9.0 与 Sprint 5 后，才进入真实主机扩展处置试用阶段。
+当前短板是检测质量不可度量：语料全为惰性自造样本，规则在真实站点上的召回率与误报率未知。只读试用可以开始，但报告中的 `NO_FINDING` 暂不应被当作“已排查干净”。Ubuntu 24.04 ARM64 已提升为“已验证（有限制）”；其它平台仍须完成对应真实 VM 验收。完成 9.0 与 Sprint 5 后，才进入真实主机扩展处置试用阶段。
 
 ## 13. 上下文恢复提示
 

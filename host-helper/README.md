@@ -53,6 +53,7 @@ sudo ./host-helper/install-helper.sh --executor-user <SSH用户> --self-check
 | `/opt/huntwarden/rules/webshell.yar` | `root:root 0644` | WebShell YARA 规则 |
 | `/opt/huntwarden/huntwarden-tomcat-probe.jar` | `root:root 0644` | Tomcat 探针 |
 | `/etc/sudoers.d/huntwarden` | `root:root 0440` | 只允许执行用户免密调用 Helper |
+| `/var/lib/huntwarden` | `root:root 0711` | 状态根目录；仅允许 SFTP 穿越随机 Token 路径，不允许列举 |
 | `/var/lib/huntwarden/actions` | `root:root 0700` | Action Receipt（处置回执） |
 | `/var/lib/huntwarden/artifacts` | `root:<执行用户组> 0711` | Evidence 暂存；`0711` 必须与 Helper `prepare_artifact_dir()` 一致 |
 

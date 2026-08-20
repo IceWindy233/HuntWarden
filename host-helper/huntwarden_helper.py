@@ -39,7 +39,7 @@ ARTIFACT_TOKEN = re.compile(r"^[a-f0-9]{64}$")
 ARTIFACT_MAX_BYTES = 100 * 1024 * 1024
 ARTIFACT_TTL_SECONDS = 15 * 60
 LOG_SCAN_MAX_BYTES = 64 * 1024 * 1024
-HELPER_VERSION = "0.4.0"
+HELPER_VERSION = "0.4.2"
 PROBE_JAR = pathlib.Path("/opt/huntwarden/huntwarden-tomcat-probe.jar")
 SCRIPT_EXTENSIONS = {
     ".php", ".phtml", ".php5", ".phar", ".inc", ".jsp", ".jspx", ".asp", ".aspx",
@@ -291,6 +291,27 @@ def path_kind(path: pathlib.Path, ledger: SkipLedger, *, follow: bool = False) -
     return "file" if stat.S_ISREG(info.st_mode) else "other"
 
 
+def optional_path_kind(path: pathlib.Path, ledger: SkipLedger, *, follow: bool = False) -> str:
+    """Classify an optional configuration path without treating absence as lost coverage.
+
+    Linux distributions legitimately omit facilities such as doas or legacy Polkit local
+    authority. Permission and I/O failures remain visible, while ENOENT means the facility is
+    simply not configured on this host.
+    """
+    try:
+        info = path.stat() if follow else path.lstat()
+    except FileNotFoundError:
+        return "unavailable"
+    except OSError:
+        ledger.add(SKIP_UNREADABLE)
+        return "unavailable"
+    if stat.S_ISLNK(info.st_mode):
+        return "symlink"
+    if stat.S_ISDIR(info.st_mode):
+        return "directory"
+    return "file" if stat.S_ISREG(info.st_mode) else "other"
+
+
 def bounded_walk(root: pathlib.Path, ledger: SkipLedger, *, max_depth: int = WALK_MAX_DEPTH,
                  visit_limit: int = WALK_VISIT_LIMIT) -> Iterator[tuple[pathlib.Path, list[str]]]:
     """Walk a single filesystem under fixed depth, visit and deadline bounds, pruning links and pseudo roots."""
@@ -362,6 +383,14 @@ def artifact_path(token: str) -> pathlib.Path:
 
 
 def prepare_artifact_dir() -> None:
+    if os.geteuid() == 0:
+        state_root = ARTIFACT_DIR.parent
+        state_info = state_root.lstat()
+        if not stat.S_ISDIR(state_info.st_mode) or stat.S_ISLNK(state_info.st_mode) or state_info.st_uid != 0:
+            raise HelperError("EVIDENCE_COLLECTION", "artifact state root is not a trusted root-owned directory")
+        # SFTP 以 SSH 执行用户读取随机 token 文件，需要穿越父目录；0711 不允许列目录。
+        # actions/ 与 quarantine/ 自身仍为 0700，因此不会暴露回执或隔离内容。
+        os.chmod(state_root, 0o711)
     ARTIFACT_DIR.mkdir(parents=True, exist_ok=True, mode=0o711)
     info = ARTIFACT_DIR.lstat()
     if not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode):
@@ -1427,7 +1456,7 @@ def inspect_privilege_delegation(request: dict[str, Any]) -> dict[str, Any]:
     for root, kind, pattern in ((pathlib.Path("/etc/sudoers.d"), "sudoers", "*"),
                                 (pathlib.Path("/etc/polkit-1/rules.d"), "polkit", "*.rules"),
                                 (pathlib.Path("/etc/polkit-1/localauthority"), "polkit", "*.pkla")):
-        if path_kind(root, ledger, follow=True) == "directory":
+        if optional_path_kind(root, ledger, follow=True) == "directory":
             candidates.extend((kind, path) for path in root.rglob(pattern) if path_kind(path, ledger) == "file")
     items: list[dict[str, Any]] = []
     warnings: list[str] = []
@@ -1436,7 +1465,7 @@ def inspect_privilege_delegation(request: dict[str, Any]) -> dict[str, Any]:
         if deadline_exceeded():
             warnings.append(DEADLINE_WARNING)
             break
-        if path_kind(path, ledger) != "file":
+        if optional_path_kind(path, ledger) != "file":
             continue
         try:
             resolved = path.resolve()
