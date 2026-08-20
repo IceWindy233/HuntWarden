@@ -20,6 +20,16 @@ npm test
 npm run probe:build
 npm run make:gui
 
+packaged_asar="$(find "$project_root/out" -path '*/HuntWarden.app/Contents/Resources/app.asar' -print -quit)"
+if [[ -z "$packaged_asar" ]]; then
+  echo "未找到打包后的 app.asar。" >&2
+  exit 1
+fi
+if npx --no-install asar list "$packaged_asar" | grep -Eq '^/release($|/)'; then
+  echo "发布资产目录被递归打入 app.asar；拒绝生成 Release。" >&2
+  exit 1
+fi
+
 find "$project_root/out/make" -type f \( -name '*.zip' -o -name '*.dmg' \) -print0 |
   while IFS= read -r -d '' artifact; do
     cp "$artifact" "$release_dir/"

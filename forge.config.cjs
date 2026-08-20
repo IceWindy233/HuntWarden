@@ -13,6 +13,7 @@ module.exports = {
       /^\/tests($|\/)/,
       /^\/coverage($|\/)/,
       /^\/docs($|\/)/,
+      /^\/release($|\/)/,
     ],
   },
   makers: [

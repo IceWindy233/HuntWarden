@@ -57,7 +57,7 @@
 - [x] VM 冒烟：4/4 通过；验收后固定夹具、VM、快照和专用 SSH Key 已按验收人确认清理。
 - [x] Ubuntu 最低依赖补测：VM 冒烟 4/4；GUI 任务 `TASK-4a7068b5-cb50-46ae-b4ca-c8c796a5b83e` 完成，YARA/JDK 缺失为 `NOT_CHECKED`，auditd 缺失保留 `PARTIAL/ERROR`，Approval/Action Receipt 均为 0；随后 VM 与临时凭据原路径清理。
 - [x] 最终候选扩展门禁已重跑：五套 Docker 10/10、动态 Debian 6/6、GUI 调查 4/4、处置 3/3、恢复 6/6 均通过。恢复 E2E 同步校正为验证 `UNKNOWN` 写动作必须保持 `ABORTED + recoveryRequired` 的安全不变量。
-- [x] `7a59a3e` 干净提交已通过 `npm run release:local`：重新完成依赖安装、生产依赖审计、构建、默认测试、Java Probe 与 Electron Forge 打包；ZIP/DMG 的 SHA-256 复核通过，打包 `.app` 以隔离用户目录完成原生 arm64 启动冒烟。
+- [x] `7a59a3e` 的发布演练完成全部构建、测试、校验和与启动冒烟，同时发现旧 `release/` 资产会被递归打入 `app.asar`。Forge 已明确排除该目录，发布脚本新增内容守卫；修复预检中 `app.asar` 由约 965 MB 恢复至 133 MB，ZIP/DMG 恢复至约 139/137 MB。
 
 ## 2. v0.1.0 硬性退出条件
 
@@ -76,7 +76,7 @@
 - [x] `npm run test:gui:investigation`：4/4 通过。
 - [x] `npm run test:gui:remediation`：3/3 通过。
 - [x] `npm run test:gui:recovery`：6/6 通过；覆盖四个调查中断点、远端写成功但本地未记账和报告阶段中断。
-- [x] `npm run release:local`：`7a59a3e` 干净提交通过；生成 macOS arm64 ZIP/DMG，`SHA256SUMS` 复核通过，隔离启动打包 `.app` 通过。
+- [x] `npm run release:local`：依赖安装、生产依赖审计、构建、131 项默认测试、Java Probe、macOS arm64 ZIP/DMG、`SHA256SUMS` 与隔离启动冒烟全部通过；`app.asar` 额外验证不包含递归 `release/` 资产。
 
 ### Gate B：真实 VM 只读验收
 

@@ -23,6 +23,7 @@
 - Helper 的静默 `OSError` 跳过改为累积告警并置 `PARTIAL`，聚合类操作改为逐子采集器隔离降级。
 - Helper Artifact 状态根目录改为不可列举但可穿越的 `root:root 0711`，`actions/` 与 `quarantine/` 继续保持 `0700`；修复真实 SSH 用户无法通过 SFTP 下载已授权 Evidence 的问题。
 - 权限委派检查区分“可选 doas/旧式 Polkit 配置不存在”与真实权限/I/O 失败；缺失未启用的设施不再把后门账户覆盖错误降级为 `ERROR`。
+- Electron Forge 明确排除本地 `release/`，发布脚本同时检查 `app.asar`；修复重复构建时旧 ZIP/DMG 被递归打入应用、导致安装包持续膨胀的问题。
 
 ### Added
 
