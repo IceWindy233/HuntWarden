@@ -10,7 +10,7 @@
 - GUI 最终报告：验收人已确认生成；`RPT-9b4e2cc0-a87d-4ad6-85f9-5f4a609238b6`，v1，`MODEL`
 - 报告 SHA-256：`b45b1e9a11d1e17740976fe18960dd4b7596056405eaca33d7482ff1f51a80dc`
 
-本轮证明 Ubuntu 24.04 ARM64 官方 Multipass VM 上的 GUI 建任务、真实模型 Tool Call、严格 SSH Host Key、root Helper、五类最低扫描、SFTP Evidence、SQLite 持久化和 SCAN 零写入能够形成闭环。它不证明真实恶意样本召回率，也不覆盖 Ubuntu 22.04、x86_64、SELinux、受限 sudo 或缺依赖组合。
+本轮证明 Ubuntu 24.04 ARM64 官方 Multipass VM 上的 GUI 建任务、真实模型 Tool Call、严格 SSH Host Key、root Helper、五类最低扫描、SFTP Evidence、SQLite 持久化和 SCAN 零写入能够形成闭环。完整依赖和最低依赖两种形态均已执行：最低依赖下缺少 YARA、auditd 与 JDK Attach 时，GUI 与结构化 Finding 会保留 `PARTIAL/ERROR/NOT_CHECKED`，不会误报为安全。它不证明真实恶意样本召回率，也不覆盖 Ubuntu 22.04、x86_64、SELinux 或受限 sudo。
 
 ## 2. 目标身份
 
@@ -42,6 +42,21 @@
 | Docker/containerd | UNSUPPORTED | 目标未安装，符合预期降级 |
 
 缺少运行中的 Tomcat/JVM 没有被描述为安全：QUICK、STANDARD、DEEP 均输出 `java_memory_shell=NOT_CHECKED`。可选的 doas 与旧式 Polkit 配置不存在时不再误报为权限/I/O 丢失。
+
+### 3.1 最低依赖降级补测
+
+- 补测任务：`TASK-4a7068b5-cb50-46ae-b4ca-c8c796a5b83e`，`COMPLETED`，QUICK/SCAN，真实 DeepSeek Provider，20 次工具调用。
+- 目标：全新 Multipass Ubuntu 24.04.4 ARM64；不安装 `yara`、`auditd`、`openjdk-17-jdk-headless`，Helper 仍为 0.4.2。
+- 严格 SSH 与 Helper 界面测试通过；`npm run test:acceptance:vm` 为 4/4 PASS。
+- `get_capabilities` 返回 `partial`：YARA、auditd、JDK Attach 为 `UNSUPPORTED`，journald、root Helper、`/proc` 可见性为 `SUPPORTED`。
+
+| 检测类别 | 结构化结果 | 验收判定 |
+| --- | --- | --- |
+| WebShell | `FIND-1a4e61a6-8daf-4805-809d-d4010fc5b641`：`NOT_CHECKED` | 明确写出 YARA 未安装、无可扫描对象，且“当前结果不构成安全结论” |
+| Java 内存马 | `FIND-3fe35b5b-9410-4199-b238-685d6cbc4ef3`：`NOT_CHECKED` | 明确写出 JDK/JVM Attach 缺失且无 JVM，不输出 `NO_FINDING` |
+| Linux 入侵分诊 | `FIND-d68eb32b-4b93-4c86-b2af-eb159c8ff6df`：`ERROR`；另保留确定性 `SUSPICIOUS` | `query_exec_events` 为 `partial`，明确“无法还原历史进程执行事件，本次结果不代表无异常” |
+
+该任务最终覆盖为 `webshell=NOT_CHECKED`、`java_memory_shell=NOT_CHECKED`、`linux_intrusion_triage=SUSPICIOUS`。Approval 与 Action Receipt 均为 0，没有 WRITE/处置调用。GUI 展示与 SQLite 中的 Task、Finding、Tool Run 状态一致。
 
 ## 4. GUI 检测包结果
 
@@ -96,5 +111,5 @@
 ## 8. 尚需验收人完成
 
 1. [x] GUI 最终报告已由验收人确认生成；文件 `0600`、24272 bytes，数据库与磁盘 SHA-256 一致，47 个完整 Finding/Evidence 引用全部存在，自动校验错误为 0。
-2. [x] 验收人选择全部清理：两个固定夹具先验证为 `ABSENT`，随后 `hw-vm`、快照和 `~/.huntwarden-vm` 专用 SSH 文件永久删除；Profile 恢复到现有 Lab 凭据路径。
-3. 本轮仅将 Ubuntu 24.04 ARM64 标记为“已验证（有限制）”；其余发行版和架构保持待实机验收。
+2. [x] 完整依赖验收的两个固定夹具先验证为 `ABSENT`，随后 VM、快照和专用 SSH 文件清理；最低依赖补测结束后第二台 `hw-vm` 也已销毁，临时凭据目录移入 macOS 废纸篓，Profile 恢复到现有 Lab 凭据路径。
+3. [x] Ubuntu 24.04 ARM64 的完整依赖与最低依赖两种形态均已闭环，平台保持“已验证（有限制）”；其余发行版和架构保持待实机验收，但不阻塞 `v0.1.0`。

@@ -445,7 +445,7 @@ Docker Lab 继续用于快速回归，但不能作为唯一实战验收。
 
 ### 11.1 真实 VM
 
-- [x] Ubuntu 24.04 ARM64（2026-08-20，真实 GUI + DeepSeek + SSH，记录见 `docs/acceptance/VM_UBUNTU_24.04_ARM64_2026-08-20.md`）。
+- [x] Ubuntu 24.04 ARM64（2026-08-20，真实 GUI + DeepSeek + SSH；完整依赖和 YARA/auditd/JDK 缺失的最低依赖两种形态均完成，记录见 `docs/acceptance/VM_UBUNTU_24.04_ARM64_2026-08-20.md`）。
 - [ ] Ubuntu 24.04 x86_64。
 - [ ] Ubuntu 22.04 ARM64/x86_64。
 - [ ] Debian 12。
@@ -454,7 +454,7 @@ Docker Lab 继续用于快速回归，但不能作为唯一实战验收。
 - [ ] x86_64 与 arm64。
 - [ ] systemd、auditd、journald 和传统文件日志组合。
 - [ ] NFS、大目录、大日志、只读文件系统和受限 sudo。
-- [ ] Attach 被禁用、YARA 缺失、Python 缺失、`hidepid` 和 namespace 不匹配。
+- [ ] Attach 被禁用、Python 缺失、`hidepid` 和 namespace 不匹配（Ubuntu 24.04 ARM64 的 YARA/JDK Attach 缺失已验证）。
 
 ### 11.2 对抗与异常场景
 

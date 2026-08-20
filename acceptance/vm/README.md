@@ -1,8 +1,8 @@
 # HuntWarden 真实 VM 只读冒烟
 
-该入口用于 `v0.1.0` 的 Ubuntu 24.04 ARM64 与 Rocky Linux 9 x86_64/SELinux 验收。它只调用以下固定 READ 操作：
+该入口用于授权临时 Linux VM 的只读验收；`v0.1.0` 的发布门槛为 Ubuntu 24.04 ARM64，Rocky Linux 9 x86_64/SELinux 保留为后续非阻塞兼容性验证。它只调用以下固定 READ 操作：
 
-最近一次已完成记录：[`Ubuntu 24.04.4 ARM64 GUI 只读验收`](../../docs/acceptance/VM_UBUNTU_24.04_ARM64_2026-08-20.md)，结果为 `PASS_WITH_LIMITATIONS`。该记录覆盖完整依赖下的真实 GUI/Provider/SSH 调查；发布 Gate 仍需补齐最低依赖降级遍历与 Rocky Linux 9 x86_64/SELinux。
+最近一次已完成记录：[`Ubuntu 24.04.4 ARM64 GUI 只读验收`](../../docs/acceptance/VM_UBUNTU_24.04_ARM64_2026-08-20.md)，结果为 `PASS_WITH_LIMITATIONS`。该记录同时覆盖完整依赖下的真实 GUI/Provider/SSH 调查，以及最低依赖下缺少 YARA、auditd、JDK Attach 时的显式降级；Ubuntu 发布 Gate 已关闭。
 
 - `get_capabilities`
 - `get_host_info`
@@ -35,7 +35,7 @@ Rocky/Alma/RHEL 在 SELinux Enforcing 下安装时，`install-helper.sh` 会在�
 # 最低依赖那一遍：记录缺少 yara/auditd/JDK 时的能力降级
 acceptance/vm/bootstrap-multipass.sh
 
-# 补齐完整依赖后复检（Gate B 要求两遍都留档）
+# 补齐完整依赖后复检（Ubuntu 发布 Gate 要求两遍都留档）
 acceptance/vm/bootstrap-multipass.sh --full-deps
 
 # 验收完成后销毁
@@ -44,7 +44,7 @@ acceptance/vm/bootstrap-multipass.sh --destroy
 
 指纹只经 `multipass exec` 的 hypervisor 通道读取，脚本内不使用 `ssh-keyscan`。私钥、`known_hosts` 与含真实地址的环境变量文件全部写入 `~/.huntwarden-vm`（`0700`，文件 `0600`），不进仓库。完整参数见 `--help`。
 
-Rocky Linux 9 x86_64 不在本脚本范围内：在 arm64 主机上它需要模拟，应改用云上或 x86 主机，按下节的手动步骤执行。
+Rocky Linux 9 x86_64 不在本脚本范围内：在 arm64 主机上它需要模拟；后续如要扩展兼容性矩阵，应改用云上或 x86 主机，按下节的手动步骤执行。该项不阻塞 `v0.1.0`。
 
 ## 手动执行只读冒烟
 

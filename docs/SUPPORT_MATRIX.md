@@ -2,7 +2,7 @@
 
 > 更新日期：2026-08-20。`已验证`仅表示仓库自动化或明确环境已通过；`待实机验收`不等同于不支持，而是不应在报告中宣称已验证。
 >
-> 最近基线：Ubuntu 24.04.4 ARM64 已用真实 GUI、Provider、SSH 和 root Helper 完成 QUICK/STANDARD/DEEP 只读 VM 验收，结果为 `PASS_WITH_LIMITATIONS`；详见 [`VM_UBUNTU_24.04_ARM64_2026-08-20.md`](acceptance/VM_UBUNTU_24.04_ARM64_2026-08-20.md)。Rocky Linux 9 x86_64/SELinux 及其余矩阵仍待执行。
+> 最近基线：Ubuntu 24.04.4 ARM64 已用真实 GUI、Provider、SSH 和 root Helper 完成 QUICK/STANDARD/DEEP 只读 VM 验收，并完成缺少 YARA、auditd、JDK Attach 的最低依赖降级补测，结果为 `PASS_WITH_LIMITATIONS`；详见 [`VM_UBUNTU_24.04_ARM64_2026-08-20.md`](acceptance/VM_UBUNTU_24.04_ARM64_2026-08-20.md)。Rocky Linux 9 x86_64/SELinux 及其余矩阵仍待执行，但不属于 `v0.1.0` 发布门槛。
 >
 > 检测质量尚未度量：验收语料全为惰性自造样本，规则在真实站点上的召回率与误报率未知。本矩阵的“已验证”只覆盖能力存在与降级行为，不代表检出效果。
 
@@ -21,10 +21,10 @@
 | 平台 | 状态 | 当前说明 |
 | --- | --- | --- |
 | Ubuntu 22.04 arm64/x86_64 | Docker 已验证 | 五套 Lab 使用 Ubuntu 22.04；真实 VM 仍需验收。 |
-| Ubuntu 24.04 ARM64 | 已验证（有限制） | 24.04.4 / kernel 6.8 / systemd / AppArmor；真实 GUI + DeepSeek + SSH，5 QUICK + 1 STANDARD + 1 DEEP 完成。无运行 Tomcat/JVM，Java 为 `NOT_CHECKED`；预算和确定性规则会保留部分发行版基线 `PARTIAL/SUSPICIOUS`。 |
+| Ubuntu 24.04 ARM64 | 已验证（有限制） | 24.04.4 / kernel 6.8 / systemd / AppArmor；真实 GUI + DeepSeek + SSH，5 QUICK + 1 STANDARD + 1 DEEP 完成；最低依赖下 YARA/JDK 缺失落为 `NOT_CHECKED`，auditd 缺失落为 `PARTIAL/ERROR`。无运行 Tomcat/JVM，Java 为 `NOT_CHECKED`；预算和确定性规则会保留部分发行版基线 `PARTIAL/SUSPICIOUS`。 |
 | Ubuntu 24.04 x86_64 | 待实机验收 | ARM64 结果不能外推为 x86_64。 |
 | Debian 12 ARM64 | 动态容器场景已验证，待实机验收 | 非固定 Debian 12 场景 6/6 通过，覆盖发行版识别与行为样本；不等同于标准 systemd VM。 |
-| Rocky / AlmaLinux 9 | 待实机验收 | rpm、`secure` 日志和 SELinux 能力识别已实现。 |
+| Rocky / AlmaLinux 9 | 待实机验收（非 v0.1.0 阻塞） | rpm、`secure` 日志和 SELinux 能力识别已实现；当前主要使用场景以 Ubuntu 为主。 |
 | Amazon Linux 2023 | 待实机验收 | rpm 路径已实现，尚无自动化 VM。 |
 
 Helper 启动时返回 `SUPPORTED | PARTIAL | UNSUPPORTED | PERMISSION_DENIED` 能力状态，并上报主机时区与 UTC 偏差。root Helper 是完整调查的推荐方式；缺少 YARA、auditd、journald、JDK Attach、systemd 管理器或 `/proc` 可见性时，相关工具必须返回 `PARTIAL/ERROR`，不能输出安全结论。控制端会校验 Helper 协议版本，不兼容时拒绝任务。当前尚不支持自动上传非特权临时 Helper；管理员应使用 [`host-helper/install-helper.sh`](../host-helper/install-helper.sh) 安装（要求 Python 3.8+，会一并下发 YARA 规则与 Tomcat 探针），并用 [`host-helper/self-check-helper.sh`](../host-helper/self-check-helper.sh) 自检。

@@ -24,11 +24,12 @@
 - `self-check-helper.sh` 逐项报告 YARA、journald、auditd、JDK Attach、`/proc` 可见性与 SELinux/AppArmor 的能力状态及降级影响。
 - `install-helper.sh` 校验 Python 3.8 下限并支持幂等升级，保留 Action Receipt。
 - Ubuntu 24.04.4 ARM64 完成真实 Electron GUI、DeepSeek Provider、严格 SSH Host Key 与 root Helper 只读验收：5 个 QUICK、1 个 STANDARD、1 个 DEEP 均完成，正式报告引用校验通过；平台状态为 `PASS_WITH_LIMITATIONS`。
+- Ubuntu 24.04.4 ARM64 完成最低依赖降级补测：缺少 YARA、auditd 与 JDK Attach 时分别保留 `NOT_CHECKED`、`PARTIAL/ERROR`，未把覆盖缺口误报为安全。
 
 ### Planned
 
-- Ubuntu 24.04 ARM64 最低依赖降级补测，以及 Rocky Linux 9 x86_64/SELinux 的授权真实 VM 验收。
-- `v0.1.0` 演示视频、脱敏截图与未签名 macOS arm64 发布资产。
+- Rocky Linux 9 x86_64/SELinux 的授权真实 VM 兼容性验收（非 `v0.1.0` 阻塞项）。
+- `v0.1.0` 演示视频与脱敏截图。
 
 ## [0.1.0] - Draft
 
