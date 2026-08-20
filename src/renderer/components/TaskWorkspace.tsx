@@ -122,7 +122,7 @@ export function TaskWorkspace({ snapshot, refresh, notify, liveStream }: { snaps
 
     <nav className="task-tabs">{TABS.map((item) => <button key={item} className={tab === item ? "active" : ""} onClick={() => setTab(item)}>{item}{item === "发现" && snapshot.findings.length ? <span>{snapshot.findings.length}</span> : item === "证据" && snapshot.evidence.length ? <span>{snapshot.evidence.length}</span> : null}</button>)}</nav>
 
-    <main className="task-content">
+    <main className="task-content" aria-label={`${tab}内容`}>
       {tab === "调查" ? <Investigation snapshot={snapshot} {...(liveStream ? { liveStream } : {})} /> : null}
       {tab === "工具" ? <ToolTimeline snapshot={snapshot} /> : null}
       {tab === "发现" ? <Findings snapshot={snapshot} /> : null}

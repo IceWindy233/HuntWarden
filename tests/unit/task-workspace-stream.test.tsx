@@ -110,6 +110,7 @@ describe("TaskWorkspace Agent 流式预览", () => {
     expect(workspace?.children[3]?.classList.contains("task-tabs")).toBe(true);
     expect(workspace?.children[4]?.classList.contains("task-content")).toBe(true);
     expect(workspace?.children[5]?.classList.contains("steering-composer")).toBe(true);
+    expect(screen.getByRole("main", { name: "调查内容" })).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "确认并生成报告" }));
     expect(generateReport).not.toHaveBeenCalled();
     confirm.mockReturnValue(true);

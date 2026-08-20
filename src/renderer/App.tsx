@@ -161,14 +161,14 @@ export function App() {
       </nav>
       <div className="sidebar-divider" />
       <div className="sidebar-label"><span>{showArchived ? "已归档任务" : "调查任务"}</span><div className="sidebar-label-actions"><button className="archive-filter" aria-label={showArchived ? "返回当前任务" : "查看已归档任务"} title={showArchived ? "返回当前任务" : "查看已归档任务"} onClick={() => { setSelectedTaskId(undefined); setShowArchived((current) => !current); }}>{showArchived ? "当前" : `归档 ${tasks.filter((task) => task.archivedAt).length}`}</button>{!showArchived ? <button aria-label="新建任务" onClick={() => void openNewTask()}>＋</button> : null}</div></div>
-      <div className="sidebar-tasks">
+      <section className="sidebar-tasks" aria-label={showArchived ? "已归档任务列表" : "调查任务列表"}>
         {visibleTasks.map((task) => <button key={task.taskId} className={view === "tasks" && selectedTaskId === task.taskId ? "selected" : ""} onClick={() => { setSelectedTaskId(task.taskId); setView("tasks"); }}>
           <span className={`task-dot status-${task.status.toLowerCase()}`} />
           <span className="sidebar-task-main"><strong>{task.target.host}</strong><small>{task.request}</small></span>
           <time>{formatTime(task.updatedAt).slice(6, 11)}</time>
         </button>)}
         {visibleTasks.length === 0 ? <span className="sidebar-empty">{showArchived ? "没有已归档任务" : "还没有调查任务"}</span> : null}
-      </div>
+      </section>
       <div className="sidebar-footer">
         <div className="connection-indicator"><span /><div><strong>LOCAL SECURE</strong><small>IPC 隔离已启用</small></div></div>
         <button className="active-profile-button" onClick={() => setView("settings")}><div><span>活动模型</span><strong>{activeProfile?.model ?? "未配置"}</strong></div><small>{activeProfile?.provider ?? "--"}</small></button>

@@ -96,6 +96,48 @@ describe.skipIf(!enabled)("GUI 四场景只读调查与手动确认报告", () =
     expect(tabs && content && composer).toBeTruthy();
     expect(tabs!.y + tabs!.height).toBeLessThanOrEqual(content!.y + 1);
     expect(content!.y + content!.height).toBeLessThanOrEqual(composer!.y + 1);
+    const scrollRegions = await page.evaluate(() => {
+      const browser = globalThis as unknown as {
+        document: { querySelector(selector: string): unknown };
+        getComputedStyle(element: unknown): { overflowY: string; scrollbarGutter: string };
+      };
+      const taskContent = browser.document.querySelector(".task-content");
+      const taskList = browser.document.querySelector(".sidebar-tasks");
+      if (!taskContent || !taskList) throw new Error("任务滚动区域缺失");
+      const contentStyle = browser.getComputedStyle(taskContent);
+      const listStyle = browser.getComputedStyle(taskList);
+      return {
+        contentOverflow: contentStyle.overflowY,
+        contentGutter: contentStyle.scrollbarGutter,
+        listOverflow: listStyle.overflowY,
+        listGutter: listStyle.scrollbarGutter,
+      };
+    });
+    expect(scrollRegions).toMatchObject({ contentOverflow: "scroll", listOverflow: "scroll" });
+    expect(scrollRegions.contentGutter).toContain("stable");
+    expect(scrollRegions.listGutter).toContain("stable");
+    if (scenario === "web-scan") {
+      await page.evaluate(async ({ target }) => {
+        for (let index = 0; index < 20; index += 1) {
+          await window.huntwarden.createTask({
+            request: `E2E：侧栏滚动任务 ${index + 1}`,
+            mode: "SCAN",
+            checks: ["webshell"],
+            target,
+          });
+        }
+      }, { target: investigation.task.target });
+      await expect.poll(async () => await page.locator(".sidebar-tasks button").count()).toBeGreaterThanOrEqual(21);
+      const listScroll = await page.evaluate(() => {
+        const browser = globalThis as unknown as { document: { querySelector(selector: string): unknown } };
+        const taskList = browser.document.querySelector(".sidebar-tasks") as { clientHeight: number; scrollHeight: number; scrollTop: number } | null;
+        if (!taskList) throw new Error("调查任务列表缺失");
+        taskList.scrollTop = taskList.scrollHeight;
+        return { clientHeight: taskList.clientHeight, scrollHeight: taskList.scrollHeight, scrollTop: taskList.scrollTop };
+      });
+      expect(listScroll.scrollHeight).toBeGreaterThan(listScroll.clientHeight);
+      expect(listScroll.scrollTop).toBeGreaterThan(0);
+    }
     page.once("dialog", async (dialog) => await dialog.accept());
     await page.getByRole("button", { name: "确认并生成报告" }).click();
     await expect.poll(async () => (await page.evaluate((id) => window.huntwarden.getTaskSnapshot(id), investigation.task.taskId)).reports.length, { timeout: 30_000 }).toBe(1);
