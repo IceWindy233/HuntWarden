@@ -30,14 +30,22 @@ if npx --no-install asar list "$packaged_asar" | grep -Eq '^/release($|/)'; then
   exit 1
 fi
 
-find "$project_root/out/make" -type f \( -name '*.zip' -o -name '*.dmg' \) -print0 |
-  while IFS= read -r -d '' artifact; do
-    cp "$artifact" "$release_dir/"
-  done
+zip_artifact="$project_root/out/make/zip/darwin/arm64/HuntWarden-darwin-arm64-$version.zip"
+dmg_artifact="$project_root/out/make/HuntWarden-$version-arm64.dmg"
+for artifact in "$zip_artifact" "$dmg_artifact"; do
+  if [[ ! -f "$artifact" ]]; then
+    echo "未找到当前版本的 Electron Forge 发布资产：$artifact" >&2
+    exit 1
+  fi
+done
+
+# out/make 和 release 可能保留上一个版本的产物，只收集当前版本并清理发布目录中的旧分发包。
+find "$release_dir" -maxdepth 1 -type f \( -name '*.zip' -o -name '*.dmg' -o -name 'SHA256SUMS' \) -delete
+cp "$zip_artifact" "$dmg_artifact" "$release_dir/"
 
 artifact_count="$(find "$release_dir" -maxdepth 1 -type f \( -name '*.zip' -o -name '*.dmg' \) | wc -l | tr -d ' ')"
-if [[ "$artifact_count" == "0" ]]; then
-  echo "未找到 Electron Forge 生成的 zip/dmg 发布资产。" >&2
+if [[ "$artifact_count" != "2" ]]; then
+  echo "发布目录应恰好包含当前版本的 zip 和 dmg，实际为 $artifact_count 个。" >&2
   exit 1
 fi
 
