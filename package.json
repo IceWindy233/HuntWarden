@@ -1,7 +1,7 @@
 {
   "name": "huntwarden-agent",
   "productName": "HuntWarden",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "AI-assisted Linux host investigation and controlled remediation agent with evidence, approvals, and crash recovery.",
   "author": "IceWindy",
   "license": "MIT",

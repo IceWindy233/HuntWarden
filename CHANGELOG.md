@@ -4,14 +4,16 @@
 
 ## [Unreleased]
 
+### Planned
+
+- Rocky Linux 9 x86_64/SELinux 的授权真实 VM 兼容性验收（非当前版本阻塞项）。
+- 演示视频与脱敏截图。
+
+## [0.1.1] - 2026-08-21
+
 ### Fixed
 
 - 调查任务侧栏与任务详情内容区增加稳定滚动槽和可见滚动条，并约束侧栏 Grid/Flex 高度；修复任务较多时列表撑出窗口、无法形成滚动区域的问题。
-
-### Planned
-
-- Rocky Linux 9 x86_64/SELinux 的授权真实 VM 兼容性验收（非 `v0.1.0` 阻塞项）。
-- `v0.1.0` 演示视频与脱敏截图。
 
 ## [0.1.0] - 2026-08-20
 
@@ -51,5 +53,6 @@
 - 重启前未消费授权全部过期；远端写动作恢复时优先核对 Action Receipt，禁止盲目重放。
 - `PARTIAL`、`ERROR` 与 `NOT_CHECKED` 不会被报告为安全，Prompt Injection 不得扩展工具范围。
 
-[Unreleased]: https://github.com/IceWindy233/HuntWarden/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/IceWindy233/HuntWarden/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/IceWindy233/HuntWarden/releases/tag/v0.1.1
 [0.1.0]: https://github.com/IceWindy233/HuntWarden/releases/tag/v0.1.0
