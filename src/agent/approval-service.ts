@@ -89,8 +89,9 @@ export class ApprovalService extends EventEmitter {
         : `隔离文件证据 ${value.evidenceRef}`;
     }
     if (tool === "disable_account" && typeof value.accountRef === "string") {
-      const account = this.store.getReference<{ username?: string }>(task.taskId, value.accountRef, "account");
-      return `禁用账户 ${account?.value.username ?? value.accountRef}`;
+      const account = task.activeEpochId ? this.store.getObjectReference(task.taskId, task.activeEpochId, value.accountRef, "account") : undefined;
+      const fact = account && task.activeEpochId ? this.store.listFacts(task.taskId, task.activeEpochId).filter((entry) => entry.subjectRef === account.ref).at(-1) : undefined;
+      return `禁用账户 ${typeof fact?.privatePayload.username === "string" ? fact.privatePayload.username : value.accountRef}`;
     }
     return `执行 ${tool}，参数摘要 ${this.getArgsDigest(args)}`;
   }

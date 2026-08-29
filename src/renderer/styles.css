@@ -52,7 +52,7 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .sidebar-label button:hover { border-color: var(--line); color: var(--cyan); background: var(--panel-3); }
 .sidebar-label-actions { display: flex; gap: 3px; align-items: center; }
 .sidebar-label button.archive-filter { width: auto; padding: 0 7px; font-size: 9px; letter-spacing: 0; text-transform: none; }
-.sidebar-tasks { display: grid; flex: 1 1 auto; gap: 3px; min-height: 0; overflow-y: scroll; overscroll-behavior: contain; scrollbar-gutter: stable; }
+.sidebar-tasks { display: grid; flex: 1 1 auto; gap: 3px; align-content: start; min-height: 0; overflow-y: scroll; overscroll-behavior: contain; scrollbar-gutter: stable; }
 .sidebar-tasks > button { display: grid; grid-template-columns: 10px minmax(0, 1fr) auto; gap: 8px; align-items: start; min-height: 54px; padding: 9px 8px; border: 1px solid transparent; border-radius: 8px; background: transparent; text-align: left; cursor: pointer; }
 .sidebar-tasks > button:hover { background: rgba(255, 255, 255, .025); }
 .sidebar-tasks > button.selected { border-color: rgba(57, 212, 221, .17); background: rgba(57, 212, 221, .07); }
@@ -170,6 +170,9 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .coverage-tag { padding: 3px 6px; border: 1px solid #2b3d48; border-radius: 4px; color: var(--muted-2); font: 8px ui-monospace, monospace; }
 .coverage-tag.done { border-color: rgba(53, 208, 145, .3); color: var(--green); background: rgba(53, 208, 145, .06); }
 .coverage-tag.pending { border-style: dashed; }
+.coverage-notes { display: flex; flex-direction: column; gap: 2px; margin-top: 6px; }
+.coverage-note { color: var(--muted-2); font: 8px ui-monospace, monospace; letter-spacing: .02em; }
+.coverage-note.incomplete { color: var(--amber); }
 .task-tabs { display: flex; gap: 3px; padding: 0 24px; border-bottom: 1px solid var(--line-soft); background: rgba(9, 19, 27, .82); }
 .task-tabs button { position: relative; min-width: 62px; height: 41px; border: 0; color: var(--muted); background: transparent; font-size: 11px; cursor: pointer; }
 .task-tabs button:hover { color: #c8d7dc; }

@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import { useState } from "react";
 import type { ApprovalTicket } from "../../domain/types.js";
 import { Button, Modal, shortId } from "./ui.js";
 

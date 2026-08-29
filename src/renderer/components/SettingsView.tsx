@@ -1,7 +1,8 @@
-import React, { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import YAML from "yaml";
 import type { AppConfig } from "../../config/schema.js";
 import type { ConfigProfile, ConfigProfileSummary, ConfigValidationResult, CredentialStatus, ModelProviderSummary, ModelSummary } from "../../gui/contracts.js";
+import type { KnownHashDataSetSummary } from "../../datasets/known-hash-registry.js";
 import { Button, Field, Input, Section, Select, StatusPill } from "./ui.js";
 
 interface Props {
@@ -42,11 +43,15 @@ export function SettingsView({ profiles, activeProfileId, initialProfileId, onPr
   const [validation, setValidation] = useState<ConfigValidationResult>();
   const [busy, setBusy] = useState<string>();
   const [advancedOpen, setAdvancedOpen] = useState(false);
+  const [knownHashDataSets, setKnownHashDataSets] = useState<KnownHashDataSetSummary[]>([]);
 
   useEffect(() => { void window.huntwarden.listModelProviders().then(setProviders); }, []);
   useEffect(() => {
     void window.huntwarden.getCredentialStatus("dbapp-ti").then(setTiCredential).catch(() => setTiCredential(undefined));
   }, []);
+  useEffect(() => {
+    void window.huntwarden.listKnownHashDataSets().then(setKnownHashDataSets).catch(() => setKnownHashDataSets([]));
+  }, [activeProfileId]);
   useEffect(() => {
     if (!selectedId) return;
     setBusy("load");
@@ -98,7 +103,7 @@ export function SettingsView({ profiles, activeProfileId, initialProfileId, onPr
     try {
       const checked = await window.huntwarden.validateConfigProfile(config);
       setValidation(checked);
-      if (!checked.valid) throw new Error(checked.issues.map((item) => item.message).join("；"));
+      if (!checked.valid) throw new Error(checked.issues.map((item) => `${item.path}: ${item.message}`).join("；"));
       const saved = await window.huntwarden.saveConfigProfile({ ...(profile ? { profileId: profile.profileId } : {}), name, config });
       setProfile(saved); setSelectedId(saved.profileId);
       await onProfilesChanged(saved.profileId);
@@ -131,6 +136,18 @@ export function SettingsView({ profiles, activeProfileId, initialProfileId, onPr
   async function importProfile(): Promise<void> {
     try { const value = await window.huntwarden.importConfigProfile(); if (value) { await onProfilesChanged(value.profileId); setSelectedId(value.profileId); notify("YAML 已导入", "success"); } }
     catch (error) { notify(error instanceof Error ? error.message : String(error), "error"); }
+  }
+
+  async function importKnownHashDataSet(): Promise<void> {
+    setBusy("dataset");
+    try {
+      const value = await window.huntwarden.importKnownHashDataSet();
+      if (value) {
+        setKnownHashDataSets(await window.huntwarden.listKnownHashDataSets());
+        notify(`已导入 ${value.name}@${value.version}（${value.entryCount} 条）`, "success");
+      }
+    } catch (error) { notify(error instanceof Error ? error.message : String(error), "error"); }
+    finally { setBusy(undefined); }
   }
 
   async function saveSecret(): Promise<void> {
@@ -232,7 +249,13 @@ export function SettingsView({ profiles, activeProfileId, initialProfileId, onPr
       </Section>
 
       <Section title="Agent 预算" description="达到预算后停止调查并在报告中保留未完成项。">
-        <div className="form-grid"><Field label="最大轮次"><Input type="number" min={1} max={100} value={config.agent.maxTurns} onChange={(event) => updateAgent({ maxTurns: Number(event.target.value) })} /></Field><Field label="最大 Tool Calls"><Input type="number" min={1} max={1000} value={config.agent.maxToolCalls} onChange={(event) => updateAgent({ maxToolCalls: Number(event.target.value) })} /></Field><Field label="默认模式"><Select value={config.agent.defaultMode} onChange={(event) => updateAgent({ defaultMode: event.target.value as "SCAN" | "REMEDIATE" })}><option>SCAN</option><option>REMEDIATE</option></Select></Field><Field label="Prompt 版本"><Input value={config.agent.promptVersion} onChange={(event) => updateAgent({ promptVersion: event.target.value })} /></Field></div>
+        <div className="form-grid"><Field label="最大轮次"><Input type="number" min={1} max={100} value={config.agent.maxTurns} onChange={(event) => updateAgent({ maxTurns: Number(event.target.value) })} /></Field><Field label="默认模式"><Select value={config.agent.defaultMode} onChange={(event) => updateAgent({ defaultMode: event.target.value as "SCAN" | "REMEDIATE" })}><option>SCAN</option><option>REMEDIATE</option></Select></Field><Field label="Prompt 版本"><Input value={config.agent.promptVersion} onChange={(event) => updateAgent({ promptVersion: event.target.value })} /></Field></div>
+      </Section>
+
+      <Section title="已知哈希数据集" description="导入控制端版本化 SHA-256 集合；模型只获得 DATASET 引用，集合内容不会发送到目标主机。" action={<Button onClick={importKnownHashDataSet} busy={busy === "dataset"}>导入 JSON</Button>}>
+        {knownHashDataSets.length > 0
+          ? <div className="recent-table"><div className="recent-head"><span>名称</span><span>版本</span><span>条目</span><span>摘要</span><span>引用</span></div>{knownHashDataSets.map((item) => <div className="recent-row" key={item.dataSetRef}><div><strong>{item.name}</strong><small>{item.description ?? "known_hash_set"}</small></div><span>{item.version}</span><span>{item.entryCount}</span><span>{item.digest.slice(0, 12)}…</span><span>{item.dataSetRef.slice(0, 20)}…</span></div>)}</div>
+          : <p className="cost-note">尚未导入数据集。JSON 格式：name、version、可选 description，以及 sha256 数组。</p>}
       </Section>
 
       <Section title="SSH 与目标 Helper" description="GUI 仅保存私钥路径；目标 Host Key 始终严格校验。">
@@ -259,13 +282,14 @@ export function SettingsView({ profiles, activeProfileId, initialProfileId, onPr
 
 function CustomModelForm({ model, onChange }: { model: Extract<AppConfig["model"], { source: "custom" }>; onChange: (model: AppConfig["model"]) => void }) {
   return <div className="form-grid">
-    <Field label="Provider ID"><Input value={model.provider} onChange={(event) => onChange({ ...model, provider: event.target.value })} /></Field>
+    {/* Provider ID 与 API Key 环境变量名分别锁死 ConfigSchema 的 `^[a-z0-9][a-z0-9._-]*$` 与 `^[A-Z][A-Z0-9_]*$`：凭据按 Provider ID 存取，输入期不收敛就会先存下一个永远校验不过的 Provider。 */}
+    <Field label="Provider ID" hint="仅小写字母、数字与 . _ -，首字符须为字母或数字；API Key 按该 ID 存取"><Input value={model.provider} onChange={(event) => onChange({ ...model, provider: event.target.value.toLowerCase().replace(/[^a-z0-9._-]/g, "").replace(/^[._-]+/, "").slice(0, 64) })} /></Field>
     <Field label="模型 ID"><Input value={model.model} onChange={(event) => onChange({ ...model, model: event.target.value })} /></Field>
     <Field label="协议"><Select value={model.protocol} onChange={(event) => onChange({ ...model, protocol: event.target.value as typeof model.protocol })}><option value="openai-completions">OpenAI Chat Completions</option><option value="openai-responses">OpenAI Responses</option><option value="anthropic-messages">Anthropic Messages</option></Select></Field>
     <Field label="推理等级"><Select value={model.thinkingLevel} onChange={(event) => onChange({ ...model, thinkingLevel: event.target.value as typeof model.thinkingLevel })}>{["off", "minimal", "low", "medium", "high", "xhigh", "max"].map((item) => <option key={item}>{item}</option>)}</Select></Field>
     <Field label="Base URL" wide><Input value={model.baseUrl} onChange={(event) => onChange({ ...model, baseUrl: event.target.value })} /></Field>
     <Field label="认证"><Select value={model.authentication.type} onChange={(event) => onChange({ ...model, authentication: event.target.value === "none" ? { type: "none" as const } : { type: "api-key-env" as const, apiKeyEnv: "HUNTWARDEN_LLM_API_KEY" } })}><option value="api-key-env">API Key</option><option value="none">本机无认证</option></Select></Field>
-    {model.authentication.type === "api-key-env" ? <Field label="环境变量名"><Input value={model.authentication.apiKeyEnv} onChange={(event) => onChange({ ...model, authentication: { type: "api-key-env" as const, apiKeyEnv: event.target.value } })} /></Field> : null}
+    {model.authentication.type === "api-key-env" ? <Field label="环境变量名" hint="仅大写字母、数字与下划线，首字符须为字母"><Input value={model.authentication.apiKeyEnv} onChange={(event) => onChange({ ...model, authentication: { type: "api-key-env" as const, apiKeyEnv: event.target.value.toUpperCase().replace(/[^A-Z0-9_]/g, "").replace(/^[0-9_]+/, "").slice(0, 128) } })} /></Field> : null}
     <Field label="上下文窗口"><Input type="number" value={model.contextWindow} onChange={(event) => onChange({ ...model, contextWindow: Number(event.target.value) })} /></Field>
     <Field label="最大输出"><Input type="number" value={model.maxTokens} onChange={(event) => onChange({ ...model, maxTokens: Number(event.target.value) })} /></Field>
     <label className="toggle-row"><input type="checkbox" checked={model.reasoning} onChange={(event) => onChange({ ...model, reasoning: event.target.checked })} /><span><strong>模型支持推理</strong><small>启用后发送协议对应的 reasoning 参数</small></span></label>

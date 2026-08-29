@@ -6,22 +6,26 @@ import type { ApprovalService } from "../agent/approval-service.js";
 import { buildSystemPrompt } from "../agent/system-prompt.js";
 import { sanitizeForLlm } from "../agent/data-sanitizer.js";
 import type { AppConfig } from "../config/schema.js";
+import { digestObject } from "../common/json.js";
 import type { AgentStreamUpdate, SecurityToolDefinition, TaskContext } from "../domain/types.js";
-import type { HostExecutor } from "../executor/operations.js";
+import type { ProtocolV2Executor } from "../executor/protocol-v2-executor.js";
 import type { RuntimeStore, ToolRunRecord } from "../storage/runtime-store.js";
-import { finalizeUnresolvedChecks, ScanPlanner } from "../checks/scan-planner.js";
+import { randomUUID } from "node:crypto";
+
+/** 小于该体量的工具结果不值得淘汰：存根本身也要占位，压缩收益接近零。 */
+const EVICTION_MIN_BYTES = 2_048;
 
 export interface SecurityAgentRuntimeOptions {
   task: TaskContext;
   config: AppConfig;
   store: RuntimeStore;
-  executor: HostExecutor;
+  executor: ProtocolV2Executor;
   approvals: ApprovalService;
   tools: SecurityToolDefinition[];
   models: Models;
   model: Model<Api>;
   checkpoint?: (name: string) => void;
-  scanPlanner?: ScanPlanner | false;
+  protocolV2: { epochId: string };
 }
 
 export class SecurityAgentRuntime extends EventEmitter {
@@ -29,9 +33,6 @@ export class SecurityAgentRuntime extends EventEmitter {
   private readonly pendingInputByTimestamp = new Map<number, string>();
   private activeStream: { streamId: string; timestamp: number } | undefined;
   private streamSequence = 0;
-  private readonly scanPlanner: ScanPlanner | undefined;
-  private scanAbortController: AbortController | undefined;
-
   constructor(private readonly options: SecurityAgentRuntimeOptions) {
     super();
     const { task, config, tools, models, model, store } = options;
@@ -43,26 +44,67 @@ export class SecurityAgentRuntime extends EventEmitter {
         tools,
         messages: store.loadMessages(task.taskId),
       },
-      streamFn: models.streamSimple.bind(models),
-      toolExecution: "parallel",
+      // 调查循环此前不传重试策略：一次 429 或网络抖动就让 stopReason 变成 error，任务 FAILED，
+      // 所有未固化类别被标成 ERROR。有界重试把可恢复的 Provider 抖动与真正的目标环境受限区分开。
+      streamFn: (streamModel, context, options) => models.streamSimple(streamModel, context, {
+        ...options,
+        maxRetries: config.agent.providerMaxRetries,
+        timeoutMs: config.agent.providerTimeoutSeconds * 1_000,
+      }),
+      transformContext: async (messages) => this.evictStaleToolResults(messages),
+      // 远程预算按最坏成本先预留、响应后结算。并行工具会把多个 60 秒
+      // wallTime 估算同时计入 reserved，QUICK 的 225 秒账户因此在第 4 个
+      // 并发调用上产生虚假的 BUDGET_EXHAUSTED。顺序执行既保持预算
+      // fail-close，也让下一次预留基于前一次已结算的实际成本。
+      toolExecution: "sequential",
       steeringMode: "one-at-a-time",
       followUpMode: "one-at-a-time",
       beforeToolCall: async ({ toolCall, args }, signal) => await this.beforeToolCall(toolCall.id, toolCall.name, args, signal),
       shouldStopAfterTurn: async () => {
         const current = this.options.store.getTask(task.taskId) ?? task;
-        return current.turnCount >= config.agent.maxTurns || current.toolCallCount >= config.agent.maxToolCalls;
+        return current.turnCount >= config.agent.maxTurns;
       },
     });
     this.agent.subscribe(async (event) => { this.persistEvent(event); });
-    this.scanPlanner = options.scanPlanner === false
-      ? undefined
-      : options.scanPlanner ?? (tools.some((tool) => tool.name === "get_host_info")
-        ? new ScanPlanner({
-            task, store, tools, maxLlmBytes: config.llmData.maxTextBytes,
-            accountChecks: config.account,
-            threatIntelChecks: config.threatIntel,
-          })
-        : undefined);
+  }
+
+  /**
+   * 把过旧的工具结果文本换成存根，只作用于发给 Provider 的上下文。
+   *
+   * 存在理由：本运行时用的是低层 `Agent`，没有 compaction，历史消息又是从 SQLite 全量回放的，
+   * 上下文只增不减。单条满额工具结果约 16k token，长调查必然撞窗口，届时输出预算被夹到极小、
+   * 或 Provider 直接报错，任务 FAILED 且未固化类别全被标 ERROR。
+   *
+   * 淘汰是**无损**的：v2 事实已落入 Model Fact Plane，可按 sourceRunId 用
+   * `query_facts` 回取。持久化的 `messages` 不受影响，恢复与审计看到的仍是原文。
+   */
+  private async evictStaleToolResults(messages: AgentMessage[]): Promise<AgentMessage[]> {
+    const retainTurns = this.options.config.agent.contextRetainTurns;
+    let assistantTurns = 0;
+    const output: AgentMessage[] = [];
+    for (let index = messages.length - 1; index >= 0; index -= 1) {
+      const message = messages[index];
+      if (message === undefined) continue;
+      if (message.role === "assistant") assistantTurns += 1;
+      // `>=`：走过 retainTurns 个 assistant 消息之后的工具结果才淘汰，因此恰好保留最近
+      // retainTurns 个回合的原文，而不是 retainTurns + 1 个。
+      output.push(assistantTurns >= retainTurns ? this.stubToolResult(message) : message);
+    }
+    return output.reverse();
+  }
+
+  /** 只压缩体量大且成功的工具结果：错误结果本身很短，且失败原因是后续判断的依据。 */
+  private stubToolResult(message: AgentMessage): AgentMessage {
+    if (message.role !== "toolResult" || message.isError) return message;
+    const text = message.content.filter((item) => item.type === "text").map((item) => item.text).join("");
+    if (Buffer.byteLength(text, "utf8") <= EVICTION_MIN_BYTES) return message;
+    return {
+      ...message,
+      content: [{
+        type: "text",
+        text: `[上下文缓存已淘汰：${message.toolName} / runId=${message.toolCallId} / ${Buffer.byteLength(text, "utf8")} 字节。事实仍在 Model Fact Plane；请用 query_facts 按 sourceRunId 查询。]`,
+      }],
+    };
   }
 
   async prompt(text: string): Promise<void> {
@@ -79,24 +121,15 @@ export class SecurityAgentRuntime extends EventEmitter {
     task.status = status;
     this.options.store.saveTask(task);
     const originalTools = this.agent.state.tools;
-    if (withoutTools) this.agent.state.tools = [];
+    if (withoutTools) this.agent.state.tools = originalTools.filter((tool) => tool.name === "query_facts" || tool.name === "get_assessment_projection");
     this.options.store.appendAudit({ taskId: task.taskId, event: withoutTools ? "report_model_started" : "agent_started", level: "info", data: {} });
     try {
-      let prompt = text;
-      if (!withoutTools && this.scanPlanner) {
-        this.scanAbortController = new AbortController();
-        const scan = await this.scanPlanner.run(this.scanAbortController.signal);
-        this.agent.state.tools = originalTools.filter((tool) => !scan.minimumToolNames.has(tool.name));
-        prompt = `${text}\n\n<deterministic-minimum-scan>\n${scan.promptContext}\n</deterministic-minimum-scan>`;
-      }
-      await this.agent.prompt(prompt);
+      await this.agent.prompt(text);
       const lastAssistant = [...this.agent.state.messages].reverse().find((message) => message.role === "assistant");
       if (lastAssistant?.role === "assistant" && lastAssistant.stopReason === "error") {
         throw new Error(lastAssistant.errorMessage || "模型 Provider 调用失败");
       }
-      if (!withoutTools && this.scanPlanner) {
-        finalizeUnresolvedChecks(this.options.store, task.taskId, "NOT_CHECKED", "模型未为该类别固化 Finding，最低只读入口虽已执行，但尚不足以得出安全结论。", "model-missing");
-      }
+      if (!withoutTools) this.finalizeV2ModelGaps("NORMAL_SKIP");
       this.options.store.appendAudit({ taskId: task.taskId, event: withoutTools ? "report_model_finished" : "agent_run_finished", level: "info", data: {} });
       if (!withoutTools) {
         const completed = this.options.store.getTask(task.taskId) ?? task;
@@ -104,28 +137,13 @@ export class SecurityAgentRuntime extends EventEmitter {
         this.options.store.saveTask(completed);
       }
     } catch (error) {
-      const aborted = Boolean(this.agent.signal?.aborted || this.scanAbortController?.signal.aborted);
-      if (!withoutTools && this.scanPlanner) {
-        finalizeUnresolvedChecks(
-          this.options.store,
-          task.taskId,
-          aborted ? "NOT_CHECKED" : "ERROR",
-          aborted ? "调查在形成完整结论前被中止。" : `模型 Provider 在最低只读覆盖后失败：${error instanceof Error ? error.message : String(error)}`,
-          aborted ? "agent-aborted" : "provider-failed",
-        );
-        this.options.store.appendAudit({
-          taskId: task.taskId,
-          event: aborted ? "deterministic_scan_aborted" : "provider_failed_after_minimum_scan",
-          level: aborted ? "warn" : "error",
-          data: { error: error instanceof Error ? error.message : String(error) },
-        });
-      }
+      const aborted = Boolean(this.agent.signal?.aborted);
+      if (!withoutTools) this.finalizeV2ModelGaps(aborted ? "ANALYST_ABORT" : "PROVIDER_FAILURE");
       const failed = this.options.store.getTask(task.taskId) ?? task;
       failed.status = aborted ? "ABORTED" : "FAILED";
       this.options.store.saveTask(failed);
       throw error;
     } finally {
-      this.scanAbortController = undefined;
       this.agent.state.tools = originalTools;
     }
   }
@@ -186,11 +204,11 @@ export class SecurityAgentRuntime extends EventEmitter {
     this.options.store.appendAudit({ taskId: this.options.task.taskId, event: "recovery_completed", level: "info", data: {} });
   }
 
-  abort(): void { this.scanAbortController?.abort(new Error("调查被分析师中止")); this.agent.abort(); }
+  abort(): void { this.agent.abort(); }
 
   lastAssistantText(): string {
     const message = [...this.agent.state.messages].reverse().find((item) => item.role === "assistant");
-    if (!message || message.role !== "assistant") return "";
+    if (message?.role !== "assistant") return "";
     return message.content.filter((item) => item.type === "text").map((item) => item.text).join("");
   }
 
@@ -202,13 +220,17 @@ export class SecurityAgentRuntime extends EventEmitter {
 
   private async beforeToolCall(toolCallId: string, toolName: string, args: unknown, signal?: AbortSignal) {
     const tool = this.options.tools.find((item) => item.name === toolName);
-    if (!tool) return { block: true, reason: `未注册工具: ${toolName}` };
+    if (!tool) {
+      this.options.store.appendAudit({
+        taskId: this.options.task.taskId,
+        event: "model_invalid_tool_call",
+        level: "warn",
+        data: { reason: "UNREGISTERED_TOOL", toolNameDigest: digestObject(toolName) },
+      });
+      return { block: true, reason: `未注册工具: ${toolName}` };
+    }
     const task = this.options.store.getTask(this.options.task.taskId) ?? this.options.task;
     task.toolCallCount += 1;
-    if (task.toolCallCount > this.options.config.agent.maxToolCalls) {
-      this.options.store.saveTask(task);
-      return { block: true, reason: "已达到最大 Tool Call 预算" };
-    }
     this.options.store.saveTask(task);
     this.options.store.startToolRun({ toolCallId, taskId: task.taskId, toolName, risk: tool.risk, replayPolicy: tool.replayPolicy, args });
     this.options.checkpoint?.("tool_started");
@@ -306,7 +328,7 @@ export class SecurityAgentRuntime extends EventEmitter {
       this.appendRecoveredToolResult(record, { content: [{ type: "text", text: "恢复失败：工具已不可用" }], details: {} }, true);
       return;
     }
-    if (record.replayPolicy === "SAFE") {
+    if (["SAFE", "SAFE_REOBSERVE", "LOCAL_REPLAY", "IDEMPOTENT_LOCAL", "RESUME_OR_RECOLLECT"].includes(record.replayPolicy)) {
       try {
         const result = await tool.execute(record.toolCallId, record.args as never, undefined);
         this.appendRecoveredToolResult(record, result, false);
@@ -324,7 +346,11 @@ export class SecurityAgentRuntime extends EventEmitter {
     const actionId = previousApproval?.actionId;
     if (actionId) {
       try {
-        const remote = await this.options.executor.invoke({ operation: "get_action_receipt", params: { actionId }, actionId });
+        const remote = await this.options.executor.invokeMaintenanceV2("get_action_receipt", {
+          protocolVersion: 2, requestId: `${actionId}:RECOVERY`, epochId: this.options.task.activeEpochId ?? "RECOVERY",
+          deadlineMs: 10_000, reservation: { reservationId: `${actionId}:RECOVERY`, estimate: { remoteCalls: 1, nodes: 1, bytes: 65_536, wallTimeMs: 10_000, probeCalls: 0 } },
+          params: { actionId },
+        });
         if (remote.status === "SUCCEEDED" || remote.status === "FAILED") {
           const local = this.options.store.getActionReceipt(actionId);
           this.options.store.putActionReceipt({
@@ -378,6 +404,23 @@ export class SecurityAgentRuntime extends EventEmitter {
       this.appendRecoveredToolResult(record, result, false);
     } catch (error) {
       this.appendRecoveredToolResult(record, { content: [{ type: "text", text: `重新批准后的执行失败: ${error instanceof Error ? error.message : String(error)}` }], details: {} }, true);
+    }
+  }
+
+  private finalizeV2ModelGaps(reasonCode: string): void {
+    const epochId = this.options.protocolV2.epochId;
+    const concluded = new Set(this.options.store.listAssessments(this.options.task.taskId, epochId)
+      .filter((assessment) => assessment.authorType === "MODEL" && assessment.scope === "OBSERVED_CATEGORY")
+      .map((assessment) => assessment.category));
+    const existing = new Set(this.options.store.listInvestigationGaps(this.options.task.taskId, epochId)
+      .filter((gap) => gap.code === "MODEL_DID_NOT_INVESTIGATE")
+      .map((gap) => gap.category));
+    for (const category of this.options.task.checks) {
+      if (concluded.has(category) || existing.has(category)) continue;
+      this.options.store.putInvestigationGap({
+        gapId: `IGAP-${randomUUID()}`, taskId: this.options.task.taskId, epochId, category,
+        code: "MODEL_DID_NOT_INVESTIGATE", reasonCode, createdAt: new Date().toISOString(),
+      });
     }
   }
 

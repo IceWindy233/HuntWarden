@@ -1,0 +1,158 @@
+{
+  "schemaVersion": 1,
+  "suiteId": "v2-release-ubuntu-24.04-arm64-2026-08-26",
+  "evaluatedAt": "2026-08-26T13:29:33.173Z",
+  "status": "PASS",
+  "models": [
+    {
+      "provider": "siliconflow",
+      "model": "deepseek-ai/DeepSeek-V4-Flash"
+    }
+  ],
+  "metrics": {
+    "factReachability": {
+      "numerator": 2,
+      "denominator": 2,
+      "rate": 1
+    },
+    "truncationLoss": {
+      "numerator": 0,
+      "denominator": 22,
+      "rate": 0
+    },
+    "modelNotConcluded": {
+      "numerator": 0,
+      "denominator": 2,
+      "rate": 0
+    },
+    "presetPartial": {
+      "numerator": 0,
+      "denominator": 2,
+      "rate": 0
+    },
+    "novelRecall": {
+      "numerator": 1,
+      "denominator": 1,
+      "rate": 1
+    },
+    "invalidToolCalls": {
+      "numerator": 0,
+      "denominator": 22,
+      "rate": 0
+    },
+    "benignFalsePositive": {
+      "numerator": 0,
+      "denominator": 1,
+      "rate": 0
+    },
+    "ruleAdjudication": {
+      "riskyRuleAssessments": 3,
+      "humanAdjudicated": 0,
+      "humanOverturned": 0
+    },
+    "tokens": {
+      "input": 44886,
+      "output": 12335,
+      "cacheRead": 110336,
+      "cacheWrite": 0,
+      "total": 167557
+    },
+    "latencyMs": {
+      "epochWall": 496894,
+      "modelToolWall": 782
+    },
+    "remoteCost": {
+      "remoteCalls": 3,
+      "nodes": 2,
+      "bytes": 1425,
+      "wallTimeMs": 2,
+      "probeCalls": 0
+    }
+  },
+  "thresholdResults": [
+    {
+      "metric": "factReachability",
+      "comparator": ">=",
+      "threshold": 0.9,
+      "actual": 1,
+      "pass": true
+    },
+    {
+      "metric": "truncationLoss",
+      "comparator": "<=",
+      "threshold": 0.05,
+      "actual": 0,
+      "pass": true
+    },
+    {
+      "metric": "modelNotConcluded",
+      "comparator": "<=",
+      "threshold": 0.1,
+      "actual": 0,
+      "pass": true
+    },
+    {
+      "metric": "presetPartial",
+      "comparator": "<=",
+      "threshold": 0.1,
+      "actual": 0,
+      "pass": true
+    },
+    {
+      "metric": "novelRecall",
+      "comparator": ">=",
+      "threshold": 0.8,
+      "actual": 1,
+      "pass": true
+    },
+    {
+      "metric": "invalidToolCalls",
+      "comparator": "<=",
+      "threshold": 0.05,
+      "actual": 0,
+      "pass": true
+    },
+    {
+      "metric": "benignFalsePositive",
+      "comparator": "<=",
+      "threshold": 0.05,
+      "actual": 0,
+      "pass": true
+    }
+  ],
+  "fixtureFailures": [],
+  "cases": [
+    {
+      "caseId": "novel-inert-php-dynamic-callback-chain",
+      "taskId": "TASK-d77591cc-823c-424b-9e67-23869b422448",
+      "epochId": "EPOCH-ffefb1e0-db9f-44f4-bc78-23d918230de6",
+      "disposition": "MALICIOUS",
+      "novel": true,
+      "expectedFactLabels": 1,
+      "availableFactLabels": 1,
+      "reachedFactLabels": 1,
+      "modelNotConcludedCategories": [],
+      "presetPartialCategories": [],
+      "detectedCategories": [
+        "webshell"
+      ],
+      "falsePositiveCategories": [],
+      "fixtureFailures": []
+    },
+    {
+      "caseId": "benign-no-jvm-control-ioc",
+      "taskId": "TASK-7b08a8ae-256f-45d9-b38a-0e37f45e15da",
+      "epochId": "EPOCH-db11739e-92ed-403b-bf73-0908d6592c74",
+      "disposition": "BENIGN",
+      "novel": false,
+      "expectedFactLabels": 1,
+      "availableFactLabels": 1,
+      "reachedFactLabels": 1,
+      "modelNotConcludedCategories": [],
+      "presetPartialCategories": [],
+      "detectedCategories": [],
+      "falsePositiveCategories": [],
+      "fixtureFailures": []
+    }
+  ]
+}

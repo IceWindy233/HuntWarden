@@ -9,11 +9,10 @@ const SOURCE = "/tmp/huntwarden-config-budget/profile.yaml";
 
 function legacyProfile(): Record<string, unknown> {
   const config = testConfig("/tmp/huntwarden-config-budget") as unknown as Record<string, unknown>;
-  const webshell = { ...(config.webshell as Record<string, unknown>) };
-  delete webshell.remoteRulePath;
   return {
     ...config,
-    webshell,
+    agent: { ...(config.agent as unknown as Record<string, unknown>), maxToolCalls: 100, plannerToolCallShare: 0.5 },
+    webshell: { ...(config.webshell as unknown as Record<string, unknown>), remoteRulePath: "/tmp/model-selected.yar" },
     persistence: { maxItemsPerSource: 500, includeUserScope: true, maxConnections: 500 },
     triage: { maxProcesses: 10_000, maxConnections: 20_000, maxFiles: 50_000, maxTimelineEvents: 50_000, maxArtifactBytes: 10_485_760 },
   };
@@ -52,29 +51,18 @@ describe("采集数量上限与传输预算对齐", () => {
   });
 });
 
-describe("目标端 YARA 规则路径配置化", () => {
-  it("出厂配置档提供目标端规则路径，且不参与控制端本地路径解析", async () => {
+describe("v2 退役配置迁移", () => {
+  it("目标端 YARA 路径不可配置，出厂配置只保留内置 RuleSet 资产目录", async () => {
     for (const path of ["config/default.yaml", "config/deepseek.yaml"]) {
       const config = await loadConfig(resolve(path));
-      expect(config.webshell.remoteRulePath).toBe("/opt/huntwarden/rules/webshell.yar");
       expect(config.webshell.yaraRuleDir).toBe(resolve("rules/yara"));
+      expect(Object.keys(config.webshell)).not.toContain("remoteRulePath");
     }
   });
 
-  it("旧 Profile 缺失时注入出厂目标端路径", () => {
+  it("旧 Profile 的 V1 Tool Call/Planner 与远程规则路径键会被删除", () => {
     const migrated = normalizeConfig(legacyProfile(), SOURCE);
-    expect(migrated.webshell.remoteRulePath).toBe("/opt/huntwarden/rules/webshell.yar");
-  });
-
-  it("拒绝相对路径、目录穿越与空字符", () => {
-    const base = legacyProfile();
-    const withPath = (remoteRulePath: string) => ({
-      ...base,
-      webshell: { ...(base.webshell as Record<string, unknown>), remoteRulePath },
-    });
-    expect(() => normalizeConfig(withPath("rules/webshell.yar"), SOURCE)).toThrow(/remoteRulePath 必须是目标端绝对路径/);
-    expect(() => normalizeConfig(withPath("/opt/huntwarden/../etc/shadow"), SOURCE)).toThrow(/remoteRulePath 必须是目标端绝对路径/);
-    expect(() => normalizeConfig(withPath("/opt/huntwarden/rules/webshell.yar\0"), SOURCE)).toThrow(/remoteRulePath 必须是目标端绝对路径/);
-    expect(() => normalizeConfig(withPath(""), SOURCE)).toThrow(/配置校验失败/);
+    expect(Object.keys(migrated.agent)).not.toEqual(expect.arrayContaining(["maxToolCalls", "plannerToolCallShare"]));
+    expect(Object.keys(migrated.webshell)).not.toContain("remoteRulePath");
   });
 });

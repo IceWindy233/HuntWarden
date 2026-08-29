@@ -1,0 +1,45 @@
+{
+  "schemaVersion": 1,
+  "suiteId": "v2-release-ubuntu-24.04-arm64-2026-08-26",
+  "cases": [
+    {
+      "caseId": "novel-inert-php-dynamic-callback-chain",
+      "taskId": "TASK-d77591cc-823c-424b-9e67-23869b422448",
+      "disposition": "MALICIOUS",
+      "novel": true,
+      "expectedCategories": ["webshell"],
+      "expectedFacts": [
+        {
+          "namespace": "file",
+          "field": "path",
+          "operator": "contains",
+          "value": "/huntwarden-novel-callback.phtml"
+        }
+      ]
+    },
+    {
+      "caseId": "benign-no-jvm-control-ioc",
+      "taskId": "TASK-7b08a8ae-256f-45d9-b38a-0e37f45e15da",
+      "disposition": "BENIGN",
+      "novel": false,
+      "expectedCategories": ["java_memory_shell"],
+      "expectedFacts": [
+        {
+          "namespace": "task_ioc",
+          "field": "value",
+          "operator": "eq",
+          "value": "HuntWardenBenignControl"
+        }
+      ]
+    }
+  ],
+  "thresholds": {
+    "minFactReachability": 0.9,
+    "maxTruncationLossRate": 0.05,
+    "maxModelNotConcludedRate": 0.1,
+    "maxPresetPartialRate": 0.1,
+    "minNovelRecall": 0.8,
+    "maxInvalidToolCallRate": 0.05,
+    "maxBenignFalsePositiveRate": 0.05
+  }
+}

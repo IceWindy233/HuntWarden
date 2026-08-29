@@ -3,28 +3,30 @@
 > 文档用途：冻结 HuntWarden 从 Docker Lab MVP 演进为真实主机专项检测与受控查杀 Agent 的功能路线，作为后续开发、上下文恢复和验收的唯一长期 TODO 基线。
 >
 > 最近更新：2026-08-20
+>
+> **分工声明（2026-08-25）**：本文只负责**检测能力、语料质量与平台覆盖**的长期路线。协议形态、工具面、事实存储、结论模型与运行时架构一律以 [`docs/TOOL_PROTOCOL_V2_DESIGN.md`](TOOL_PROTOCOL_V2_DESIGN.md) 为准。两者冲突时以 v2 设计为准，本文不再作为架构承诺来源。
 
 ## 0. 当前状态
 
 已具备：
 
 - Sprint 1～3 的检测能力、确定性执行图、Finding/Evidence/审计/报告闭环。
-- 安全边界：52 个固定 Helper 操作、不透明引用、三层写门控、一次性审批票据；模型拿不到 Shell 或任意路径。
+- 安全边界：固定 Helper 操作集、不透明引用、三层写门控、一次性审批票据；模型拿不到 Shell 或任意路径。（v1 是 52 个按检测问题枚举的操作；v2 收敛为 8 个类型化取证动词，边界性质不变，见 v2 设计 §11。）
 - 数据正确性：主机时区感知的时间线、journald 与轮转日志采集、输出字节预算、Helper 墙钟 deadline 与遍历边界。
 - 工程门禁：Lint、core/renderer 双 typecheck、写操作与崩溃恢复不变量进必跑 CI、Helper 协议版本与 envelope 结构校验。
 - DBAPP 威胁情报受控富化，已用真实 Key 完成人工在线验收。
 
 尚未具备：
 
-- 检测质量不可度量：验收语料全为惰性自造样本（无真实 WebShell、内存马与发行版输出快照），因此 11.3 的召回率与精确率目标无法计算。
-- 52 个 Helper 操作无 golden fixture，Helper 无 Python 单测，输出契约漂移在 CI 不可检出。
+- 已完成首个真实 Provider 的冻结 novel malicious + benign 发布评测；但语料仍为安全自造夹具，真实 WebShell、内存马、发行版输出快照与良性站点语料不足，因此当前召回率与精确率仍不能代表真实站点。
+- v2 已有五类冻结能力等价语料、Helper 集成测试和 Docker Lab；仍需扩大 namespace collector 的跨发行版 golden fixture，特别是日志、NSS/SSSD、复杂 Web 配置与多版本 JVM。
 - Ubuntu 24.04 ARM64 已完成真实 GUI/Provider/SSH VM 只读验收（`PASS_WITH_LIMITATIONS`）；其余发行版、架构与受限能力组合未验收。
 - 处置不可逆，且 `disable_account` 不处理密钥信任面。
 
 工作队列按优先级冻结为：
 
 1. **真实语料与误报基线**：真实 WebShell/内存马语料、真实 CMS 良性对照，产出可复算的召回率/精确率报告。
-2. **golden fixture 与 Helper Python 单测**：固化 52 个操作的输出契约与时间/预算/边界行为。
+2. **扩展 golden fixture 与 Helper 测试**：在现有五类 v2 等价语料、集成测试和 Docker Lab 上继续固化跨发行版 collector 输出，见 v2 设计 §15.1 的 MERGE 层。
 3. **真实 Linux 兼容性门禁**：Ubuntu 22.04/24.04、Debian 12、Rocky/AlmaLinux 9、Amazon Linux 2023 的只读验收与降级记录。
 4. **处置补强**：`disable_account` 的会话终止与密钥信任面处置、动作后定向复扫。
 5. **Sprint 5 可逆处置**：`restore_quarantined_file` / `restore_account_state` 优先于其余处置动作。
@@ -128,6 +130,8 @@
 - [ ] 保存扫描范围、跳过数量、截止原因和主机时间偏差。
 
 ## 4. 核心架构演进
+
+> 本节描述的是 v1 演进方向。Transport 抽象与"确定性调查内核"两条仍然有效，但**协议与工具面的目标形态已由 v2 设计取代**，实现时以 v2 设计 §4、§11、§14、§15 为准。
 
 ### 4.1 分离平台与接入方式
 
@@ -316,7 +320,7 @@ interface TargetTransport {
 
 ### 7.3 后门账户与认证
 
-- [x] 解析 `/etc/sudoers`、`sudoers.d`、doas 和 polkit。
+- [x] 解析 `/etc/sudoers`、`sudoers.d`、doas 和 polkit。**（v1 能力；v2 未迁移，相关 collector 已随 v1 残留清理删除，见 `docs/SUPPORT_MATRIX.md`）**
 - [x] 使用 NSS `id/getent` 结果并标识 local/nss_directory 来源；真实 SSSD/LDAP 嵌套组待 VM 验收。
 - [x] 解析 sshd `Include`、`Match` 和有效 `AuthorizedKeysFile`。
 - [x] 检查 `AuthorizedKeysCommand`、SSH CA 和 authorized principals。

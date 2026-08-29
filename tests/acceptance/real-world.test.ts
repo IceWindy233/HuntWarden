@@ -5,13 +5,12 @@ import { resolve } from "node:path";
 import { promisify } from "node:util";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { ApprovalService } from "../../src/agent/approval-service.js";
-import { ScanPlanner } from "../../src/checks/scan-planner.js";
 import type { TargetConfig } from "../../src/domain/types.js";
 import { EvidenceStore } from "../../src/evidence/evidence-store.js";
-import type { StableProcessIdentity } from "../../src/executor/operations.js";
 import { SSHExecutor } from "../../src/executor/ssh-executor.js";
+import { bootstrapProtocolV2 } from "../../src/runtime/v2-bootstrap.js";
 import { RuntimeStore } from "../../src/storage/runtime-store.js";
-import { createSecurityTools } from "../../src/tools/index.js";
+import { DockerV2Remote } from "../docker/v2-remote.js";
 import { testConfig, testTask } from "../helpers.js";
 
 const enabled = process.env.HUNTWARDEN_REAL_WORLD_TESTS === "1";
@@ -19,176 +18,76 @@ const run = promisify(execFile);
 const stateDir = resolve("acceptance/real-world/.state");
 const container = "huntwarden-real-world-target";
 
-interface ScenarioManifest {
-  scenarioId: string;
-  account: string;
-  webRoot: string;
-  webPath: string;
-  beaconPath: string;
-  deletedPath: string;
-  cronPath: string;
-  deletedPid: number;
-}
+interface ScenarioManifest { scenarioId: string; account: string; webRoot: string; webPath: string; beaconPath: string; deletedPath: string; cronPath: string; deletedPid: number }
 
-function identity(value: Record<string, unknown>): StableProcessIdentity {
-  return {
-    bootId: String(value.bootId),
-    pid: Number(value.pid),
-    startTicks: String(value.startTicks),
-    exeInode: String(value.exeInode),
-    exeSha256: String(value.exeSha256),
-  };
-}
-
-describe.skipIf(!enabled)("Debian 12 动态真实攻击链验收", () => {
-  let remote: SSHExecutor;
-  let manifest: ScenarioManifest;
-  let target: TargetConfig;
-
+describe.skipIf(!enabled)("Debian 12 动态真实攻击链 v2 验收", () => {
+  let remote: SSHExecutor; let client: DockerV2Remote; let manifest: ScenarioManifest; let target: TargetConfig;
   beforeAll(async () => {
-    const knownHostsPath = resolve(stateDir, "known_hosts");
-    const knownHosts = await readFile(knownHostsPath, "utf8");
-    const fingerprint = knownHosts.match(/# (SHA256:[A-Za-z0-9+/]+) port=2299/)?.[1];
-    if (!fingerprint) throw new Error("真实场景 known_hosts 缺少 2299 指纹");
-    target = {
-      host: "127.0.0.1",
-      port: 2299,
-      username: "secagent",
-      hostFingerprint: fingerprint,
-      privateKeyPath: resolve(stateDir, "operator_ed25519"),
-      knownHostsPath,
-    };
-    remote = new SSHExecutor(target, "/usr/local/libexec/huntwarden-helper", 45_000);
-    const output = await run("docker", ["exec", container, "python3", "-c",
-      "import json; print(json.dumps(json.load(open('/run/huntwarden-acceptance.json'))))"], { timeout: 10_000 });
+    const knownHostsPath = resolve(stateDir, "known_hosts"); const knownHosts = await readFile(knownHostsPath, "utf8");
+    const fingerprint = knownHosts.match(/# (SHA256:[A-Za-z0-9+/]+) port=2299/)?.[1]; if (!fingerprint) throw new Error("真实场景 known_hosts 缺少 2299 指纹");
+    target = { host: "127.0.0.1", port: 2299, username: "secagent", hostFingerprint: fingerprint, privateKeyPath: resolve(stateDir, "operator_ed25519"), knownHostsPath };
+    remote = new SSHExecutor(target, "/usr/local/libexec/huntwarden-helper", 60_000); client = new DockerV2Remote(remote);
+    const output = await run("docker", ["exec", container, "python3", "-c", "import json; print(json.dumps(json.load(open('/run/huntwarden-acceptance.json'))))"], { timeout: 10_000 });
     manifest = JSON.parse(output.stdout) as ScenarioManifest;
   });
+  afterAll(async () => await remote?.close());
 
-  afterAll(async () => remote?.close());
-
-  it("在非 Lab 官方发行版上完成能力协商和降级标识", async () => {
-    const capabilities = await remote.invoke({ operation: "get_capabilities", params: {} });
-    expect(capabilities.platform).toMatchObject({
-      system: "Linux",
-      architecture: expect.any(String),
-      distribution: { id: "debian", versionId: "12", prettyName: expect.stringContaining("Debian GNU/Linux 12") },
-    });
-    expect(capabilities.operations).toEqual(expect.arrayContaining([
-      "discover_effective_web_roots",
-      "list_suspicious_processes",
-      "list_cron_entries",
-      "list_privileged_accounts",
-    ]));
+  it("在官方 Debian 目标完成 v2 Capability 与主机事实协商", async () => {
+    const capabilities = await remote.getCapabilitiesV2();
+    expect(capabilities).toMatchObject({ protocolVersion: 2, manifestVersion: "2.0.0", helper: { name: "huntwarden-helper-v2" } });
+    expect(Object.keys(capabilities.namespaces)).toEqual(expect.arrayContaining(["web_root", "process", "account", "cron_entry", "auth_event", "exec_event"]));
+    const hosts = await client.enumerate("host", ["hostname", "os", "release", "architecture"]);
+    expect(hosts[0]?.fields).toMatchObject({ os: "Linux", architecture: expect.any(String) });
   });
 
-  it("关联动态 Web 落地文件、行为特征、YARA 与访问请求", async () => {
-    const roots = await remote.invoke({ operation: "discover_effective_web_roots", params: {} });
-    expect(roots.items).toEqual(expect.arrayContaining([expect.objectContaining({ path: manifest.webRoot })]));
+  it("关联动态 Web 落地文件、版本化 YARA 与 Evidence artifact", async () => {
+    const roots = await client.enumerate("web_root", ["path", "server", "effective"]);
+    expect(roots.some((item) => item.fields.path === manifest.webRoot)).toBe(true);
+    const files = await client.enumerate("file", ["path", "size", "mtime", "contentClass"], { scope: { namespace: "file", canonicalRoot: manifest.webRoot }, predicate: { op: "eq", field: "path", value: manifest.webPath } });
+    const candidate = files[0]; if (!candidate) throw new Error("动态 Web 文件未进入 v2 file namespace");
+    const binding = { namespace: "file", identity: candidate.identity, locator: { path: manifest.webPath } };
+    const literal = await client.invoke("match", { objects: [binding], matcher: { engine: "literal", pattern: "system(" }, maxHits: 20, includeContext: false });
+    expect(literal.objects.length).toBeGreaterThan(0);
+    if ((await remote.getCapabilitiesV2()).matchers.includes("yara")) {
+      const yara = await client.invoke("match", { objects: [binding], matcher: { engine: "yara", ruleSetRef: "RULESET-WEBSHELL-BUILTIN-2" }, maxHits: 20, includeContext: false });
+      expect(String(yara.objects[0]?.fields.content)).toContain("YARA_MATCH:");
+    }
+    const collected = await client.invoke("collect", { ...binding, maxBytes: 10 * 1024 * 1024, purpose: "REAL_WORLD_WEB" }, { remoteCalls: 1, nodes: 1, bytes: 10 * 1024 * 1024, wallTimeMs: 60_000, probeCalls: 0 });
+    expect(collected.artifact?.complete).toBe(true); await client.maintenance("artifact_release", { artifactToken: collected.artifact!.token });
+  }, 180_000);
 
-    const recent = await remote.invoke({ operation: "list_recent_web_artifacts", params: {
-      roots: [manifest.webRoot], modifiedWithinHours: 24, maxFiles: 500, maxFileSizeBytes: 10 * 1024 * 1024,
-    } });
-    const candidate = recent.items.find((item) => item.path === manifest.webPath);
-    expect(candidate).toMatchObject({ sha256: expect.stringMatching(/^[0-9a-f]{64}$/), extension: ".php" });
+  it("账户、SSH trust 与 Cron 通过独立 namespace 关联且不泄露公钥", async () => {
+    const accounts = await client.enumerate("account", ["uid", "username", "gid", "home", "shell", "groups", "locked"]);
+    expect(accounts.some((item) => item.fields.username === manifest.account && item.fields.uid === 0)).toBe(true);
+    const keys = await client.enumerate("ssh_key", ["fingerprint", "ownerUid", "type", "comment", "sourceFile"]);
+    expect(keys.some((item) => typeof item.fields.fingerprint === "string")).toBe(true); expect(JSON.stringify(keys)).not.toContain("ssh-ed25519 AAAA");
+    const cron = await client.enumerate("cron_entry", ["source", "schedule", "user", "command"]);
+    expect(cron.some((item) => item.fields.source === manifest.cronPath && String(item.fields.command).includes(manifest.beaconPath))).toBe(true);
+  }, 180_000);
 
-    const inspection = await remote.invoke({ operation: "inspect_script_file", params: { path: manifest.webPath, maxBytes: 65_536 } });
-    expect(inspection.features).toMatchObject({ commandExecution: 1, dynamicEvaluation: 1 });
-    const yara = await remote.invoke({ operation: "yara_scan_files", params: {
-      paths: [manifest.webPath], rulePath: "/opt/huntwarden/rules/webshell.yar",
-    } });
-    expect(yara[0]?.matches).toEqual(expect.arrayContaining([
-      "HuntWarden_Suspicious_Server_Script_Combination",
-      "HuntWarden_PHP_Request_To_Command_Chain",
-    ]));
+  it("删除后运行与隐藏 Beacon 可由 process identity、relate、collect 复核", async () => {
+    const processes = await client.enumerate("process", ["pid", "ppid", "uid", "comm", "exe", "exeSha256", "command", "state"]);
+    const deleted = processes.find((item) => item.fields.pid === manifest.deletedPid && item.fields.exe === manifest.deletedPath); if (!deleted) throw new Error("缺少删除后运行进程");
+    const beacon = processes.find((item) => String(item.fields.command).includes(manifest.beaconPath)); if (!beacon) throw new Error("缺少 Beacon 进程");
+    const connections = await client.invoke("relate", { namespace: "process", identity: beacon.identity, locator: {}, relation: "connects", limit: 500 });
+    expect(connections.objects.some((item) => item.fields.remotePort === 18771 && item.fields.state === "ESTABLISHED")).toBe(true);
+    const collected = await client.invoke("collect", { namespace: "process", identity: deleted.identity, locator: {}, maxBytes: 10 * 1024 * 1024, purpose: "DELETED_EXECUTABLE" }, { remoteCalls: 1, nodes: 1, bytes: 10 * 1024 * 1024, wallTimeMs: 60_000, probeCalls: 0 });
+    expect(collected.artifact?.sha256).toBe(deleted.identity.exeSha256); await client.maintenance("artifact_release", { artifactToken: collected.artifact!.token });
+  }, 180_000);
 
-    const requests = await remote.invoke({ operation: "correlate_web_requests", params: {
-      path: manifest.webPath, expectedSha256: String(candidate!.sha256), maxEvents: 100,
-    } });
-    expect(requests.items).toEqual(expect.arrayContaining([
-      expect.objectContaining({ sourceIp: "198.51.100.42", method: "POST", uri: expect.stringContaining("token=[REDACTED]") }),
-      expect.objectContaining({ sourceIp: "198.51.100.42", method: "GET" }),
-    ]));
-  });
-
-  it("从动态账户和 Cron 中恢复持久化上下文，且不泄露 SSH 公钥", async () => {
-    const accounts = await remote.invoke({ operation: "list_privileged_accounts", params: {} });
-    expect(accounts).toEqual(expect.arrayContaining([
-      expect.objectContaining({ username: manifest.account, uid: 0, accountSource: "local" }),
-    ]));
-    const keys = await remote.invoke({ operation: "inspect_authorized_keys", params: { username: manifest.account } });
-    expect(keys).toEqual([expect.objectContaining({ fingerprint: expect.stringMatching(/^SHA256:/) })]);
-    expect(JSON.stringify(keys)).not.toContain("ssh-ed25519 AAAA");
-
-    const cron = await remote.invoke({ operation: "list_cron_entries", params: { maxItems: 500, includeUserScope: true } });
-    expect(cron.items).toEqual(expect.arrayContaining([
-      expect.objectContaining({ path: manifest.cronPath, username: "root", commandSummary: expect.stringContaining(manifest.beaconPath) }),
-      expect.objectContaining({ path: "/etc/cron.d/backup-retention", username: "root" }),
-    ]));
-  });
-
-  it("识别删除后运行和隐藏 Beacon，并完成稳定进程到 Socket 关联", async () => {
-    const suspicious = await remote.invoke({ operation: "list_suspicious_processes", params: { maxProcesses: 2000 } });
-    const deleted = suspicious.items.find((item) => item.exePath === manifest.deletedPath);
-    expect(deleted).toMatchObject({
-      pid: manifest.deletedPid,
-      exeDeleted: true,
-      signals: expect.arrayContaining(["deleted_executable", "temporary_executable", "hidden_executable"]),
-    });
-
-    const beacon = suspicious.items.find((item) => item.launcherPath === manifest.beaconPath);
-    expect(beacon).toMatchObject({ signals: expect.arrayContaining(["temporary_executable", "hidden_executable"]) });
-    const connections = await remote.invoke({ operation: "list_process_connections", params: {
-      ...identity(beacon!), maxConnections: 500,
-    } });
-    expect(connections.items).toEqual(expect.arrayContaining([
-      expect.objectContaining({ remote: expect.stringMatching(/:18771$/), state: "ESTABLISHED" }),
-    ]));
-  });
-
-  it("将认证与提权痕迹纳入事件时间线", async () => {
-    const auth = await remote.invoke({ operation: "query_auth_events", params: { sinceHours: 24, maxEvents: 500 } });
-    expect(auth.items).toEqual(expect.arrayContaining([
-      expect.objectContaining({ username: manifest.account, sourceIp: "198.51.100.42", eventType: "authentication_success" }),
-      expect.objectContaining({ username: manifest.account, eventType: "privilege_use" }),
-    ]));
-    const timeline = await remote.invoke({ operation: "build_incident_timeline", params: { sinceHours: 24, maxEvents: 2000 } });
-    expect(timeline.items.some((item) => item.timelineSource === "auth" && item.username === manifest.account)).toBe(true);
-  });
-
-  it("通过正式工具注册表和最低扫描图固化动态规则结论与降级", async () => {
-    const directory = await mkdtemp(resolve(tmpdir(), "huntwarden-real-world-planner-"));
+  it("正式 v2 Preset + RULE Assessment 在动态目标上形成 Coverage 与规则账本", async () => {
+    const directory = await mkdtemp(resolve(tmpdir(), "huntwarden-real-world-v2-"));
     const store = await RuntimeStore.open(directory, "runtime.db");
     try {
-      const task = testTask("SCAN");
-      task.target = target;
-      task.checks = ["webshell", "backdoor_account", "linux_persistence", "linux_intrusion_triage"];
-      store.createTask(task);
+      const task = testTask("SCAN"); task.protocolVersion = 2; task.target = target; task.checks = ["webshell", "backdoor_account", "linux_persistence", "linux_intrusion_triage"]; store.createTask(task);
       const config = testConfig(directory);
-      const approvals = new ApprovalService(store);
-      const evidence = new EvidenceStore(directory, store);
-      const tools = createSecurityTools({ task, config, store, executor: remote, approvals, evidence });
-      const result = await new ScanPlanner({
-        task, store, tools, maxLlmBytes: config.llmData.maxTextBytes,
-        accountChecks: config.account,
-        threatIntelChecks: { enabled: false, autoEnrichConnections: false },
-      }).run();
-
-      expect(result.outcomes).toEqual(expect.arrayContaining([
-        expect.objectContaining({ stepId: "web-candidates", status: "success" }),
-        expect.objectContaining({ stepId: "privileged-accounts", status: "success" }),
-        expect.objectContaining({ stepId: "suspicious-processes", status: "partial" }),
-      ]));
-      expect(result.deterministicFindings).toEqual(expect.arrayContaining([
-        expect.objectContaining({ category: "backdoor_account", status: "SUSPICIOUS", title: "发现非 root 名称的 UID 0 账户" }),
-        expect.objectContaining({ category: "linux_intrusion_triage", status: "SUSPICIOUS", title: "发现具有固定结构异常信号的运行进程" }),
-      ]));
-      expect(store.listFindings(task.taskId)).toEqual(expect.arrayContaining([
-        expect.objectContaining({ category: "linux_persistence", status: "ERROR" }),
-      ]));
-      expect(store.listFindings(task.taskId).some((finding) => finding.category === "linux_persistence" && finding.status === "NO_FINDING")).toBe(false);
-    } finally {
-      store.close();
-      await rm(directory, { recursive: true, force: true });
-    }
-  }, 180_000);
+      const result = await bootstrapProtocolV2({ task, config, store, executor: remote, evidence: new EvidenceStore(directory, store), approvals: new ApprovalService(store) });
+      expect(result.epoch.protocolVersion).toBe(2);
+      const coverage = store.listCoverageRuns(task.taskId, result.epoch.epochId);
+      expect(coverage.map((item) => item.category)).toEqual(expect.arrayContaining(task.checks));
+      expect(coverage.some((item) => item.status === "ERROR" && item.applicability !== "UNKNOWN")).toBe(false);
+      const assessments = store.listAssessments(task.taskId, result.epoch.epochId);
+      expect(assessments).toEqual(expect.arrayContaining([expect.objectContaining({ authorType: "RULE", category: "backdoor_account", verdict: "SUSPICIOUS" })]));
+    } finally { store.close(); await rm(directory, { recursive: true, force: true }); }
+  }, 300_000);
 });

@@ -17,7 +17,7 @@ import { DesktopCredentialStore, EncryptedCredentialStore } from "../credentials
 import { ElectronSafeStorageCipher } from "./electron-safe-storage-cipher.js";
 import { IPC } from "../gui/channels.js";
 import type { DesktopEvent } from "../gui/contracts.js";
-import { appConfig, boolean, exactObject, newTaskInput, text } from "./ipc-validation.js";
+import { appConfig, boolean, candidateConfig, exactObject, newTaskInput, text } from "./ipc-validation.js";
 import { parseConfig, serializeConfig } from "../config/load-config.js";
 import { findLocalLabStateDir, repairProfilePaths } from "../config/profile-path-repair.js";
 
@@ -67,7 +67,7 @@ function registerIpc(): void {
   handle(IPC.bootstrap, async () => await requireBackend().getBootstrap());
   handle(IPC.configList, async () => await requireBackend().listConfigProfiles());
   handle(IPC.configGet, async (_event, profileId) => await requireBackend().getConfigProfile(text(profileId, "Profile ID", 64)));
-  handle(IPC.configValidate, async (_event, config) => await requireBackend().validateConfigProfile(appConfig(config)));
+  handle(IPC.configValidate, async (_event, config) => await requireBackend().validateConfigProfile(candidateConfig(config)));
   handle(IPC.configSave, async (_event, value) => {
     const input = exactObject(value, ["profileId", "name", "config"], "Profile");
     return await requireBackend().saveConfigProfile({
@@ -88,6 +88,11 @@ function registerIpc(): void {
     if (result.canceled || !result.filePath) return undefined;
     await requireBackend().exportConfigProfile(profileId, result.filePath);
     return result.filePath;
+  });
+  handle(IPC.dataSetList, () => requireBackend().listKnownHashDataSets());
+  handle(IPC.dataSetImport, async () => {
+    const result = await dialog.showOpenDialog(mainWindow!, { title: "导入版本化 known_hash_set", properties: ["openFile"], filters: [{ name: "JSON", extensions: ["json"] }] });
+    return result.canceled || !result.filePaths[0] ? undefined : await requireBackend().importKnownHashDataSet(result.filePaths[0]);
   });
 
   handle(IPC.modelProviders, () => requireBackend().listModelProviders());
@@ -158,6 +163,21 @@ function registerIpc(): void {
   handle(IPC.approvalDecide, (_event, value) => {
     const input = exactObject(value, ["approvalId", "approved"], "审批");
     requireBackend().decideApproval(text(input.approvalId, "Approval ID", 64), boolean(input.approved, "审批结果"));
+  });
+  handle(IPC.grantRequestDecide, async (_event, value) => {
+    const input = exactObject(value, ["requestId", "approved"], "Grant 审批");
+    await requireBackend().decideGrantRequest(text(input.requestId, "Grant Request ID", 64), boolean(input.approved, "审批结果"));
+  });
+  handle(IPC.humanAssessmentRecord, (_event, value) => {
+    const input = exactObject(value, ["taskId", "targetAssessmentId", "verdict", "rationale"], "HUMAN Assessment");
+    const verdict = text(input.verdict, "Assessment verdict", 64);
+    const allowed = ["CONFIRMED_MALICIOUS", "HIGHLY_SUSPICIOUS", "SUSPICIOUS", "BENIGN", "NO_OBSERVED_FINDING", "INCONCLUSIVE"] as const;
+    if (!allowed.includes(verdict as typeof allowed[number])) throw new Error("Assessment verdict 非法");
+    return requireBackend().recordHumanAssessment({ taskId: text(input.taskId, "Task ID", 64), targetAssessmentId: text(input.targetAssessmentId, "Assessment ID", 64), verdict: verdict as typeof allowed[number], rationale: text(input.rationale, "人工裁定理由", 8_000) });
+  });
+  handle(IPC.taskGrantRevoke, (_event, value) => {
+    const input = exactObject(value, ["taskId", "grantId", "reason"], "Grant 撤销");
+    return requireBackend().revokeTaskGrant(text(input.taskId, "Task ID", 64), text(input.grantId, "Grant ID", 64), text(input.reason, "撤销原因", 1_000));
   });
   handle(IPC.reportGenerate, async (_event, taskIdValue) => {
     const taskId = text(taskIdValue, "Task ID", 64);

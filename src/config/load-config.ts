@@ -1,8 +1,9 @@
 import { readFile } from "node:fs/promises";
 import { resolve, dirname, isAbsolute } from "node:path";
+import type { TSchema } from "typebox";
 import { Value } from "typebox/value";
 import YAML from "yaml";
-import { ConfigSchema, type AppConfig } from "./schema.js";
+import { BuiltinModelSchema, ConfigSchema, CustomModelSchema, type AppConfig } from "./schema.js";
 
 function resolveConfigPath(configDir: string, value: string): string {
   return isAbsolute(value) ? resolve(value) : resolve(configDir, "..", value);
@@ -10,8 +11,6 @@ function resolveConfigPath(configDir: string, value: string): string {
 
 export interface ConfigIssue { path: string; message: string }
 
-/** 目标端 YARA 规则的出厂路径，由 host-helper/install-helper.sh 下发。 */
-const DEFAULT_REMOTE_RULE_PATH = "/opt/huntwarden/rules/webshell.yar";
 /** 与 ConfigSchema 的 triage 上限一致：旧 Profile 超限时收敛而不是拒绝加载。 */
 const TRIAGE_CEILINGS: Record<string, number> = {
   maxProcesses: 5_000, maxConnections: 5_000, maxFiles: 5_000, maxTimelineEvents: 5_000,
@@ -24,8 +23,39 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 function withIncrementalDefaults(input: unknown): unknown {
   if (!input || typeof input !== "object" || Array.isArray(input)) return input;
   const migrated = structuredClone(input) as Record<string, unknown>;
-  if (isRecord(migrated.webshell) && migrated.webshell.remoteRulePath === undefined) {
-    migrated.webshell.remoteRulePath = DEFAULT_REMOTE_RULE_PATH;
+  // 显式 v1→v2 结构迁移：协议预算和数据策略从旧的混合旋钮中拆出，保存时写回 schemaVersion 2。
+  if (migrated.schemaVersion === undefined || migrated.schemaVersion === 1) {
+    migrated.schemaVersion = 2;
+    migrated.protocolV2 = {
+      remoteBudget: {
+        preset: { remoteCalls: 80, nodes: 20_000, bytes: 64 * 1024 * 1024, wallTimeMs: 15 * 60_000, probeCalls: 10 },
+        model: { remoteCalls: 80, nodes: 20_000, bytes: 64 * 1024 * 1024, wallTimeMs: 15 * 60_000, probeCalls: 10 },
+      },
+      localQueryBudget: { calls: 200, rows: 50_000, wallTimeMs: 5 * 60_000 },
+      externalIntelBudget: { calls: 100, iocs: 1_000, wallTimeMs: 5 * 60_000 },
+      dataPolicy: { modelContentBytes: 4 * 1024 * 1024, evidenceBytes: 256 * 1024 * 1024, defaultTextClass: "SENSITIVE_TEXT" },
+      grants: { maxRequests: 20, pendingExpiresOnInterruption: true },
+    };
+  }
+  if (isRecord(migrated.protocolV2) && migrated.protocolV2.externalIntelBudget === undefined) {
+    migrated.protocolV2.externalIntelBudget = { calls: 100, iocs: 1_000, wallTimeMs: 5 * 60_000 };
+  }
+  if (isRecord(migrated.agent)) {
+    delete migrated.agent.maxToolCalls;
+    delete migrated.agent.plannerToolCallShare;
+    if (migrated.agent.contextRetainTurns === undefined) migrated.agent.contextRetainTurns = 3;
+    if (migrated.agent.providerMaxRetries === undefined) migrated.agent.providerMaxRetries = 2;
+    if (migrated.agent.providerTimeoutSeconds === undefined) migrated.agent.providerTimeoutSeconds = 600;
+    if (migrated.agent.promptVersion === "sechost-agent-v1" || migrated.agent.promptVersion === "huntwarden-agent-v1") migrated.agent.promptVersion = "huntwarden-agent-v2";
+  }
+  if (isRecord(migrated.webshell)) {
+    delete migrated.webshell.remoteRulePath;
+    // 与 llmData.maxTextBytes 解耦前，脚本片段预算共用同一个旋钮；旧 Profile 沿用 Helper 硬顶。
+    if (migrated.webshell.maxScriptExcerptBytes === undefined) migrated.webshell.maxScriptExcerptBytes = 65_536;
+    if (migrated.webshell.maxAccessLogLines === undefined) migrated.webshell.maxAccessLogLines = 500;
+  }
+  if (isRecord(migrated.account) && migrated.account.maxLoginHistoryEntries === undefined) {
+    migrated.account.maxLoginHistoryEntries = 100;
   }
   if (migrated.persistence === undefined) {
     migrated.persistence = { maxItemsPerSource: 500, includeUserScope: true };
@@ -43,9 +73,11 @@ function withIncrementalDefaults(input: unknown): unknown {
       maxFiles: 5_000,
       maxTimelineEvents: 5_000,
       maxArtifactBytes: 10_485_760,
+      maxProcessTreeDepth: 12,
     };
   }
   if (isRecord(migrated.triage)) {
+    if (migrated.triage.maxProcessTreeDepth === undefined) migrated.triage.maxProcessTreeDepth = 12;
     for (const [key, ceiling] of Object.entries(TRIAGE_CEILINGS)) {
       const value = migrated.triage[key];
       if (typeof value === "number" && value > ceiling) migrated.triage[key] = ceiling;
@@ -67,8 +99,37 @@ function withIncrementalDefaults(input: unknown): unknown {
   return migrated;
 }
 
+function schemaIssues(schema: TSchema, value: unknown, prefix: string): ConfigIssue[] {
+  const issues: ConfigIssue[] = [];
+  const seen = new Set<string>();
+  for (const error of Value.Errors(schema, value)) {
+    const issue = { path: `${prefix}${error.instancePath}` || "/", message: error.message };
+    const key = `${issue.path}\u0000${issue.message}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    issues.push(issue);
+  }
+  return issues;
+}
+
 export function getConfigIssues(input: unknown): ConfigIssue[] {
-  return [...Value.Errors(ConfigSchema, input)].map((issue) => ({ path: issue.instancePath || "/", message: issue.message }));
+  const issues = schemaIssues(ConfigSchema, input, "");
+  const model = isRecord(input) ? input.model : undefined;
+  const branch = !isRecord(model) ? undefined
+    : model.source === "custom" ? CustomModelSchema
+      : model.source === undefined || model.source === "builtin" ? BuiltinModelSchema
+        : undefined;
+  if (!branch) return issues;
+  /*
+   * `model` 是 anyOf 联合：未选中分支的判别式错误会一起冒出来——明确写了
+   * `source: custom`，却收到「/model/source: must be equal to constant」，
+   * 真正的原因（例如 provider 大小写不合法）反而被埋在同一串里且重复两遍。
+   * 因此按 source 选定分支后单独校验该分支，只保留可执行的原因。
+   */
+  return [
+    ...issues.filter((issue) => issue.path !== "/model" && !issue.path.startsWith("/model/")),
+    ...schemaIssues(branch, model, "/model"),
+  ];
 }
 
 function validateCustomModelEndpoint(config: AppConfig): void {
@@ -92,27 +153,17 @@ function validateCustomModelEndpoint(config: AppConfig): void {
   config.model.baseUrl = endpoint.href.replace(/\/$/, "");
 }
 
-/** remoteRulePath 描述目标主机文件系统，绝不能参与控制端本地路径解析。 */
-function validateRemoteRulePath(config: AppConfig): void {
-  const value = config.webshell.remoteRulePath;
-  if (!value.startsWith("/") || value.includes("..") || value.includes("\0")) {
-    throw new Error("配置校验失败:\nwebshell.remoteRulePath 必须是目标端绝对路径，且不得包含 .. 或空字符");
-  }
-}
-
 export function normalizeConfig(input: unknown, sourcePath: string): AppConfig {
   const migrated = withIncrementalDefaults(input);
   const issues = getConfigIssues(migrated);
   if (issues.length > 0) throw new Error(`配置校验失败:\n${issues.map((issue) => `${issue.path}: ${issue.message}`).join("\n")}`);
   const config = structuredClone(migrated) as AppConfig;
   validateCustomModelEndpoint(config);
-  validateRemoteRulePath(config);
   const configDir = dirname(resolve(sourcePath));
   config.storage.baseDir = resolveConfigPath(configDir, config.storage.baseDir);
   config.executor.knownHostsPath = resolveConfigPath(configDir, config.executor.knownHostsPath);
   config.executor.privateKeyPath = resolveConfigPath(configDir, config.executor.privateKeyPath);
   config.webshell.yaraRuleDir = resolveConfigPath(configDir, config.webshell.yaraRuleDir);
-  // webshell.remoteRulePath 是目标端路径，此处刻意不做 resolveConfigPath。
   config.java.probeJar = resolveConfigPath(configDir, config.java.probeJar);
   return config;
 }

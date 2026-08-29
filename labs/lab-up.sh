@@ -51,4 +51,18 @@ wait_http() {
 
 wait_http "Lab-Web" "http://127.0.0.1:8080/"
 wait_http "Lab-Tomcat" "http://127.0.0.1:8081/lab/"
+
+# SSH 和 HTTP 就绪不代表 Lab-Linux-IR 的可疑客户端已经连上假 C2。此前直接开跑测试，
+# `relate process connects` 偶发看不到 46666 连接，测试红灯却不是回归。46666 = 0xB64A。
+wait_lab_ir_c2() {
+  for _ in $(seq 1 60); do
+    if docker compose -f "$project_dir/labs/docker-compose.yml" exec -T lab-linux-ir \
+      awk '$3 ~ /:B64A$/ && $4 == "01" { found = 1 } END { exit !found }' /proc/net/tcp >/dev/null 2>&1; then return 0; fi
+    sleep 1
+  done
+  printf 'Lab-Linux-IR 的假 C2 连接未建立：/proc/net/tcp 中没有远端端口 46666 的 ESTABLISHED 连接\n' >&2
+  return 1
+}
+
+wait_lab_ir_c2
 printf 'Lab ready. Identity: %s\nKnown hosts: %s\n' "$state_dir/id_ed25519" "$known_hosts"

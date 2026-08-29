@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import { useState } from "react";
 import type { ConfigProfile, NewTaskInput } from "../../gui/contracts.js";
 import type { SshHostKeyDiscovery } from "../../executor/ssh-host-key-service.js";
 import type { TaskContext } from "../../domain/types.js";
@@ -77,7 +77,7 @@ export function NewTaskDialog({ profile, onClose, onCreated, notify }: { profile
   }
 
   async function confirmHostKey(): Promise<void> {
-    if (!hostKey || hostKey.trustStatus !== "UNKNOWN") return;
+    if (hostKey?.trustStatus !== "UNKNOWN") return;
     if (!window.confirm(`确认信任 ${hostKey.host}:${hostKey.port} 的 ${hostKey.algorithm} Host Key？\n\n${hostKey.fingerprint}\n\n确认后将原子写入所选 known_hosts。`)) return;
     setBusy("host-key-confirm");
     try {

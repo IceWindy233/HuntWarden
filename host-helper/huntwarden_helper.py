@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Root-owned, operation-whitelisted helper used by SSHExecutor.
+"""Root-owned HuntWarden v2 forensic helper used by SSHExecutor.
 
 The helper reads one JSON object from stdin and emits one JSON envelope. It never
 uses shell=True and never accepts an arbitrary command from the controller.
@@ -29,7 +29,11 @@ import sys
 import tempfile
 import time
 import zlib
-from typing import Any, Callable, Iterator
+
+try:
+    import re2 as re2_engine  # type: ignore[import-not-found]
+except ImportError:
+    re2_engine = None
 
 MAX_INPUT = 1024 * 1024
 MAX_OUTPUT_BYTES = 1_572_864  # 1.5 MiB; leaves envelope headroom under the controller's 2 MiB transport cap
@@ -39,16 +43,12 @@ ARTIFACT_TOKEN = re.compile(r"^[a-f0-9]{64}$")
 ARTIFACT_MAX_BYTES = 100 * 1024 * 1024
 ARTIFACT_TTL_SECONDS = 15 * 60
 LOG_SCAN_MAX_BYTES = 64 * 1024 * 1024
-HELPER_VERSION = "0.4.2"
+HELPER_VERSION = "2.0.0"
+PROTOCOL_VERSION = 2
+MANIFEST_VERSION = "2.0.0"
 PROBE_JAR = pathlib.Path("/opt/huntwarden/huntwarden-tomcat-probe.jar")
-SCRIPT_EXTENSIONS = {
-    ".php", ".phtml", ".php5", ".phar", ".inc", ".jsp", ".jspx", ".asp", ".aspx",
-    ".py", ".pl", ".cgi", ".shtml", ".twig", ".tpl", ".vm", ".ftl", ".war", ".jar", ".class",
-}
-WEB_TEMP_ROOTS = tuple(pathlib.Path(value) for value in ("/tmp", "/var/tmp", "/dev/shm"))
 USERNAME = re.compile(r"^[a-z_][a-z0-9_-]{0,31}$", re.I)
 CLASS_NAME = re.compile(r"^[A-Za-z_$][A-Za-z0-9_$.]{0,511}$")
-PERSISTENCE_KINDS = {"cron", "systemd", "ssh", "shell", "extended"}
 SYSTEM_PERSISTENCE_ROOTS = {
     "cron": ("/etc/crontab", "/etc/cron.d", "/etc/cron.hourly", "/etc/cron.daily", "/etc/cron.weekly", "/etc/cron.monthly", "/var/spool/cron"),
     "systemd": ("/etc/systemd", "/usr/lib/systemd", "/lib/systemd", "/run/systemd/system", "/run/systemd/transient",
@@ -63,15 +63,12 @@ TRIAGE_ROOTS = tuple(pathlib.Path(value) for value in (
     "/bin", "/sbin", "/usr/bin", "/usr/sbin", "/usr/local/bin", "/usr/local/sbin",
     "/opt", "/tmp", "/var/tmp", "/dev/shm", "/home",
 ))
-TRIAGE_SCAN_LIMIT = 50000
 DEADLINE_MIN_MS = 1000
 DEADLINE_MAX_MS = 600000
 DEADLINE_WARNING = "达到时间预算，结果不完整"
 TRANSPORT_KEYS = frozenset({"deadlineMs"})
 WALK_MAX_DEPTH = 12
 WALK_VISIT_LIMIT = 200000
-CLASS_SEARCH_MAX_DEPTH = 8
-CLASS_SEARCH_VISIT_LIMIT = 20000
 PSEUDO_FILESYSTEM_ROOTS = frozenset({"/proc", "/sys", "/dev", "/run"})
 PROCESS_CGROUP_MAX_ENTRIES = 32
 PROCESS_CGROUP_MAX_BYTES = 512
@@ -86,6 +83,20 @@ JOURNAL_AUTH_FACILITIES = ("SYSLOG_FACILITY=4", "SYSLOG_FACILITY=10")
 JOURNAL_AUTH_COMMANDS = ("sshd", "sudo", "su", "login", "systemd-logind", "polkitd")
 AUTH_LOG_PATTERNS = ("/var/log/auth.log", "/var/log/auth.log.*", "/var/log/secure", "/var/log/secure-*", "/var/log/secure.*")
 AUDIT_LOG_PATTERNS = ("/var/log/audit/audit.log", "/var/log/audit/audit.log.*")
+SYSTEM_LOG_PATTERNS = (
+    "/var/log/syslog", "/var/log/syslog.*", "/var/log/messages", "/var/log/messages-*", "/var/log/messages.*",
+    "/var/log/daemon.log", "/var/log/daemon.log.*", "/var/log/kern.log", "/var/log/kern.log.*",
+)
+# 访问日志必须覆盖轮转与 gzip 归档，并覆盖多站点的子目录布局。
+# 只匹配 "access*.log" 会漏掉 access.log.1 / access.log.2.gz 与 /var/log/nginx/<site>/access.log，
+# 而 WebShell 落地时的上传请求通常正好落在已轮转的那一段里。
+WEB_ACCESS_LOG_PATTERNS = (
+    "/var/log/nginx/access*.log", "/var/log/nginx/access*.log.*",
+    "/var/log/nginx/*/access*.log", "/var/log/nginx/*/access*.log.*",
+    "/var/log/apache2/access*.log", "/var/log/apache2/access*.log.*",
+    "/var/log/apache2/*/access*.log", "/var/log/apache2/*/access*.log.*",
+    "/var/log/httpd/access_log*", "/var/log/httpd/*/access_log*",
+)
 LOG_FILE_LIMIT = 20
 SYSLOG_PRIORITY = re.compile(r"^<\d{1,3}>(?:\d\s+)?")
 SYSLOG_TRADITIONAL = re.compile(r"^([A-Z][a-z]{2}\s+\d{1,2}\s+\d{1,2}:\d{2}:\d{2})(?=\s|$)")
@@ -121,8 +132,12 @@ def budgeted_output(payload: dict[str, Any]) -> str:
     """Shrink the item list until the envelope fits the transport budget instead of losing it whole."""
     result = payload.get("result")
     items = result.get("items") if isinstance(result, dict) else None
+    v2_objects = items is None and isinstance(payload.get("objects"), list)
+    if v2_objects:
+        result = payload
+        items = payload.get("objects")
     if not isinstance(result, dict) or not isinstance(items, list) or not items:
-        raise HelperError("EVIDENCE_COLLECTION", f"结构化输出超过 {MAX_OUTPUT_BYTES} 字节传输预算，且没有可截断的 items 列表")
+        raise HelperError("OUTPUT_LIMIT_EXCEEDED", f"结构化输出超过 {MAX_OUTPUT_BYTES} 字节传输预算，且没有可截断的 items 列表")
     existing = result.get("warnings")
     base = [str(value) for value in existing[:200]] if isinstance(existing, list) else []
     original = len(items)
@@ -130,13 +145,19 @@ def budgeted_output(payload: dict[str, Any]) -> str:
     kept = max(1, int(original * MAX_OUTPUT_BYTES / size * 0.9))
     while kept >= 1:
         candidate = dict(payload)
-        candidate["result"] = {**result, "items": items[:kept], "partial": True,
-                               "warnings": [*base, f"输出达到 1.5 MiB 传输预算，已截断 {original - kept} 条结果"]}
+        if v2_objects:
+            candidate["objects"] = items[:kept]
+            candidate["status"] = "PARTIAL"
+            candidate["gaps"] = [*candidate.get("gaps", []), {"code": "OUTPUT_LIMIT",
+                "detail": f"输出达到 1.5 MiB 传输预算，已截断 {original - kept} 条结果", "resumable": True}]
+        else:
+            candidate["result"] = {**result, "items": items[:kept], "partial": True,
+                                   "warnings": [*base, f"输出达到 1.5 MiB 传输预算，已截断 {original - kept} 条结果"]}
         text, size = serialized_output(candidate)
         if size <= MAX_OUTPUT_BYTES:
             return text
         kept = kept - 1 if kept <= 8 else int(kept * 0.8)
-    raise HelperError("EVIDENCE_COLLECTION", f"单条结果已超过 {MAX_OUTPUT_BYTES} 字节传输预算")
+    raise HelperError("OUTPUT_LIMIT_EXCEEDED", f"单条结果已超过 {MAX_OUTPUT_BYTES} 字节传输预算")
 
 
 def read_request() -> dict[str, Any]:
@@ -281,27 +302,6 @@ def path_kind(path: pathlib.Path, ledger: SkipLedger, *, follow: bool = False) -
     """
     try:
         info = path.stat() if follow else path.lstat()
-    except OSError:
-        ledger.add(SKIP_UNREADABLE)
-        return "unavailable"
-    if stat.S_ISLNK(info.st_mode):
-        return "symlink"
-    if stat.S_ISDIR(info.st_mode):
-        return "directory"
-    return "file" if stat.S_ISREG(info.st_mode) else "other"
-
-
-def optional_path_kind(path: pathlib.Path, ledger: SkipLedger, *, follow: bool = False) -> str:
-    """Classify an optional configuration path without treating absence as lost coverage.
-
-    Linux distributions legitimately omit facilities such as doas or legacy Polkit local
-    authority. Permission and I/O failures remain visible, while ENOENT means the facility is
-    simply not configured on this host.
-    """
-    try:
-        info = path.stat() if follow else path.lstat()
-    except FileNotFoundError:
-        return "unavailable"
     except OSError:
         ledger.add(SKIP_UNREADABLE)
         return "unavailable"
@@ -562,216 +562,6 @@ def release_artifact(request: dict[str, Any]) -> dict[str, Any]:
         return {"released": False}
 
 
-def capability_state(status_value: str, reason: str) -> dict[str, str]:
-    return {"status": status_value, "reason": reason}
-
-
-def os_release_info() -> dict[str, Any]:
-    """Parse fixed os-release metadata without evaluating it as shell code."""
-    values: dict[str, str] = {}
-    source = "unavailable"
-    for candidate in (pathlib.Path("/etc/os-release"), pathlib.Path("/usr/lib/os-release")):
-        try:
-            raw = candidate.read_text("utf-8", errors="replace")[:65536]
-        except OSError:
-            # The next fixed candidate is tried; when both fail "source": "unavailable" already states the gap.
-            continue
-        source = str(candidate)
-        for line in raw.splitlines():
-            key, separator, encoded = line.partition("=")
-            if not separator or not re.fullmatch(r"[A-Z][A-Z0-9_]{0,63}", key):
-                continue
-            try:
-                parsed = shlex.split(encoded, comments=False, posix=True)
-                value = parsed[0] if len(parsed) == 1 else encoded.strip().strip("\"'")
-            except ValueError:
-                value = encoded.strip().strip("\"'")
-            values[key] = "".join(character for character in value if character >= " " and character != "\x7f")[:512]
-        break
-    return {
-        "id": values.get("ID", "unknown"),
-        "idLike": values.get("ID_LIKE", "").split()[:20],
-        "name": values.get("NAME", "unknown"),
-        "prettyName": values.get("PRETTY_NAME", values.get("NAME", "unknown")),
-        "versionId": values.get("VERSION_ID", "unknown"),
-        "versionCodename": values.get("VERSION_CODENAME", "unknown"),
-        "source": source,
-    }
-
-
-def linux_runtime_snapshot() -> tuple[dict[str, Any], dict[str, Any], dict[str, dict[str, str]], list[str]]:
-    warnings: list[str] = []
-    try:
-        current_user = pwd.getpwuid(os.geteuid()).pw_name
-    except KeyError:
-        current_user = str(os.geteuid())
-    runtime: dict[str, Any] = {
-        "initSystem": "unknown", "container": "unknown", "euid": os.geteuid(),
-        "currentUser": current_user, "rootHelper": os.geteuid() == 0,
-    }
-    security = {"hidepid": "unknown", "pidNamespace": "unknown", "mountNamespace": "unknown", "selinux": "unknown", "apparmor": "unknown"}
-    details: dict[str, dict[str, str]] = {}
-    if platform.system() != "Linux":
-        details["linuxProc"] = capability_state("UNSUPPORTED", "目标不是 Linux")
-        return runtime, security, details, ["Linux /proc 能力不可用"]
-
-    try:
-        runtime["bootId"] = boot_id()
-        details["linuxProc"] = capability_state("SUPPORTED", "Linux /proc 与 boot_id 可读取")
-    except HelperError as exc:
-        details["linuxProc"] = capability_state("PERMISSION_DENIED", str(exc))
-        warnings.append(str(exc))
-    try:
-        runtime["initSystem"] = pathlib.Path("/proc/1/comm").read_text("utf-8", errors="replace").strip()[:128] or "unknown"
-    except OSError:
-        warnings.append("无法识别 PID 1 init")
-
-    cgroup = ""
-    try:
-        cgroup = pathlib.Path("/proc/1/cgroup").read_text("utf-8", errors="replace")[:65536]
-    except OSError:
-        warnings.append("无法读取 /proc/1/cgroup，容器判定可能不准确")
-    if pathlib.Path("/.dockerenv").exists() or "docker" in cgroup:
-        runtime["container"] = "docker"
-    elif pathlib.Path("/run/.containerenv").exists():
-        runtime["container"] = "container"
-    elif "kubepods" in cgroup:
-        runtime["container"] = "kubernetes"
-    elif "containerd" in cgroup:
-        runtime["container"] = "containerd"
-    else:
-        runtime["container"] = "none-detected"
-
-    details["rootHelper"] = capability_state(
-        "SUPPORTED" if runtime["rootHelper"] else "PERMISSION_DENIED",
-        "Helper 以 root EUID 运行" if runtime["rootHelper"] else f"Helper EUID={os.geteuid()}，部分 /proc 与取证操作可能被拒绝",
-    )
-    sudo = shutil.which("sudo")
-    details["sudo"] = capability_state(
-        "SUPPORTED" if sudo else "UNSUPPORTED",
-        "sudo 可用；Helper 当前已获得 root 权限" if sudo and runtime["rootHelper"] else "sudo 二进制可用" if sudo else "sudo 不可用",
-    )
-
-    journal_binary = shutil.which("journalctl")
-    journal_storage = pathlib.Path("/run/log/journal").is_dir() or pathlib.Path("/var/log/journal").is_dir()
-    if journal_binary and journal_storage:
-        details["journal"] = capability_state("SUPPORTED", "journalctl 与 journal 存储可用")
-    elif journal_binary:
-        details["journal"] = capability_state("PARTIAL", "journalctl 存在，但未发现 journal 存储")
-        warnings.append("journald 数据源不完整")
-    else:
-        details["journal"] = capability_state("UNSUPPORTED", "journalctl 不可用")
-
-    audit_tool = shutil.which("auditctl") is not None or shutil.which("ausearch") is not None
-    audit_log = pathlib.Path("/var/log/audit/audit.log").is_file()
-    if audit_tool and audit_log:
-        details["auditd"] = capability_state("SUPPORTED", "audit 工具与 audit.log 可用")
-    elif audit_tool or audit_log:
-        details["auditd"] = capability_state("PARTIAL", "audit 工具或 audit.log 仅有一项可用")
-        warnings.append("auditd 数据源不完整")
-    else:
-        details["auditd"] = capability_state("UNSUPPORTED", "audit 工具与 audit.log 均不可用")
-
-    for runtime_name, socket_path in (("docker", "/var/run/docker.sock"), ("containerd", "/run/containerd/containerd.sock")):
-        binary = shutil.which(runtime_name) is not None or (runtime_name == "containerd" and shutil.which("ctr") is not None)
-        socket_present = pathlib.Path(socket_path).exists()
-        socket_access = socket_present and os.access(socket_path, os.R_OK | os.W_OK)
-        if socket_access:
-            details[runtime_name] = capability_state("SUPPORTED", f"{socket_path} 可访问")
-        elif socket_present:
-            details[runtime_name] = capability_state("PERMISSION_DENIED", f"{socket_path} 存在但不可访问")
-            warnings.append(f"{runtime_name} socket 权限不足")
-        elif binary:
-            details[runtime_name] = capability_state("PARTIAL", f"{runtime_name} 客户端存在，但未发现固定 socket")
-        else:
-            details[runtime_name] = capability_state("UNSUPPORTED", f"未发现 {runtime_name} 客户端或固定 socket")
-
-    selinux_enforce = pathlib.Path("/sys/fs/selinux/enforce")
-    if selinux_enforce.is_file():
-        try:
-            security["selinux"] = "enforcing" if selinux_enforce.read_text("ascii").strip() == "1" else "permissive"
-            details["selinux"] = capability_state("SUPPORTED", f"SELinux {security['selinux']}")
-        except PermissionError:
-            details["selinux"] = capability_state("PERMISSION_DENIED", "SELinux 已启用但状态不可读")
-    else:
-        security["selinux"] = "disabled-or-unavailable"
-        details["selinux"] = capability_state("UNSUPPORTED", "SELinux 未启用或 sysfs 不可用")
-
-    apparmor_enabled = pathlib.Path("/sys/module/apparmor/parameters/enabled")
-    if apparmor_enabled.is_file():
-        try:
-            security["apparmor"] = "enabled" if apparmor_enabled.read_text("ascii").strip().lower().startswith("y") else "disabled"
-            details["apparmor"] = capability_state("SUPPORTED" if security["apparmor"] == "enabled" else "UNSUPPORTED", f"AppArmor {security['apparmor']}")
-        except PermissionError:
-            details["apparmor"] = capability_state("PERMISSION_DENIED", "AppArmor 状态不可读")
-    else:
-        security["apparmor"] = "unavailable"
-        details["apparmor"] = capability_state("UNSUPPORTED", "AppArmor 内核接口不可用")
-
-    try:
-        proc_line = next(line for line in pathlib.Path("/proc/mounts").read_text("utf-8", errors="replace").splitlines() if line.split()[1] == "/proc")
-        options = proc_line.split()[3].split(",")
-        security["hidepid"] = next((value.split("=", 1)[1] for value in options if value.startswith("hidepid=")), "0")
-    except (OSError, StopIteration, IndexError):
-        warnings.append("无法识别 /proc hidepid")
-    try:
-        security["pidNamespace"] = os.readlink("/proc/self/ns/pid")
-        security["mountNamespace"] = os.readlink("/proc/self/ns/mnt")
-        os.stat("/proc/1/exe")
-        details["procVisibility"] = capability_state(
-            "PARTIAL" if security["hidepid"] not in {"0", "off"} else "SUPPORTED",
-            f"hidepid={security['hidepid']}；PID namespace={security['pidNamespace']}",
-        )
-        if details["procVisibility"]["status"] == "PARTIAL":
-            warnings.append("/proc hidepid 限制可能造成采集缺口")
-    except PermissionError:
-        details["procVisibility"] = capability_state("PERMISSION_DENIED", "无法读取 PID 1 可执行文件或 namespace")
-        warnings.append("/proc 进程可见性受权限限制")
-    except OSError:
-        details["procVisibility"] = capability_state("PARTIAL", "namespace 或 PID 1 信息不可用")
-        warnings.append("/proc namespace 信息不完整")
-    return runtime, security, details, warnings
-
-
-def get_capabilities(_: dict[str, Any]) -> dict[str, Any]:
-    warnings: list[str] = []
-    yara = shutil.which("yara") is not None
-    java_attach = pathlib.Path("/usr/bin/jcmd").exists() or shutil.which("java") is not None
-    probe = PROBE_JAR.is_file()
-    if not yara:
-        warnings.append("YARA 不可用，WebShell 规则扫描将为 PARTIAL")
-    if not probe:
-        warnings.append("Tomcat 探针不可用，Java 组件调查将为 PARTIAL")
-    runtime, security, details, context_warnings = linux_runtime_snapshot()
-    details.update({
-        "yara": capability_state("SUPPORTED" if yara else "UNSUPPORTED", "YARA 可用" if yara else "YARA 未安装"),
-        "javaAttach": capability_state("SUPPORTED" if java_attach else "UNSUPPORTED", "Java Attach 运行时可用" if java_attach else "未发现 Java/JDK Attach 运行时"),
-        "tomcatProbe": capability_state("SUPPORTED" if probe else "UNSUPPORTED", f"Tomcat 探针位于 {PROBE_JAR}" if probe else f"Tomcat 探针缺失: {PROBE_JAR}"),
-    })
-    warnings.extend(context_warnings)
-    zone_name, zone_offset = host_timezone()
-    return {
-        "protocolVersion": 1,
-        "helper": {"name": "huntwarden-helper", "version": HELPER_VERSION},
-        "timezone": zone_name,
-        "utcOffsetSeconds": zone_offset,
-        "hostTimeUtc": utc_iso(now_utc()),
-        "platform": {
-            "system": platform.system(), "release": platform.release(),
-            "architecture": platform.machine(), "python": platform.python_version(),
-            "distribution": os_release_info(),
-        },
-        "operations": sorted(OPERATIONS.keys()),
-        "artifactTransfer": {"supported": True, "protocolVersion": 1, "maxBytes": ARTIFACT_MAX_BYTES},
-        "features": {"yara": yara, "javaAttach": java_attach, "tomcatProbe": probe},
-        "featureStatus": details,
-        "runtime": runtime,
-        "securityContext": security,
-        "partial": bool(warnings),
-        "warnings": warnings,
-    }
-
-
 def file_facts(path: pathlib.Path) -> dict[str, Any]:
     info = path.stat()
     return {
@@ -799,30 +589,6 @@ def is_within(path: pathlib.Path, root: pathlib.Path) -> bool:
         return True
     except ValueError:
         return False
-
-
-def validated_persistence_path(kind: Any, value: Any) -> pathlib.Path:
-    if kind not in PERSISTENCE_KINDS:
-        raise HelperError("INVALID_ARGUMENT", "invalid persistence kind")
-    path = safe_path(value)
-    allowed = [pathlib.Path(root).resolve(strict=False) for root in SYSTEM_PERSISTENCE_ROOTS[kind]]
-    if kind == "systemd":
-        allowed.extend((pathlib.Path(account.pw_dir) / ".config/systemd/user").resolve(strict=False) for account in interactive_accounts())
-    elif kind == "ssh":
-        allowed.extend((pathlib.Path(account.pw_dir) / ".ssh").resolve(strict=False) for account in interactive_accounts())
-    elif kind == "shell":
-        allowed.extend(pathlib.Path(account.pw_dir).resolve(strict=False) for account in interactive_accounts())
-    if not any(path == root or is_within(path, root) for root in allowed):
-        raise HelperError("PERMISSION_DENIED", "path is outside fixed persistence scope")
-    if not path.is_file() or path.is_symlink():
-        raise HelperError("INVALID_ARGUMENT", "persistence path must be a regular non-symlink file")
-    if kind == "systemd" and path.suffix not in {".service", ".timer"}:
-        raise HelperError("PERMISSION_DENIED", "unsupported systemd file type")
-    if kind == "ssh" and path.name != "authorized_keys":
-        raise HelperError("PERMISSION_DENIED", "only authorized_keys may be inspected")
-    if kind == "shell" and path.name not in {"profile", "bash.bashrc", ".profile", ".bash_profile", ".bashrc", ".zprofile", ".zshrc", "zshrc", "zprofile"} and path.suffix != ".sh":
-        raise HelperError("PERMISSION_DENIED", "unsupported shell startup file type")
-    return path
 
 
 def dangerous_features(text: str) -> list[str]:
@@ -997,337 +763,35 @@ def web_root_inventory() -> tuple[list[dict[str, Any]], list[str]]:
     return [roots[path] for path in sorted(roots)], warnings
 
 
-def discover_effective_web_roots(_: dict[str, Any]) -> dict[str, Any]:
-    items, warnings = web_root_inventory()
-    return {"items": items, "partial": bool(warnings), "warnings": warnings[:200]}
-
-
-def discover_web_roots(_: dict[str, Any]) -> list[dict[str, str]]:
-    items, _ = web_root_inventory()
-    return [{"path": str(item["path"]), "server": str(item["server"])} for item in items]
-
-
-def is_web_artifact(path: pathlib.Path) -> bool:
-    if path.suffix.lower() in SCRIPT_EXTENSIONS:
-        return True
-    if path.suffix:
-        return False
-    try:
-        prefix = path.read_bytes()[:512].lower()
-    except OSError:
-        # Unreadable candidates are counted by the caller's skipped/ledger accounting.
-        return False
-    return prefix.startswith(b"#!") or b"<?php" in prefix or b"<%@ page" in prefix
-
-
-def scan_recent_web_artifacts(roots: list[pathlib.Path], hours: int, maximum: int, max_size: int) -> dict[str, Any]:
-    cutoff = now_utc().timestamp() - hours * 3600
-    items: list[dict[str, Any]] = []
-    ledger = SkipLedger()
-    warnings: list[str] = []
-    visited = 0
-    skipped = 0
-    limited = False
-    for root in roots:
-        if limited or ledger.expired:
-            break
-        if deadline_exceeded():
-            ledger.expire()
-            break
-        if not root.is_dir():
-            skipped += 1
-            continue
-        for directory, files in bounded_walk(root, ledger):
-            for filename in files:
-                visited += 1
-                if visited > WALK_VISIT_LIMIT:
-                    warnings.append(f"Web Artifact 遍历达到 {WALK_VISIT_LIMIT} 项上限")
-                    limited = True
-                    break
-                path = directory / filename
-                try:
-                    info = path.lstat()
-                    if not stat.S_ISREG(info.st_mode) or info.st_mtime < cutoff or info.st_size > max_size or not is_web_artifact(path):
-                        skipped += 1
-                        continue
-                    items.append({"path": str(path), "size": info.st_size, "inode": str(info.st_ino),
-                                  "mtime": utc_iso(info.st_mtime), "sha256": sha256_file(path),
-                                  "extension": path.suffix.lower() or "none"})
-                except OSError:
-                    skipped += 1
-                    ledger.add(SKIP_UNREADABLE)
-                    continue
-                if len(items) >= maximum:
-                    warnings.append("Web Artifact 结果达到配置上限")
-                    limited = True
-                    break
-            if limited:
-                break
-            if deadline_exceeded():
-                ledger.expire()
-                break
-    return {"items": items, "partial": limited or ledger.partial, "warnings": (warnings + ledger.warnings())[:200],
-            "visited": visited, "skipped": skipped}
-
-
-def find_recent_web_files(request: dict[str, Any]) -> list[dict[str, Any]]:
-    roots = request.get("roots")
-    if not isinstance(roots, list) or not roots or len(roots) > 50:
-        raise HelperError("INVALID_ARGUMENT", "invalid roots")
-    hours = safe_int(request.get("modifiedWithinHours"), 1, 24 * 365, "modifiedWithinHours")
-    maximum = safe_int(request.get("maxFiles"), 1, 5000, "maxFiles")
-    max_size = safe_int(request.get("maxFileSizeBytes"), 1024, 1024 * 1024 * 100, "maxFileSizeBytes")
-    result = scan_recent_web_artifacts([safe_path(value) for value in roots], hours, maximum, max_size)
-    return result["items"]
-
-
-def list_recent_web_artifacts(request: dict[str, Any]) -> dict[str, Any]:
-    roots = request.get("roots")
-    if not isinstance(roots, list) or not roots or len(roots) > 50:
-        raise HelperError("INVALID_ARGUMENT", "invalid roots")
-    hours = safe_int(request.get("modifiedWithinHours"), 1, 8760, "modifiedWithinHours")
-    maximum = safe_int(request.get("maxFiles"), 1, 5000, "maxFiles")
-    max_size = safe_int(request.get("maxFileSizeBytes"), 1024, ARTIFACT_MAX_BYTES, "maxFileSizeBytes")
-    return scan_recent_web_artifacts([safe_path(value) for value in roots], hours, maximum, max_size)
-
-
-def list_upload_temp_artifacts(request: dict[str, Any]) -> dict[str, Any]:
-    hours = safe_int(request.get("modifiedWithinHours"), 1, 8760, "modifiedWithinHours")
-    maximum = safe_int(request.get("maxFiles"), 1, 5000, "maxFiles")
-    max_size = safe_int(request.get("maxFileSizeBytes"), 1024, ARTIFACT_MAX_BYTES, "maxFileSizeBytes")
-    roots = [root.resolve(strict=False) for root in WEB_TEMP_ROOTS if root.is_dir()]
-    config_ledger = SkipLedger()
-    # PHP upload_tmp_dir is parsed only from root-owned fixed php.ini files.
-    for name in glob.glob("/etc/php/**/php.ini", recursive=True)[:100]:
-        if deadline_exceeded():
-            config_ledger.expire()
-            break
-        try:
-            for line in bounded_tail_lines(pathlib.Path(name), 1024 * 1024):
-                match = re.match(r"^\s*upload_tmp_dir\s*=\s*([^;\s]+)", line)
-                if match and match.group(1).startswith("/"):
-                    candidate = pathlib.Path(match.group(1)).resolve(strict=False)
-                    if candidate.is_dir() and candidate not in roots:
-                        roots.append(candidate)
-        except OSError:
-            config_ledger.add("php.ini 因权限或 I/O 错误未被解析")
-            continue
-    result = scan_recent_web_artifacts(roots[:50], hours, maximum, max_size)
-    result["roots"] = [str(root) for root in roots[:50]]
-    result["partial"] = bool(result["partial"]) or config_ledger.partial
-    result["warnings"] = (list(result["warnings"]) + config_ledger.warnings())[:200]
-    return result
-
-
-def yara_scan_files(request: dict[str, Any]) -> list[dict[str, Any]]:
-    if not shutil.which("yara"):
-        raise HelperError("UNSUPPORTED_ENVIRONMENT", "yara is not installed")
-    paths = request.get("paths")
-    if not isinstance(paths, list) or len(paths) > 500:
-        raise HelperError("INVALID_ARGUMENT", "invalid paths")
-    rule_path = safe_path(request.get("rulePath"))
-    validated: list[pathlib.Path] = []
-    for value in paths:
-        path = safe_path(value)
-        if "\n" in str(path) or "\r" in str(path):
-            raise HelperError("INVALID_ARGUMENT", "YARA path contains a line break")
-        validated.append(path)
-    if not validated:
-        return []
-    # --scan-list lets one YARA process compile the rules once for the entire
-    # bounded candidate set instead of spawning one process per file.
-    list_path: pathlib.Path | None = None
-    try:
-        descriptor, raw_name = tempfile.mkstemp(prefix="huntwarden-yara-", text=True)
-        list_path = pathlib.Path(raw_name)
-        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-            for path in validated:
-                handle.write(f"{path}\n")
-        output = run(["yara", "--timeout=30", "--scan-list", str(rule_path), str(list_path)], timeout=45, check=False)
-    finally:
-        if list_path is not None:
-            list_path.unlink(missing_ok=True)
-    matches_by_path: dict[str, list[str]] = {str(path): [] for path in validated}
-    for line in output.stdout.splitlines():
-        rule, separator, matched_path = line.partition(" ")
-        if separator and matched_path in matches_by_path:
-            matches_by_path[matched_path].append(rule)
-    error = output.stderr.strip()[:1000] or None
-    return [{"path": str(path), "matches": matches_by_path[str(path)], "error": error} for path in validated]
-
-
-def inspect_script_file(request: dict[str, Any]) -> dict[str, Any]:
-    path = safe_path(request.get("path"))
-    max_bytes = safe_int(request.get("maxBytes"), 1024, 65536, "maxBytes")
-    raw = path.read_bytes()[:max_bytes]
-    text = raw.decode("utf-8", errors="replace")
-    patterns = {
-        "commandExecution": r"Runtime\.getRuntime\(\)\.exec|ProcessBuilder|shell_exec|passthru|system\s*\(",
-        "dynamicEvaluation": r"\beval\s*\(|\bassert\s*\(|base64_decode\s*\(",
-        "obfuscation": r"gzinflate|str_rot13|chr\s*\(|ClassLoader\.defineClass",
-    }
-    features = {name: len(re.findall(expr, text, re.I)) for name, expr in patterns.items()}
-    return {"path": str(path), "sha256": sha256_file(path), "size": path.stat().st_size, "features": features, "excerpt": text, "truncated": path.stat().st_size > len(raw)}
-
-
-def search_web_access_log(request: dict[str, Any]) -> list[dict[str, Any]]:
-    path = safe_path(request.get("path"))
+def search_web_access_log(request: dict[str, Any]) -> dict[str, Any]:
+    safe_path(request.get("path"))
     name = pathlib.Path(str(request.get("fileName", ""))).name
     if not name or len(name) > 255:
         raise HelperError("INVALID_ARGUMENT", "invalid fileName")
     maximum = safe_int(request.get("maxLines"), 1, 5000, "maxLines")
-    matches = []
-    for expression in ["/var/log/nginx/access*.log", "/var/log/apache2/access*.log", "/var/log/httpd/access_log*"]:
-        for log_name in glob.glob(expression)[:100]:
-            if deadline_exceeded():
-                return matches
-            try:
-                for line in bounded_tail_lines(pathlib.Path(log_name)):
-                    if name in line:
-                        matches.append({"log": log_name, "line": redact_secret_text(line, 8192)})
-                        if len(matches) >= maximum:
-                            return matches
-            except OSError:
-                # This operation's contract is a bare match list with no warning channel; an unreadable
-                # access log simply contributes no matches and the next fixed candidate is tried.
-                continue
-    return matches
-
-
-def validated_web_candidate(value: Any, expected_sha256: Any | None = None) -> pathlib.Path:
-    path = safe_path(value)
-    roots, _ = web_root_inventory()
-    allowed = [pathlib.Path(item["path"]).resolve(strict=False) for item in roots]
-    allowed.extend(root.resolve(strict=False) for root in WEB_TEMP_ROOTS)
-    if not any(path == root or is_within(path, root) for root in allowed):
-        raise HelperError("PERMISSION_DENIED", "path is outside discovered Web and fixed upload-temp scope")
-    if expected_sha256 is not None:
-        if not isinstance(expected_sha256, str) or not SHA256.fullmatch(expected_sha256) or sha256_file(path) != expected_sha256:
-            raise HelperError("EVIDENCE_COLLECTION", "Web artifact hash changed")
-    return path
-
-
-def inspect_web_runtime_config(request: dict[str, Any]) -> dict[str, Any]:
-    root = safe_path(request.get("root"))
-    roots, discovery_warnings = web_root_inventory()
-    if str(root) not in {str(item["path"]) for item in roots}:
-        raise HelperError("PERMISSION_DENIED", "root is not in the current effective Web Root inventory")
-    maximum = safe_int(request.get("maxItems"), 1, 1000, "maxItems")
-    items: list[dict[str, Any]] = []
-    warnings = list(discovery_warnings)
     ledger = SkipLedger()
-    for directory, files in bounded_walk(root, ledger):
-        for filename in files:
-            if filename not in {".user.ini", ".htaccess", "web.config"}:
-                continue
-            path = directory / filename
-            try:
-                text = redact_secret_text(text_file(path), 65536)
-                facts = file_facts(path)
-                items.append({**facts, "name": filename, "features": dangerous_features(text),
-                              "runtimeDirectives": [line.strip()[:2048] for line in text.splitlines()
-                                                    if re.search(r"auto_prepend_file|auto_append_file|AddHandler|SetHandler|php_value|rewrite", line, re.I)][:100]})
-            except OSError:
-                warnings.append(f"无法读取运行时配置: {path}")
-            if len(items) >= maximum:
-                return {"items": items, "partial": True, "warnings": (warnings + ledger.warnings() + ["Web 运行时配置达到上限"])[:200]}
-    return {"items": items, "partial": bool(warnings) or ledger.partial, "warnings": (warnings + ledger.warnings())[:200]}
-
-
-def correlate_web_requests(request: dict[str, Any]) -> dict[str, Any]:
-    path = validated_web_candidate(request.get("path"), request.get("expectedSha256"))
-    maximum = safe_int(request.get("maxEvents"), 1, 5000, "maxEvents")
-    name = path.name
-    items: list[dict[str, Any]] = []
+    matches: list[dict[str, Any]] = []
+    scanned: list[str] = []
     warnings: list[str] = []
-    log_names = [name for expression in ("/var/log/nginx/access*.log", "/var/log/apache2/access*.log", "/var/log/httpd/access_log*")
-                 for name in glob.glob(expression)[:100]]
-    for log_name in log_names:
-        if deadline_exceeded():
-            warnings.append(DEADLINE_WARNING)
-            break
-        log_path = pathlib.Path(log_name)
-        try:
-            lines = bounded_tail_lines(log_path)
-            if log_path.stat().st_size > LOG_SCAN_MAX_BYTES:
-                warnings.append(f"{log_name} 超过 64 MiB，仅关联最新窗口")
-            for line in lines:
-                if name not in line:
-                    continue
-                request_match = re.search(r'"([A-Z]{3,10})\s+([^\s"]+)\s+HTTP/[0-9.]+"\s+(\d{3})', line)
-                ip_match = re.match(r"([0-9a-fA-F:.]{3,64})\s", line)
-                time_match = re.search(r"\[([^\]]{5,64})\]", line)
-                uri = request_match.group(2)[:4096] if request_match else None
-                if uri:
-                    uri = re.sub(r"(?i)(token|key|secret|password|session)=([^&\s]+)", r"\1=[REDACTED]", uri)
-                items.append({"log": log_name, "sourceIp": ip_match.group(1) if ip_match else None,
-                              "timestamp": time_match.group(1) if time_match else None,
-                              "method": request_match.group(1) if request_match else None, "uri": uri,
-                              "status": int(request_match.group(3)) if request_match else None})
-                if len(items) >= maximum:
-                    return {"items": items, "partial": True, "warnings": warnings + ["Web 请求关联达到上限"]}
-        except (OSError, PermissionError):
-            warnings.append(f"无法读取访问日志: {log_name}")
-    if not log_names:
-        warnings.append("未找到 Nginx/Apache Access Log")
-    return {"items": items, "partial": bool(warnings), "warnings": warnings[:200]}
-
-
-def find_web_related_processes(request: dict[str, Any]) -> dict[str, Any]:
-    path = validated_web_candidate(request.get("path"), request.get("expectedSha256"))
-    maximum = safe_int(request.get("maxProcesses"), 1, 500, "maxProcesses")
-    expected = path.stat()
-    web_signatures = ("nginx", "apache2", "httpd", "php-fpm", "catalina", "tomcat")
-    items: list[dict[str, Any]] = []
-    warnings: list[str] = []
-    ledger = SkipLedger()
-    digest_cache: dict[tuple[int, int], str] = {}
-    for proc in pathlib.Path("/proc").iterdir():
-        if not proc.name.isdigit():
-            continue
+    for log_path in log_file_set(WEB_ACCESS_LOG_PATTERNS, ledger):
         if deadline_exceeded():
             ledger.expire()
             break
-        pid = int(proc.name)
-        reasons: list[str] = []
-        opened: list[dict[str, Any]] = []
-        try:
-            command = pathlib.Path(f"/proc/{pid}/cmdline").read_bytes()[:65536].replace(b"\0", b" ").decode("utf-8", errors="replace")
-            if any(signature in command.lower() for signature in web_signatures):
-                reasons.append("web_runtime")
-            for fd in (proc / "fd").iterdir():
-                try:
-                    info = fd.stat()
-                    target = os.readlink(fd)
-                    if info.st_dev == expected.st_dev and info.st_ino == expected.st_ino:
-                        reasons.append("candidate_open_fd")
-                        opened.append({"fd": fd.name, "target": target[:4096], "deleted": target.endswith(" (deleted)")})
-                    elif target.endswith(" (deleted)") and any(str(pathlib.Path(root)) in target for root in (path.parent, *WEB_TEMP_ROOTS)):
-                        reasons.append("deleted_web_file_open")
-                        opened.append({"fd": fd.name, "target": target[:4096], "deleted": True})
-                except OSError:
-                    ledger.add("文件描述符因权限或 I/O 错误未被检查")
-                    continue
-            if not reasons:
+        scanned.append(str(log_path))
+        for line in bounded_log_lines(log_path, ledger):
+            if name not in line:
                 continue
-            process = stable_process(pid, digest_cache)
-            items.append({**process, "commandSummary": redact_secret_text(command, 4096),
-                          "relationship": sorted(set(reasons)), "openedFiles": opened[:100]})
-        except HelperError as exc:
-            warnings.append(f"PID {pid}: {exc}")
-        except OSError:
-            ledger.add("进程因权限或 I/O 错误未被检查")
-            continue
-        if len(items) >= maximum:
-            return {"items": items, "partial": True, "warnings": (warnings + ledger.warnings())[:199] + ["Web 相关进程达到上限"]}
-    return {"items": items, "partial": bool(warnings) or ledger.partial, "warnings": (warnings + ledger.warnings())[:200]}
-
-
-def collect_file(request: dict[str, Any]) -> dict[str, Any]:
-    path = safe_path(request.get("path"))
-    maximum = safe_int(request.get("maxBytes"), 1, ARTIFACT_MAX_BYTES, "maxBytes")
-    artifact = stage_artifact(path, maximum)
-    return {"artifact": artifact, "sha256": artifact["sha256"], "size": artifact["size"]}
+            matches.append({"log": str(log_path), "line": redact_secret_text(line, 8192)})
+            if len(matches) >= maximum:
+                warnings.append("访问日志匹配达到上限")
+                return {"items": matches, "scannedLogs": scanned, "partial": True, "warnings": (warnings + ledger.warnings())[:200]}
+    if not scanned:
+        warnings.append("未找到 Nginx/Apache/httpd 访问日志")
+    return {
+        "items": matches, "scannedLogs": scanned,
+        "partial": bool(warnings) or ledger.partial,
+        "warnings": (warnings + ledger.warnings())[:200],
+    }
 
 
 def list_java_processes(_: dict[str, Any]) -> list[dict[str, Any]]:
@@ -1358,10 +822,17 @@ def run_tomcat_probe(request: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(class_name, str) or not CLASS_NAME.fullmatch(class_name):
             raise HelperError("INVALID_ARGUMENT", "invalid className")
         argv.append(class_name)
-    result = run(argv, timeout=30)
-    value = json.loads(result.stdout)
+    # 前面的前置检查负责「目标没有这项能力」（jar/JVM 缺失）；到这里失败的是 Attach 与
+    # 探针本身的执行，设计 §5.2 要求它表现为 PROBE_FAILED，而不是被当成能力缺失。
+    try:
+        result = run(argv, timeout=30)
+        value = json.loads(result.stdout)
+    except HelperError as exc:
+        raise HelperError("PROBE_FAILED", f"probe execution failed: {exc}") from exc
+    except (json.JSONDecodeError, ValueError) as exc:
+        raise HelperError("PROBE_FAILED", "probe returned malformed output") from exc
     if not isinstance(value, dict):
-        raise HelperError("UNSUPPORTED_ENVIRONMENT", "probe returned invalid JSON")
+        raise HelperError("PROBE_FAILED", "probe returned invalid JSON")
     if command == "dump_class" and isinstance(value.get("dataBase64"), str):
         try:
             data = base64.b64decode(value.pop("dataBase64"), validate=True)
@@ -1372,121 +843,6 @@ def run_tomcat_probe(request: dict[str, Any]) -> dict[str, Any]:
         value["sha256"] = artifact["sha256"]
         value["size"] = artifact["size"]
     return value
-
-
-def acceptable_search_root(path: pathlib.Path) -> bool:
-    """Reject over-broad roots such as / and pseudo filesystems before any recursive on-disk search."""
-    parts = path.parts
-    return len(parts) >= 3 and parts[0] == "/" and parts[1] not in {"proc", "sys", "dev", "run"}
-
-
-def search_class_on_disk(request: dict[str, Any]) -> dict[str, Any]:
-    pid = safe_int(request.get("pid"), 1, 2**31 - 1, "pid")
-    class_name = request.get("className")
-    if not isinstance(class_name, str) or not CLASS_NAME.fullmatch(class_name):
-        raise HelperError("INVALID_ARGUMENT", "invalid className")
-    relative = class_name.replace(".", "/") + ".class"
-    target = pathlib.Path(relative).name
-    ledger = SkipLedger()
-    warnings: list[str] = []
-    matches: list[str] = []
-    seen: set[str] = set()
-    for root in (pathlib.Path(f"/proc/{pid}/cwd"), pathlib.Path("/usr/local/tomcat"), pathlib.Path("/opt/tomcat")):
-        if len(matches) >= 20 or ledger.expired:
-            break
-        try:
-            resolved = root.resolve(strict=True)
-        except OSError:
-            ledger.add(SKIP_UNREADABLE)
-            continue
-        if str(resolved) in seen:
-            continue
-        seen.add(str(resolved))
-        if not acceptable_search_root(resolved):
-            warnings.append(f"拒绝在过宽的根目录搜索 Class: {resolved}")
-            continue
-        for directory, files in bounded_walk(resolved, ledger, max_depth=CLASS_SEARCH_MAX_DEPTH, visit_limit=CLASS_SEARCH_VISIT_LIMIT):
-            for filename in files:
-                if filename != target:
-                    continue
-                candidate = directory / filename
-                if str(candidate).endswith(relative):
-                    matches.append(str(candidate))
-                    if len(matches) >= 20:
-                        break
-            if len(matches) >= 20:
-                break
-    if not matches and (ledger.partial or warnings):
-        warnings.append("Class 磁盘搜索范围不完整，未搜索的路径可能仍包含该 Class")
-    return {"pid": pid, "className": class_name, "found": bool(matches), "paths": matches,
-            "partial": ledger.partial or bool(warnings), "warnings": (warnings + ledger.warnings())[:200]}
-
-
-def list_privileged_accounts(_: dict[str, Any]) -> list[dict[str, Any]]:
-    sudo_users: set[str] = set()
-    for group_name in ("sudo", "wheel"):
-        result = run(["getent", "group", group_name], check=False)
-        if result.returncode == 0 and result.stdout.strip():
-            fields = result.stdout.strip().split(":")
-            if len(fields) >= 4:
-                sudo_users.update(filter(None, fields[3].split(",")))
-    local_accounts: set[str] = set()
-    try:
-        with pathlib.Path("/etc/passwd").open("r", encoding="utf-8", errors="replace") as handle:
-            local_accounts.update(line.split(":", 1)[0] for line in handle if ":" in line)
-    except OSError:
-        # accountSource degrades to "nss_directory" for every row, which is itself the visible signal;
-        # this operation's contract is a bare row list with no warning channel.
-        pass
-    rows = []
-    for account in pwd.getpwall():
-        privileged = account.pw_uid == 0 or account.pw_name in sudo_users
-        interactive = account.pw_shell not in {"/usr/sbin/nologin", "/sbin/nologin", "/bin/false", ""}
-        if privileged or (account.pw_uid < 1000 and interactive):
-            rows.append({"username": account.pw_name, "uid": account.pw_uid, "gid": account.pw_gid, "shell": account.pw_shell, "home": account.pw_dir,
-                         "sudo": account.pw_name in sudo_users, "interactive": interactive,
-                         "accountSource": "local" if account.pw_name in local_accounts else "nss_directory"})
-    return rows
-
-
-def inspect_privilege_delegation(request: dict[str, Any]) -> dict[str, Any]:
-    maximum = safe_int(request.get("maxItems"), 1, 5000, "maxItems")
-    ledger = SkipLedger()
-    candidates: list[tuple[str, pathlib.Path]] = [("sudoers", pathlib.Path("/etc/sudoers")), ("doas", pathlib.Path("/etc/doas.conf"))]
-    for root, kind, pattern in ((pathlib.Path("/etc/sudoers.d"), "sudoers", "*"),
-                                (pathlib.Path("/etc/polkit-1/rules.d"), "polkit", "*.rules"),
-                                (pathlib.Path("/etc/polkit-1/localauthority"), "polkit", "*.pkla")):
-        if optional_path_kind(root, ledger, follow=True) == "directory":
-            candidates.extend((kind, path) for path in root.rglob(pattern) if path_kind(path, ledger) == "file")
-    items: list[dict[str, Any]] = []
-    warnings: list[str] = []
-    seen: set[str] = set()
-    for kind, path in candidates:
-        if deadline_exceeded():
-            warnings.append(DEADLINE_WARNING)
-            break
-        if optional_path_kind(path, ledger) != "file":
-            continue
-        try:
-            resolved = path.resolve()
-            if str(resolved) in seen:
-                continue
-            seen.add(str(resolved))
-            text = text_file(resolved, 1024 * 1024)
-            directives = [redact_secret_text(line.strip(), 4096) for line in text.splitlines()
-                          if line.strip() and not line.lstrip().startswith(("#", "//"))][:500]
-            items.append({**file_facts(resolved), "kind": kind, "directives": directives,
-                          "signals": [name for name, expression in {
-                              "passwordless": r"\bNOPASSWD\b|\bnopass\b", "wildcard_command": r"\sALL\s*$|\*",
-                              "shell_command": r"/(?:ba|z|da)?sh\b", "polkit_allow": r"YES|ALLOW|Result\.YES",
-                          }.items() if re.search(expression, text, re.I)]})
-        except PermissionError:
-            warnings.append(f"无权读取权限委派配置: {path}")
-        except OSError:
-            warnings.append(f"无法读取权限委派配置: {path}")
-        if len(items) >= maximum:
-            return {"items": items, "partial": True, "warnings": (warnings + ledger.warnings() + ["权限委派配置达到上限"])[:200]}
-    return {"items": items, "partial": bool(warnings) or ledger.partial, "warnings": (warnings + ledger.warnings())[:200]}
 
 
 def inspect_account(request: dict[str, Any]) -> dict[str, Any]:
@@ -1527,13 +883,6 @@ def inspect_authorized_keys(request: dict[str, Any]) -> list[dict[str, Any]]:
             fingerprint = "INVALID"
         items.append({"line": index, "type": fields[key_index], "fingerprint": fingerprint, "comment": " ".join(fields[key_index + 2:])[:256], "hasOptions": key_index > 0})
     return items
-
-
-def get_login_history(request: dict[str, Any]) -> list[dict[str, Any]]:
-    username = safe_username(request.get("username"))
-    maximum = safe_int(request.get("maxEntries"), 1, 500, "maxEntries")
-    result = run(["last", "-F", "-n", str(maximum), username], check=False)
-    return [{"raw": line[:2048]} for line in result.stdout.splitlines() if line.strip() and not line.startswith(("wtmp begins", "reboot"))]
 
 
 def list_cron_entries(request: dict[str, Any]) -> dict[str, Any]:
@@ -1739,94 +1088,6 @@ def list_extended_persistence(request: dict[str, Any]) -> dict[str, Any]:
     return {"items": items, "partial": bool(warnings) or ledger.partial, "warnings": (warnings + ledger.warnings())[:200]}
 
 
-def effective_sshd_config() -> dict[str, Any]:
-    binary = shutil.which("sshd")
-    if not binary:
-        return {"available": False}
-    result = run([binary, "-T"], check=False)
-    selected: dict[str, str] = {}
-    wanted = {"authorizedkeysfile", "authorizedkeyscommand", "authorizedkeyscommanduser", "trustedusercakeys",
-              "authorizedprincipalsfile", "revokedkeys", "permitrootlogin", "passwordauthentication",
-              "pubkeyauthentication", "permituserenvironment", "allowusers", "allowgroups", "denyusers", "denygroups"}
-    for line in result.stdout.splitlines():
-        key, _, value = line.partition(" ")
-        if key in wanted:
-            selected[key] = value[:2048]
-    return {"available": result.returncode == 0, **selected}
-
-
-def inspect_ssh_trust_configuration(_: dict[str, Any]) -> dict[str, Any]:
-    roots = [pathlib.Path("/etc/ssh/sshd_config"), pathlib.Path("/etc/ssh/sshd_config.d")]
-    files: list[dict[str, Any]] = []
-    warnings: list[str] = []
-    ledger = SkipLedger()
-    for root in roots:
-        root_kind = path_kind(root, ledger, follow=True)
-        candidates = [root] if root_kind == "file" else list(root.glob("*.conf"))[:500] if root_kind == "directory" else []
-        for path in candidates:
-            if path_kind(path, ledger) != "file":
-                continue
-            try:
-                text = text_file(path, 1024 * 1024)
-                directives = []
-                in_match = False
-                for number, raw in enumerate(text.splitlines(), 1):
-                    line = raw.strip()
-                    if not line or line.startswith("#"):
-                        continue
-                    key, _, value = line.partition(" ")
-                    if key.lower() == "match":
-                        in_match = True
-                    if key.lower() in {"include", "match", "authorizedkeysfile", "authorizedkeyscommand", "authorizedkeyscommanduser",
-                                      "trustedusercakeys", "authorizedprincipalsfile", "revokedkeys", "permitrootlogin",
-                                      "passwordauthentication", "pubkeyauthentication", "permituserenvironment"}:
-                        directives.append({"line": number, "key": key.lower(), "value": redact_secret_text(value.strip(), 2048), "inMatch": in_match})
-                files.append({**file_facts(path.resolve()), "directives": directives})
-            except PermissionError:
-                warnings.append(f"无权读取 sshd 配置: {path}")
-            except OSError:
-                warnings.append(f"无法读取 sshd 配置: {path}")
-    effective = effective_sshd_config()
-    trust_files: list[dict[str, Any]] = []
-    for key in ("trustedusercakeys", "authorizedprincipalsfile", "revokedkeys"):
-        value = effective.get(key)
-        if not isinstance(value, str) or not value.startswith("/") or "%" in value:
-            continue
-        candidate = pathlib.Path(value)
-        try:
-            if path_kind(candidate, ledger) == "file":
-                trust_files.append({"directive": key, **file_facts(candidate.resolve())})
-        except OSError:
-            warnings.append(f"无法核验 sshd 信任文件: {value}")
-    if not effective.get("available"):
-        warnings.append("sshd -T 未成功，effective 字段不完整")
-    return {"items": files, "effective": effective, "trustFiles": trust_files,
-            "partial": bool(warnings) or ledger.partial, "warnings": (warnings + ledger.warnings())[:200]}
-
-
-def list_ssh_persistence(request: dict[str, Any]) -> dict[str, Any]:
-    maximum, include_user = persistence_limits(request)
-    accounts = interactive_accounts() if include_user else []
-    items: list[dict[str, Any]] = []
-    ledger = SkipLedger()
-    for account in accounts:
-        path = pathlib.Path(account.pw_dir) / ".ssh/authorized_keys"
-        if path_kind(path, ledger) != "file":
-            continue
-        try:
-            facts = file_facts(path.resolve())
-            keys = inspect_authorized_keys({"username": account.pw_name})
-        except (OSError, KeyError):
-            ledger.add("用户 authorized_keys 因权限或 I/O 错误未被解析")
-            continue
-        for key in keys:
-            items.append({**facts, "kind": "ssh", "username": account.pw_name, **key})
-            if len(items) >= maximum:
-                return {"items": items, "partial": True, "warnings": (ledger.warnings() + ["SSH Key 结果达到配置上限"])[:200],
-                        "sshdConfig": effective_sshd_config()}
-    return {"items": items, "partial": ledger.partial, "warnings": ledger.warnings()[:200], "sshdConfig": effective_sshd_config()}
-
-
 def list_shell_startup_files(request: dict[str, Any]) -> dict[str, Any]:
     maximum, include_user = persistence_limits(request)
     startup_ledger = SkipLedger()
@@ -1860,53 +1121,6 @@ def list_shell_startup_files(request: dict[str, Any]) -> dict[str, Any]:
         if len(items) >= maximum:
             return {"items": items, "partial": True, "warnings": (ledger.warnings() + ["Shell 启动文件结果达到配置上限"])[:200]}
     return {"items": items, "partial": ledger.partial, "warnings": ledger.warnings()[:200]}
-
-
-def inspect_persistence_item(request: dict[str, Any]) -> dict[str, Any]:
-    kind = request.get("kind")
-    path = validated_persistence_path(kind, request.get("path"))
-    expected = request.get("expectedSha256")
-    current = sha256_file(path)
-    if expected is not None and (not isinstance(expected, str) or current != expected):
-        raise HelperError("EVIDENCE_COLLECTION", "persistence item hash changed")
-    facts = file_facts(path)
-    if kind == "ssh":
-        username = safe_username(request.get("username"))
-        return {**facts, "kind": kind, "username": username, "keys": inspect_authorized_keys({"username": username})}
-    text = text_file(path)
-    return {**facts, "kind": kind, "features": dangerous_features(text), "excerpt": text, "truncated": path.stat().st_size > 65536}
-
-
-def find_related_processes(request: dict[str, Any]) -> list[dict[str, Any]]:
-    kind = request.get("kind")
-    path = validated_persistence_path(kind, request.get("path"))
-    expected = request.get("expectedSha256")
-    if expected is not None and sha256_file(path) != expected:
-        raise HelperError("EVIDENCE_COLLECTION", "persistence item hash changed")
-    maximum = safe_int(request.get("maxProcesses"), 1, 500, "maxProcesses")
-    hint = request.get("commandHint", "")
-    if not isinstance(hint, str) or len(hint) > 4096:
-        raise HelperError("INVALID_ARGUMENT", "invalid commandHint")
-    tokens = re.findall(r"/[A-Za-z0-9_./-]+|[A-Za-z0-9_.-]+", hint)
-    useful = [pathlib.Path(token).name for token in tokens if pathlib.Path(token).name not in {"sh", "bash", "dash", "python", "python3", "env", "sudo", "root"}]
-    if not useful:
-        return []
-    matches = []
-    digest_cache: dict[tuple[int, int], str] = {}
-    for process in list_processes({}):
-        command = str(process.get("command", ""))
-        if any(token in command for token in useful[:10]):
-            try:
-                stable = stable_process(int(process["pid"]), digest_cache)
-            except (HelperError, OSError):
-                # This operation's contract is a bare match list with no warning channel; a process that
-                # exits or refuses inspection mid-scan simply cannot be proven related.
-                continue
-            summary = redact_secret_text(command, 4096)
-            matches.append({**stable, "command": summary, "commandSummary": summary, "executable": stable["exePath"], "matchedTokens": useful[:10]})
-            if len(matches) >= maximum:
-                break
-    return matches
 
 
 def decode_endpoint(value: str, ipv6: bool) -> str:
@@ -1963,21 +1177,6 @@ def list_process_connections(request: dict[str, Any]) -> dict[str, Any]:
             if len(items) >= maximum:
                 return {"items": items, "partial": True, "warnings": (warnings + ["网络连接结果达到配置上限"])[:200]}
     return {"items": items, "partial": bool(warnings), "warnings": warnings[:200]}
-
-
-def collect_persistence_artifact(request: dict[str, Any]) -> dict[str, Any]:
-    path = validated_persistence_path(request.get("kind"), request.get("path"))
-    expected = request.get("expectedSha256")
-    if not isinstance(expected, str) or not re.fullmatch(r"[0-9a-f]{64}", expected) or sha256_file(path) != expected:
-        raise HelperError("EVIDENCE_COLLECTION", "persistence item hash changed")
-    maximum = safe_int(request.get("maxBytes"), 1, 10 * 1024 * 1024, "maxBytes")
-    if path.stat().st_size > maximum:
-        raise HelperError("EVIDENCE_COLLECTION", "persistence artifact exceeds collection limit")
-    artifact = stage_artifact(path, maximum)
-    if artifact["sha256"] != expected:
-        artifact_path(artifact["artifactToken"]).unlink(missing_ok=True)
-        raise HelperError("EVIDENCE_COLLECTION", "persistence item changed during collection")
-    return {"artifact": artifact, "sha256": artifact["sha256"], "size": artifact["size"]}
 
 
 def redact_secret_text(value: str, maximum: int = 2048) -> str:
@@ -2157,6 +1356,10 @@ def stable_process(pid: int, digest_cache: dict[tuple[int, int], str] | None = N
     except KeyError:
         username = str(uid)
     scope = process_scope_metadata(pid)
+    try:
+        command = redact_secret_text(pathlib.Path(f"/proc/{pid}/cmdline").read_bytes()[:65536].replace(b"\0", b" ").decode("utf-8", errors="replace"), 4096).strip()
+    except OSError:
+        command = before["comm"]
     return {
         "bootId": boot_id(),
         "pid": pid,
@@ -2166,6 +1369,7 @@ def stable_process(pid: int, digest_cache: dict[tuple[int, int], str] | None = N
         "ppid": before["ppid"],
         "state": before["state"],
         "comm": before["comm"],
+        "command": command,
         "uid": uid,
         "username": username,
         "exePath": clean_path,
@@ -2256,169 +1460,6 @@ def read_global_connections(maximum: int) -> tuple[list[dict[str, Any]], list[st
     return items, warnings[:100], bool(warnings)
 
 
-def capture_volatile_snapshot(request: dict[str, Any]) -> dict[str, Any]:
-    max_processes = safe_int(request.get("maxProcesses"), 1, 10000, "maxProcesses")
-    max_connections = safe_int(request.get("maxConnections"), 1, 20000, "maxConnections")
-    processes, process_warnings, process_partial = enumerate_stable_processes(max_processes)
-    connections, connection_warnings, connection_partial = read_global_connections(max_connections)
-    socket_owners: dict[str, int] = {}
-    for process in processes:
-        try:
-            for descriptor in pathlib.Path(f"/proc/{process['pid']}/fd").iterdir():
-                try:
-                    match = re.fullmatch(r"socket:\[(\d+)\]", os.readlink(descriptor))
-                    if match:
-                        socket_owners[match.group(1)] = int(process["pid"])
-                except OSError:
-                    # A descriptor that vanishes mid-scan simply maps no socket owner; the unmapped
-                    # socket count below reports the resulting gap.
-                    continue
-        except PermissionError:
-            process_warnings.append(f"PID {process['pid']}: 无权映射 socket 所有者")
-            process_partial = True
-        except FileNotFoundError:
-            process_warnings.append(f"PID {process['pid']}: socket 映射时进程已退出")
-            process_partial = True
-    unmapped = 0
-    for connection in connections:
-        owner = socket_owners.get(str(connection.get("inode", "")))
-        if owner is None:
-            unmapped += 1
-        else:
-            connection["processPid"] = owner
-    if unmapped:
-        connection_warnings.append(f"{unmapped} 条全局 socket 无法稳定映射到已采集进程")
-        connection_partial = True
-    memory: dict[str, int] = {}
-    try:
-        for line in pathlib.Path("/proc/meminfo").read_text("ascii").splitlines():
-            key, _, raw = line.partition(":")
-            if key in {"MemTotal", "MemAvailable", "SwapTotal", "SwapFree"}:
-                memory[key] = int(raw.strip().split()[0]) * 1024
-    except (OSError, ValueError):
-        process_warnings.append("无法读取 /proc/meminfo")
-        process_partial = True
-    captured: dict[str, Any] = {
-        "capturedAt": utc_iso(now_utc()),
-        "hostname": platform.node(),
-        "memory": memory,
-        "processes": processes,
-        "connections": connections,
-    }
-    try:
-        captured["bootId"] = boot_id()
-    except HelperError as exc:
-        captured["bootId"] = None
-        process_warnings.append(f"无法读取 boot 标识：{exc}")
-        process_partial = True
-    try:
-        captured["uptimeSeconds"] = float(pathlib.Path("/proc/uptime").read_text("ascii").split()[0])
-    except (OSError, ValueError, IndexError):
-        captured["uptimeSeconds"] = None
-        process_warnings.append("无法读取 /proc/uptime")
-        process_partial = True
-    try:
-        captured["loadAverage"] = list(os.getloadavg())
-    except OSError:
-        captured["loadAverage"] = []
-        process_warnings.append("无法读取系统负载")
-        process_partial = True
-    captured["partial"] = process_partial or connection_partial
-    captured["warnings"] = (process_warnings + connection_warnings)[:200]
-    return captured
-
-
-def suspicious_signals(process: dict[str, Any]) -> list[str]:
-    signals: list[str] = []
-    path = str(process.get("exePath", ""))
-    launcher = str(process.get("launcherPath") or "")
-    inspected = launcher or path
-    if process.get("exeDeleted"):
-        signals.append("deleted_executable")
-    if inspected.startswith(("/tmp/", "/var/tmp/", "/dev/shm/")):
-        signals.append("temporary_executable")
-    if pathlib.Path(inspected).name.startswith("."):
-        signals.append("hidden_executable")
-    if process.get("uid") == 0 and inspected.startswith(("/tmp/", "/var/tmp/", "/dev/shm/")):
-        signals.append("root_temporary_executable")
-    try:
-        info = pathlib.Path(f"/proc/{process['pid']}/exe").stat()
-        if info.st_mode & stat.S_IWOTH:
-            signals.append("world_writable_executable")
-    except OSError:
-        # Signal probing is additive: an unreadable /proc/<pid>/exe only means this signal is unproven,
-        # and the process record itself already carries its own collection warnings.
-        pass
-    try:
-        maps = pathlib.Path(f"/proc/{process['pid']}/maps").read_text("utf-8", errors="replace")
-        if any("w" in line.split()[1] and "x" in line.split()[1] for line in maps.splitlines() if len(line.split()) > 1):
-            signals.append("writable_executable_mapping")
-        if " (deleted)" in maps:
-            signals.append("deleted_memory_mapping")
-    except OSError:
-        # Same additive contract as above for the memory map probe.
-        pass
-    if int(process.get("ppid", 0)) > 0 and not pathlib.Path(f"/proc/{process['ppid']}").exists():
-        signals.append("missing_parent")
-    return signals
-
-
-def list_suspicious_processes(request: dict[str, Any]) -> dict[str, Any]:
-    maximum = safe_int(request.get("maxProcesses"), 1, 10000, "maxProcesses")
-    processes, warnings, partial = enumerate_stable_processes(maximum)
-    items = []
-    for process in processes:
-        if deadline_exceeded():
-            return {"items": items, "partial": True, "warnings": warnings + [DEADLINE_WARNING]}
-        signals = suspicious_signals(process)
-        if signals:
-            items.append({**process, "signals": signals})
-        if len(items) >= maximum:
-            return {"items": items, "partial": True, "warnings": warnings + ["可疑进程结果达到配置上限"]}
-    return {"items": items, "partial": partial, "warnings": warnings}
-
-
-def inspect_process_tree(request: dict[str, Any]) -> dict[str, Any]:
-    target = process_request(request)
-    maximum_depth = safe_int(request.get("maxDepth"), 1, 32, "maxDepth")
-    maximum_nodes = safe_int(request.get("maxNodes"), 1, 10000, "maxNodes")
-    processes, warnings, partial = enumerate_stable_processes(10000)
-    by_pid = {int(item["pid"]): item for item in processes}
-    children: dict[int, list[int]] = {}
-    for item in processes:
-        children.setdefault(int(item["ppid"]), []).append(int(item["pid"]))
-    items: list[dict[str, Any]] = [{**target, "relation": "target", "depth": 0}]
-    seen = {int(target["pid"])}
-    parent = int(target["ppid"])
-    depth = 1
-    while parent > 0 and depth <= maximum_depth and len(items) < maximum_nodes:
-        value = by_pid.get(parent)
-        if value is None:
-            warnings.append(f"父进程 PID {parent} 已消失或不可读取")
-            partial = True
-            break
-        items.append({**value, "relation": "ancestor", "depth": depth})
-        seen.add(parent)
-        parent = int(value["ppid"])
-        depth += 1
-    queue = [(int(target["pid"]), 0)]
-    while queue and len(items) < maximum_nodes:
-        current, current_depth = queue.pop(0)
-        if current_depth >= maximum_depth:
-            continue
-        for child in children.get(current, []):
-            if child in seen:
-                continue
-            seen.add(child)
-            items.append({**by_pid[child], "relation": "descendant", "depth": current_depth + 1})
-            queue.append((child, current_depth + 1))
-            if len(items) >= maximum_nodes:
-                warnings.append("进程树结果达到配置上限")
-                partial = True
-                break
-    return {"items": items, "partial": partial, "warnings": warnings[:200]}
-
-
 def inspect_process_fds(request: dict[str, Any]) -> dict[str, Any]:
     target = process_request(request)
     maximum = safe_int(request.get("maxItems"), 1, 5000, "maxItems")
@@ -2444,30 +1485,6 @@ def inspect_process_fds(request: dict[str, Any]) -> dict[str, Any]:
     return {"items": items, "partial": bool(warnings), "warnings": warnings[:200]}
 
 
-def inspect_process_memory_maps(request: dict[str, Any]) -> dict[str, Any]:
-    target = process_request(request)
-    maximum = safe_int(request.get("maxItems"), 1, 5000, "maxItems")
-    try:
-        lines = pathlib.Path(f"/proc/{target['pid']}/maps").read_text("utf-8", errors="replace").splitlines()
-    except PermissionError:
-        return {"items": [], "partial": True, "warnings": ["无权读取进程内存映射"]}
-    except FileNotFoundError as exc:
-        raise HelperError("EVIDENCE_COLLECTION", "process disappeared after identity validation") from exc
-    items: list[dict[str, Any]] = []
-    warnings: list[str] = []
-    for line in lines:
-        fields = line.split(None, 5)
-        if len(fields) < 5:
-            warnings.append("发现无法解析的内存映射记录")
-            continue
-        path = redact_secret_text(fields[5], 4096) if len(fields) > 5 else None
-        items.append({"address": fields[0], "permissions": fields[1], "offset": fields[2], "device": fields[3],
-                      "inode": fields[4], "path": path, "deleted": bool(path and path.endswith(" (deleted)"))})
-        if len(items) >= maximum:
-            return {"items": items, "partial": True, "warnings": warnings + ["内存映射结果达到配置上限"]}
-    return {"items": items, "partial": bool(warnings), "warnings": warnings[:200]}
-
-
 def collect_process_executable(request: dict[str, Any]) -> dict[str, Any]:
     target = process_request(request)
     maximum = safe_int(request.get("maxBytes"), 1, ARTIFACT_MAX_BYTES, "maxBytes")
@@ -2477,154 +1494,6 @@ def collect_process_executable(request: dict[str, Any]) -> dict[str, Any]:
         raise HelperError("EVIDENCE_COLLECTION", "process executable changed during collection")
     identity = {key: target[key] for key in ("bootId", "pid", "startTicks", "exeInode", "exeSha256")}
     return {"artifact": artifact, "sha256": artifact["sha256"], "size": artifact["size"], "process": identity}
-
-
-def executable_candidate(path: pathlib.Path, info: os.stat_result) -> bool:
-    if info.st_mode & 0o111:
-        return True
-    try:
-        with path.open("rb") as handle:
-            magic = handle.read(4)
-    except OSError:
-        # Unreadable candidates are recorded by scan_triage_files' ledger, not silently ignored here.
-        return False
-    return magic.startswith(b"\x7fELF") or magic.startswith(b"#!")
-
-
-def triage_file_facts(path: pathlib.Path, info: os.stat_result | None = None) -> dict[str, Any]:
-    current = info or path.stat()
-    return {
-        "path": str(path), "inode": str(current.st_ino), "sha256": sha256_file(path), "size": current.st_size,
-        "mode": format(stat.S_IMODE(current.st_mode), "04o"), "uid": current.st_uid, "gid": current.st_gid,
-        "mtime": utc_iso(current.st_mtime),
-    }
-
-
-def scan_triage_files(predicate: Callable[[pathlib.Path, os.stat_result], bool]) -> tuple[list[tuple[pathlib.Path, os.stat_result]], list[str], bool]:
-    candidates: list[tuple[pathlib.Path, os.stat_result]] = []
-    ledger = SkipLedger()
-    visited: set[tuple[int, int]] = set()
-    scanned = 0
-    for configured_root in TRIAGE_ROOTS:
-        if ledger.expired:
-            break
-        if deadline_exceeded():
-            ledger.expire()
-            break
-        root = configured_root.resolve(strict=False)
-        if not root.is_dir():
-            continue
-        for directory, files in bounded_walk(root, ledger):
-            for filename in files:
-                scanned += 1
-                if scanned > TRIAGE_SCAN_LIMIT:
-                    return candidates, (ledger.warnings() + ["文件扫描达到固定 50000 项上限"])[:100], True
-                path = directory / filename
-                try:
-                    info = path.lstat()
-                    key = (info.st_dev, info.st_ino)
-                    if key in visited or not stat.S_ISREG(info.st_mode):
-                        continue
-                    visited.add(key)
-                    if predicate(path, info):
-                        candidates.append((path.resolve(strict=True), info))
-                except PermissionError:
-                    ledger.add("目录项因权限不足未被检查")
-                except OSError:
-                    ledger.add(SKIP_UNREADABLE)
-            if deadline_exceeded():
-                ledger.expire()
-                break
-    return candidates, ledger.warnings()[:100], ledger.partial
-
-
-def list_recent_executables(request: dict[str, Any]) -> dict[str, Any]:
-    hours = safe_int(request.get("modifiedWithinHours"), 1, 8760, "modifiedWithinHours")
-    maximum = safe_int(request.get("maxItems"), 1, 50000, "maxItems")
-    max_size = safe_int(request.get("maxFileSizeBytes"), 1, ARTIFACT_MAX_BYTES, "maxFileSizeBytes")
-    cutoff = now_utc().timestamp() - hours * 3600
-    candidates, warnings, partial = scan_triage_files(
-        lambda path, info: info.st_mtime >= cutoff and info.st_size <= max_size and executable_candidate(path, info)
-    )
-    candidates.sort(key=lambda item: item[1].st_mtime, reverse=True)
-    if len(candidates) > maximum:
-        candidates = candidates[:maximum]
-        warnings.append("近期可执行文件结果达到配置上限")
-        partial = True
-    items: list[dict[str, Any]] = []
-    for path, info in candidates:
-        try:
-            facts = triage_file_facts(path, info)
-            signals = []
-            if str(path).startswith(("/tmp/", "/var/tmp/", "/dev/shm/")):
-                signals.append("temporary_location")
-            if path.name.startswith("."):
-                signals.append("hidden_name")
-            if info.st_mode & stat.S_IWOTH:
-                signals.append("world_writable")
-            items.append({**facts, "signals": signals})
-        except PermissionError:
-            warnings.append(f"无权哈希近期可执行文件: {path}")
-            partial = True
-        except OSError:
-            warnings.append(f"近期可执行文件在采集时发生变化: {path}")
-            partial = True
-    return {"items": items, "partial": partial, "warnings": warnings[:200]}
-
-
-def list_privileged_files(request: dict[str, Any]) -> dict[str, Any]:
-    maximum = safe_int(request.get("maxItems"), 1, 50000, "maxItems")
-    candidates, warnings, partial = scan_triage_files(lambda _path, info: bool(info.st_mode & (stat.S_ISUID | stat.S_ISGID)))
-    capabilities: dict[str, str] = {}
-    getcap = shutil.which("getcap")
-    if getcap:
-        for root in TRIAGE_ROOTS:
-            if not root.exists():
-                continue
-            if deadline_exceeded():
-                warnings.append(DEADLINE_WARNING)
-                partial = True
-                break
-            try:
-                result = run([getcap, "-r", str(root)], timeout=25, check=False)
-            except HelperError as exc:
-                warnings.append(f"getcap 扫描 {root} 超出时间预算: {exc}")
-                partial = True
-                break
-            if result.returncode not in {0, 1}:
-                warnings.append(f"getcap 无法扫描 {root}")
-                partial = True
-            for line in result.stdout.splitlines():
-                path_value, _, capability = line.partition(" ")
-                if path_value.startswith("/") and capability:
-                    capabilities[str(pathlib.Path(path_value).resolve(strict=False))] = capability[:1024]
-    else:
-        warnings.append("getcap 不可用；未检查文件 capabilities")
-        partial = True
-    known = {str(path) for path, _ in candidates}
-    for path_value in capabilities:
-        path = pathlib.Path(path_value)
-        if path_value in known or not path.is_file():
-            continue
-        try:
-            candidates.append((path, path.stat()))
-        except OSError:
-            warnings.append(f"capability 文件在采集时消失: {path_value}")
-            partial = True
-    candidates.sort(key=lambda item: str(item[0]))
-    if len(candidates) > maximum:
-        candidates = candidates[:maximum]
-        warnings.append("特权文件结果达到配置上限")
-        partial = True
-    items = []
-    for path, info in candidates:
-        try:
-            items.append({**triage_file_facts(path, info), "setuid": bool(info.st_mode & stat.S_ISUID),
-                          "setgid": bool(info.st_mode & stat.S_ISGID), "capabilities": capabilities.get(str(path), "")})
-        except OSError:
-            warnings.append(f"特权文件无法读取: {path}")
-            partial = True
-    return {"items": items, "partial": partial, "warnings": warnings[:200]}
 
 
 def verify_package_integrity(request: dict[str, Any]) -> dict[str, Any]:
@@ -2670,61 +1539,6 @@ def verify_package_integrity(request: dict[str, Any]) -> dict[str, Any]:
     return {"path": str(path), "inode": str(info.st_ino), "sha256": current_sha, "packageManager": manager,
             "package": package, "changed": bool(verification), "verification": verification,
             "partial": bool(warnings), "warnings": warnings}
-
-
-def inspect_dynamic_loader(request: dict[str, Any]) -> dict[str, Any]:
-    maximum = safe_int(request.get("maxItems"), 1, 50000, "maxItems")
-    configured = [pathlib.Path("/etc/ld.so.preload"), pathlib.Path("/etc/ld.so.conf")]
-    configured.extend(pathlib.Path(value) for value in glob.glob("/etc/ld.so.conf.d/*.conf")[:1000])
-    items: list[dict[str, Any]] = []
-    warnings: list[str] = []
-    partial = False
-    seen: set[str] = set()
-    for config_path in configured:
-        if deadline_exceeded():
-            warnings.append(DEADLINE_WARNING)
-            partial = True
-            break
-        if not config_path.is_file() or config_path.is_symlink():
-            continue
-        try:
-            config_facts = file_facts(config_path.resolve(strict=True))
-            entries = []
-            for raw in text_file(config_path, 65536).splitlines():
-                value = raw.strip()
-                if not value or value.startswith("#") or value.startswith("include "):
-                    continue
-                if value.startswith("/"):
-                    candidate = pathlib.Path(value).resolve(strict=False)
-                    roots = [root.resolve(strict=False) for root in TRIAGE_ROOTS]
-                    if any(candidate == root or is_within(candidate, root) for root in roots):
-                        entries.append(str(candidate))
-            items.append({**config_facts, "kind": "loader_config", "entries": entries[:500]})
-            for value in entries:
-                if value in seen:
-                    continue
-                seen.add(value)
-                candidate = pathlib.Path(value)
-                if candidate.is_file() and not candidate.is_symlink():
-                    try:
-                        items.append({**triage_file_facts(candidate), "kind": "loaded_library", "referencedBy": str(config_path)})
-                    except PermissionError:
-                        warnings.append(f"无权读取动态加载库: {value}")
-                        partial = True
-                else:
-                    warnings.append(f"动态加载配置引用不存在文件: {value}")
-                    partial = True
-                if len(items) >= maximum:
-                    return {"items": items[:maximum], "partial": True, "warnings": warnings + ["动态加载结果达到配置上限"]}
-        except PermissionError:
-            warnings.append(f"无权读取动态加载配置: {config_path}")
-            partial = True
-        if len(items) >= maximum:
-            return {"items": items[:maximum], "partial": True, "warnings": warnings + ["动态加载结果达到配置上限"]}
-    if not items:
-        warnings.append("未找到可读取的动态加载配置")
-        partial = True
-    return {"items": items, "partial": partial, "warnings": warnings[:200]}
 
 
 def parse_iso_time(raw: str) -> dt.datetime | None:
@@ -2796,14 +1610,100 @@ def parse_log_record(line: str, reference: dt.datetime | None = None) -> dict[st
     }
 
 
+JOURNAL_STORAGE_DIRECTORIES = ("/run/log/journal", "/var/log/journal")
+JOURNAL_SOURCE = "journald"
+
+
+def journal_storage_path() -> pathlib.Path | None:
+    """Directory backing the journal store; also the `log_source.path` of the journald source."""
+    return next(iter(journal_storage_paths()), None)
+
+
+def journal_storage_paths() -> list[pathlib.Path]:
+    """All journal roots read by journalctl, in stable order."""
+    return [pathlib.Path(candidate) for candidate in JOURNAL_STORAGE_DIRECTORIES
+            if pathlib.Path(candidate).is_dir()]
+
+
+def journal_generation() -> str | None:
+    """Digest journal files, not only their parent directory.
+
+    Appending to an existing ``*.journal`` file does not update the directory mtime on Unix.
+    Hashing directory metadata alone therefore misses the normal (non-rotation) write path and
+    lets an offset cursor cross newly appended events while claiming the source is unchanged.
+    """
+    roots = journal_storage_paths()
+    if not roots:
+        return None
+    values: list[Any] = []
+    for root in roots:
+        try:
+            info = root.stat()
+            values.append((str(root), str(info.st_dev), str(info.st_ino), info.st_mtime_ns))
+        except OSError:
+            values.append((str(root), "unreadable"))
+            continue
+        count = 0
+        try:
+            for path in sorted(root.rglob("*.journal*")):
+                if count >= 2048:
+                    values.append((str(root), "journal-file-limit"))
+                    break
+                try:
+                    info = path.stat()
+                except OSError:
+                    continue
+                if not stat.S_ISREG(info.st_mode):
+                    continue
+                values.append((str(path), str(info.st_dev), str(info.st_ino), info.st_mtime_ns, info.st_size))
+                count += 1
+        except OSError:
+            values.append((str(root), "enumeration-failed"))
+    return hashlib.sha256(json.dumps(values, separators=(",", ":")).encode()).hexdigest()
+
+
 def journal_binary() -> str | None:
     """Return journalctl only when a journal store also exists, so callers never guess."""
     binary = shutil.which("journalctl")
-    if not binary:
-        return None
-    if not (pathlib.Path("/run/log/journal").is_dir() or pathlib.Path("/var/log/journal").is_dir()):
+    if not binary or journal_storage_path() is None:
         return None
     return binary
+
+
+def log_source_id(source: str) -> str:
+    """Single derivation of `log_source` identity, shared by the source list and every event.
+
+    Every event namespace must derive `sourceId` through this function using the same `source`
+    string that `v2_log_source_rows` reports, otherwise an event carries an identity that
+    cannot be resolved in `log_source` and `relate log_source contains` silently returns
+    nothing. Files use the resolved path; the journal uses the fixed `JOURNAL_SOURCE` literal.
+    """
+    return hashlib.sha256(source.encode()).hexdigest()
+
+
+def log_source_key(path: pathlib.Path) -> str:
+    """Canonical `source` string for a log file.
+
+    `v2_log_source_rows` and the event queries must produce byte-identical source strings or
+    the same file ends up with two different `sourceId` values. Previously the source list
+    used the resolved path while the event queries used the raw glob path, so any symlinked
+    log directory silently split one source in two.
+    """
+    try:
+        return str(path.resolve())
+    except OSError:
+        return str(path)
+
+
+def log_event_cursor(source: str, timestamp: str, program: str | None, payload: str) -> str:
+    """Content-derived stable cursor.
+
+    The cursor is part of the event identity, so it must depend only on the event itself.
+    A page-local array index would give the same event a different ObjectRef on every call
+    and break ObjectRef reuse for a stable identity.
+    """
+    payload_digest = hashlib.sha256(payload.encode()).hexdigest()
+    return hashlib.sha256(f"{log_source_id(source)}\0{timestamp}\0{program or ''}\0{payload_digest}".encode()).hexdigest()
 
 
 def journal_text(value: Any) -> str:
@@ -2912,10 +1812,15 @@ def auth_event(record: dict[str, Any], source: str) -> dict[str, Any] | None:
     username = auth_username(message, program)
     ip_match = re.search(r"\bfrom\s+([0-9a-fA-F:.]{3,64})", message)
     source_ip = ip_match.group(1) if ip_match else None
-    return {"timestamp": utc_iso(record["timestamp"]), "eventType": event_type,
-            "username": username, "sourceIp": source_ip, "program": program, "pid": record["pid"],
+    timestamp = utc_iso(record["timestamp"])
+    return {"timestamp": timestamp, "eventType": event_type,
+            "username": username, "sourceAddress": source_ip, "program": program,
+            "success": True if event_type == "authentication_success" else False if event_type == "authentication_failure" else None,
+            "pid": record["pid"],
             "summary": f"{event_type}; user={username or 'unknown'}; source={source_ip or 'local'}; program={program or 'unknown'}",
-            "source": source}
+            "source": source,
+            "sourceId": log_source_id(source),
+            "cursor": log_event_cursor(source, timestamp, program, message)}
 
 
 def log_record_key(record: dict[str, Any]) -> tuple[int, str, str]:
@@ -2926,8 +1831,8 @@ def log_record_key(record: dict[str, Any]) -> tuple[int, str, str]:
     Keying on PID therefore never matched the two copies of the same sudo event and every
     such event was counted twice, which also burned the event budget at double rate.
     """
-    return (int(record["timestamp"].timestamp()), str(record["program"] or ""),
-            str(record["message"])[:512])
+    message_digest = hashlib.sha256(str(record["message"]).encode()).hexdigest()
+    return (int(record["timestamp"].timestamp()), str(record["program"] or ""), message_digest)
 
 
 def query_auth_events(request: dict[str, Any]) -> dict[str, Any]:
@@ -2958,7 +1863,7 @@ def query_auth_events(request: dict[str, Any]) -> dict[str, Any]:
             limited = True
 
     if journal_binary() is not None:
-        sources.append("journald")
+        sources.append(JOURNAL_SOURCE)
         for matches in (JOURNAL_AUTH_FACILITIES, tuple(f"_COMM={name}" for name in JOURNAL_AUTH_COMMANDS)):
             if limited:
                 break
@@ -2966,14 +1871,15 @@ def query_auth_events(request: dict[str, Any]) -> dict[str, Any]:
                 ledger.expire()
                 break
             for record in journal_records(cutoff, maximum, matches, ledger):
-                absorb(record, "journald")
+                absorb(record, JOURNAL_SOURCE)
     for path in log_file_set(AUTH_LOG_PATTERNS, ledger):
         if limited:
             break
         if deadline_exceeded():
             ledger.expire()
             break
-        sources.append(str(path))
+        source = log_source_key(path)
+        sources.append(source)
         try:
             reference = dt.datetime.fromtimestamp(path.stat().st_mtime, dt.timezone.utc)
         except OSError:
@@ -2983,7 +1889,7 @@ def query_auth_events(request: dict[str, Any]) -> dict[str, Any]:
             record = parse_log_record(line, reference)
             if record is None:
                 continue
-            absorb(record, str(path))
+            absorb(record, source)
             if limited:
                 break
     if not sources:
@@ -2999,6 +1905,78 @@ def query_auth_events(request: dict[str, Any]) -> dict[str, Any]:
             "warnings": (warnings + ledger.warnings())[:200], "sources": sources[:LOG_FILE_LIMIT + 1]}
 
 
+def query_log_events(request: dict[str, Any]) -> dict[str, Any]:
+    """Collect bounded generic system-log events without exposing raw journal metadata or secrets."""
+    hours = safe_int(request.get("sinceHours"), 1, 8760, "sinceHours")
+    maximum = safe_int(request.get("maxEvents"), 1, 50000, "maxEvents")
+    cutoff = now_utc() - dt.timedelta(hours=hours)
+    ledger = SkipLedger()
+    warnings: list[str] = []
+    sources: list[str] = []
+    collected: list[tuple[dt.datetime, dict[str, Any]]] = []
+    seen: set[tuple[int, str, str]] = set()
+    ceiling = min(maximum * 2, 100000)
+
+    def absorb(record: dict[str, Any], source: str) -> None:
+        if len(collected) >= ceiling or record["timestamp"] < cutoff:
+            return
+        key = log_record_key(record)
+        if key in seen:
+            return
+        seen.add(key)
+        raw_message = str(record.get("message", ""))
+        message = redact_secret_text(raw_message, 8192)
+        timestamp = utc_iso(record["timestamp"])
+        source_id = log_source_id(source)
+        # Identity uses the private raw record digest. Redaction belongs to the model plane;
+        # deriving identity from redacted text would collapse distinct secret-bearing events.
+        cursor = log_event_cursor(source, timestamp, record.get("program"), raw_message)
+        metadata = {"pid": record.get("pid"), "auditType": record.get("auditType")}
+        collected.append((record["timestamp"], {
+            "sourceId": source_id, "cursor": cursor, "timestamp": timestamp,
+            "program": record.get("program"), "message": message,
+            "fields": {key: value for key, value in metadata.items() if value not in {None, ""}},
+        }))
+
+    if journal_binary() is not None:
+        sources.append(JOURNAL_SOURCE)
+        for record in journal_records(cutoff, maximum, (), ledger):
+            absorb(record, JOURNAL_SOURCE)
+            if len(collected) >= ceiling or deadline_exceeded():
+                break
+    for path in log_file_set((*SYSTEM_LOG_PATTERNS, *AUTH_LOG_PATTERNS), ledger):
+        if len(collected) >= ceiling or deadline_exceeded():
+            if deadline_exceeded():
+                ledger.expire()
+            break
+        source = log_source_key(path)
+        sources.append(source)
+        try:
+            reference = dt.datetime.fromtimestamp(path.stat().st_mtime, dt.timezone.utc)
+        except OSError:
+            ledger.add(SKIP_UNREADABLE)
+            continue
+        for line in bounded_log_lines(path, ledger):
+            record = parse_log_record(line, reference)
+            if record is None:
+                ledger.add(SKIP_LOG_RECORD)
+                continue
+            absorb(record, source)
+            if len(collected) >= ceiling:
+                break
+    if not sources:
+        warnings.append("通用日志数据源不可用：journald 与 syslog/messages 均不存在")
+    if len(collected) >= ceiling:
+        warnings.append("通用日志采集达到内部上限，仅保留最新事件")
+    collected.sort(key=lambda item: item[0])
+    items = [event for _, event in collected]
+    if len(items) > maximum:
+        items = items[-maximum:]
+        warnings.append("通用日志事件达到配置上限")
+    return {"items": items, "partial": bool(warnings) or ledger.partial,
+            "warnings": (warnings + ledger.warnings())[:200], "sources": sources[:LOG_FILE_LIMIT + 1]}
+
+
 def audit_field(text: str, name: str) -> str | None:
     match = re.search(rf"\b{name}=(?:\"([^\"]*)\"|(\S+))", text)
     return (match.group(1) or match.group(2)) if match else None
@@ -3006,10 +1984,16 @@ def audit_field(text: str, name: str) -> str | None:
 
 def audit_exec_event(text: str, moment: dt.datetime, source: str) -> dict[str, Any]:
     """Project one audit SYSCALL record; EXECVE a0..aN fields stay out because they carry secrets."""
-    return {"timestamp": utc_iso(moment), "eventType": "process_exec", "pid": audit_field(text, "pid"),
+    timestamp = utc_iso(moment)
+    comm = redact_secret_text(audit_field(text, "comm") or "", 256)
+    return {"timestamp": timestamp, "eventType": "process_exec", "pid": audit_field(text, "pid"),
             "ppid": audit_field(text, "ppid"), "uid": audit_field(text, "uid"), "auid": audit_field(text, "auid"),
-            "comm": redact_secret_text(audit_field(text, "comm") or "", 256),
-            "exe": redact_secret_text(audit_field(text, "exe") or "", 4096), "source": source}
+            "comm": comm,
+            "exe": redact_secret_text(audit_field(text, "exe") or "", 4096), "source": source,
+            "sourceId": log_source_id(source),
+            # The raw record is the only field that separates two syscalls of the same binary
+            # in the same second, so the cursor derives from it rather than from the projection.
+            "cursor": log_event_cursor(source, timestamp, comm, text)}
 
 
 def query_exec_events(request: dict[str, Any]) -> dict[str, Any]:
@@ -3042,7 +2026,8 @@ def query_exec_events(request: dict[str, Any]) -> dict[str, Any]:
         if deadline_exceeded():
             ledger.expire()
             break
-        sources.append(str(path))
+        source = log_source_key(path)
+        sources.append(source)
         for line in bounded_log_lines(path, ledger):
             if "type=SYSCALL" not in line:
                 continue
@@ -3055,18 +2040,18 @@ def query_exec_events(request: dict[str, Any]) -> dict[str, Any]:
             except (ValueError, OverflowError, OSError):
                 ledger.add(SKIP_LOG_RECORD)
                 continue
-            absorb(moment, audit_exec_event(line, moment, str(path)))
+            absorb(moment, audit_exec_event(line, moment, source))
             if limited:
                 break
     if not limited and not ledger.expired and journal_binary() is not None:
         records = journal_records(cutoff, maximum, ("_TRANSPORT=audit",), ledger)
         if records:
-            sources.append("journald")
+            sources.append(JOURNAL_SOURCE)
         for record in records:
             message = str(record["message"])
             if record["auditType"] != "SYSCALL" and not message.startswith("SYSCALL") and "type=SYSCALL" not in message:
                 continue
-            absorb(record["timestamp"], audit_exec_event(message, record["timestamp"], "journald"))
+            absorb(record["timestamp"], audit_exec_event(message, record["timestamp"], JOURNAL_SOURCE))
     if not sources:
         warnings.append("auditd 与 journald audit 传输均不可用；无法还原历史进程执行事件，本次结果不代表无异常")
     if limited:
@@ -3080,53 +2065,6 @@ def query_exec_events(request: dict[str, Any]) -> dict[str, Any]:
             "warnings": (warnings + ledger.warnings())[:200], "sources": sources[:LOG_FILE_LIMIT + 1]}
 
 
-def timeline_instant(item: dict[str, Any]) -> float:
-    """Sort key based on the parsed absolute instant, never on the ISO string itself."""
-    moment = parse_iso_time(str(item.get("timestamp", "")))
-    return moment.timestamp() if moment is not None else 0.0
-
-
-def build_incident_timeline(request: dict[str, Any]) -> dict[str, Any]:
-    hours = safe_int(request.get("sinceHours"), 1, 8760, "sinceHours")
-    maximum = safe_int(request.get("maxEvents"), 1, 50000, "maxEvents")
-    items: list[dict[str, Any]] = []
-    warnings: list[str] = []
-    partial = False
-    collectors: tuple[tuple[str, str, Callable[[], dict[str, Any]]], ...] = (
-        ("auth", "认证事件", lambda: query_auth_events({"sinceHours": hours, "maxEvents": maximum})),
-        ("exec", "进程执行事件", lambda: query_exec_events({"sinceHours": hours, "maxEvents": maximum})),
-        ("recent_executable", "近期可执行文件",
-         lambda: list_recent_executables({"modifiedWithinHours": hours, "maxItems": min(maximum, 500),
-                                          "maxFileSizeBytes": ARTIFACT_MAX_BYTES})),
-    )
-    for source, label, collect in collectors:
-        if deadline_exceeded():
-            warnings.append(f"{label}未采集：{DEADLINE_WARNING}")
-            partial = True
-            continue
-        try:
-            result = collect()
-        except HelperError as exc:
-            warnings.append(f"{label}采集失败：{exc}")
-            partial = True
-            continue
-        partial = partial or bool(result["partial"])
-        warnings.extend(str(value) for value in result["warnings"])
-        if source == "recent_executable":
-            items.extend({"timestamp": item["mtime"], "eventType": "file_modified", "timelineSource": source,
-                          "path": item["path"], "inode": item["inode"], "sha256": item["sha256"], "signals": item["signals"]}
-                         for item in result["items"])
-        else:
-            items.extend({**item, "timelineSource": source} for item in result["items"])
-    items.sort(key=timeline_instant)
-    warnings = list(dict.fromkeys(warnings))
-    if len(items) > maximum:
-        items = items[-maximum:]
-        warnings.append("事件时间线达到配置上限，仅保留最新事件")
-        partial = True
-    return {"items": items, "partial": partial, "warnings": warnings[:200]}
-
-
 def get_action_receipt(request: dict[str, Any]) -> dict[str, Any]:
     value = action_id(request)
     path = receipt_path(value)
@@ -3137,26 +2075,47 @@ def get_action_receipt(request: dict[str, Any]) -> dict[str, Any]:
 
 def quarantine_file(request: dict[str, Any]) -> dict[str, Any]:
     value = action_id(request)
-    source = safe_path(request.get("path"))
+    descriptor, canonical = v2_open_regular(request.get("path"))
+    source = pathlib.Path(canonical)
     expected = request.get("expectedSha256")
     if not isinstance(expected, str) or not re.fullmatch(r"[0-9a-f]{64}", expected):
+        os.close(descriptor)
         raise HelperError("INVALID_ARGUMENT", "invalid expectedSha256")
+    expected_device, expected_inode = request.get("expectedDevice"), request.get("expectedInode")
+    before = os.fstat(descriptor)
+    if str(before.st_dev) != str(expected_device) or str(before.st_ino) != str(expected_inode):
+        os.close(descriptor)
+        raise HelperError("STALE_REF", "quarantine file identity changed")
     root = safe_path(request.get("quarantineRoot"), must_exist=False)
     receipt = begin_receipt(value, "quarantine_file", request)
     if receipt["status"] == "SUCCEEDED":
+        os.close(descriptor)
         return receipt
-    if sha256_file(source) != expected:
+    if v2_sha256_fd(descriptor) != expected:
+        os.close(descriptor)
         return finish_receipt(receipt, "FAILED", {"reason": "source hash changed"})
     root.mkdir(parents=True, exist_ok=True, mode=0o700)
     target_dir = root / value
     target_dir.mkdir(mode=0o700, exist_ok=True)
     target = target_dir / source.name
     if source.stat().st_dev != target_dir.stat().st_dev:
+        os.close(descriptor)
         return finish_receipt(receipt, "FAILED", {"reason": "cross-filesystem quarantine refused"})
-    metadata = {"originalPath": str(source), "mode": stat.S_IMODE(source.stat().st_mode), "uid": source.stat().st_uid, "gid": source.stat().st_gid, "sha256": expected}
+    immediate = source.lstat()
+    if not stat.S_ISREG(immediate.st_mode) or (immediate.st_dev, immediate.st_ino) != (before.st_dev, before.st_ino):
+        os.close(descriptor)
+        return finish_receipt(receipt, "FAILED", {"reason": "source identity changed before rename"})
+    metadata = {"originalPath": str(source), "mode": stat.S_IMODE(before.st_mode), "uid": before.st_uid, "gid": before.st_gid, "sha256": expected}
     os.rename(source, target)
+    moved = target.lstat()
+    if (moved.st_dev, moved.st_ino) != (before.st_dev, before.st_ino):
+        if not source.exists():
+            os.rename(target, source)
+        os.close(descriptor)
+        return finish_receipt(receipt, "FAILED", {"reason": "rename target identity mismatch; rollback attempted"})
     os.chmod(target, 0o000)
     quarantine_mode = stat.S_IMODE(target.stat().st_mode)
+    os.close(descriptor)
     return finish_receipt(receipt, "SUCCEEDED", {
         **metadata,
         "quarantinePath": str(target),
@@ -3182,77 +2141,1577 @@ def disable_account(request: dict[str, Any]) -> dict[str, Any]:
     return finish_receipt(receipt, "SUCCEEDED" if succeeded else "FAILED", {"before": before, "after": after})
 
 
-OPERATIONS: dict[str, Callable[[dict[str, Any]], Any]] = {
-    "get_capabilities": get_capabilities,
-    "capture_volatile_snapshot": capture_volatile_snapshot,
-    "list_suspicious_processes": list_suspicious_processes,
-    "inspect_process_tree": inspect_process_tree,
-    "inspect_process_fds": inspect_process_fds,
-    "inspect_process_memory_maps": inspect_process_memory_maps,
-    "collect_process_executable": collect_process_executable,
-    "list_recent_executables": list_recent_executables,
-    "list_privileged_files": list_privileged_files,
-    "verify_package_integrity": verify_package_integrity,
-    "inspect_dynamic_loader": inspect_dynamic_loader,
-    "query_auth_events": query_auth_events,
-    "query_exec_events": query_exec_events,
-    "build_incident_timeline": build_incident_timeline,
-    "get_host_info": get_host_info,
-    "list_processes": list_processes,
-    "inventory_web_stacks": inventory_web_stacks,
-    "discover_effective_web_roots": discover_effective_web_roots,
-    "discover_web_roots": discover_web_roots,
-    "list_recent_web_artifacts": list_recent_web_artifacts,
-    "list_upload_temp_artifacts": list_upload_temp_artifacts,
-    "find_recent_web_files": find_recent_web_files,
-    "inspect_web_runtime_config": inspect_web_runtime_config,
-    "correlate_web_requests": correlate_web_requests,
-    "find_web_related_processes": find_web_related_processes,
-    "yara_scan_files": yara_scan_files,
-    "inspect_script_file": inspect_script_file,
-    "search_web_access_log": search_web_access_log,
-    "collect_file": collect_file,
-    "list_java_processes": list_java_processes,
-    "detect_java_container": detect_java_container,
-    "run_tomcat_probe": run_tomcat_probe,
-    "search_class_on_disk": search_class_on_disk,
-    "list_privileged_accounts": list_privileged_accounts,
-    "inspect_privilege_delegation": inspect_privilege_delegation,
-    "inspect_account": inspect_account,
-    "inspect_ssh_trust_configuration": inspect_ssh_trust_configuration,
-    "inspect_authorized_keys": inspect_authorized_keys,
-    "get_login_history": get_login_history,
-    "list_cron_entries": list_cron_entries,
-    "list_systemd_units": list_systemd_units,
-    "list_extended_persistence": list_extended_persistence,
-    "list_ssh_persistence": list_ssh_persistence,
-    "list_shell_startup_files": list_shell_startup_files,
-    "inspect_persistence_item": inspect_persistence_item,
-    "find_related_processes": find_related_processes,
-    "list_process_connections": list_process_connections,
-    "collect_persistence_artifact": collect_persistence_artifact,
-    "release_artifact": release_artifact,
-    "get_action_receipt": get_action_receipt,
-    "quarantine_file": quarantine_file,
-    "disable_account": disable_account,
+# v2 只暴露通用取证原语。下方适配器复用 collector 函数，但不会把旧的检测问题、
+# suspicious 标签或 operation map 暴露给模型。
+V2_NAMESPACE_FIELDS: dict[str, tuple[str, ...]] = {
+    "host": ("bootId", "hostname", "os", "release", "architecture", "timezone", "observedAt"),
+    "process": ("bootId", "pid", "startTicks", "ppid", "uid", "username", "comm", "exe", "exeInode", "exeSha256", "command", "state", "startedAt"),
+    "socket": ("protocol", "localAddress", "localPort", "remoteAddress", "remotePort", "state", "inode", "pid"),
+    "file": ("mountId", "device", "inode", "path", "canonicalPath", "kind", "size", "mode", "uid", "gid", "mtime", "sha256", "contentClass", "content", "baseline", "baselineStatus"),
+    "account": ("uid", "username", "gid", "home", "shell", "groups", "locked", "passwordHash"),
+    "ssh_key": ("fingerprint", "ownerUid", "type", "bits", "comment", "sourceFile"),
+    "cron_entry": ("source", "line", "digest", "schedule", "user", "command"),
+    "unit": ("name", "fragmentDigest", "path", "enabled", "active", "execStart", "user"),
+    "persistence": ("kind", "sourceDigest", "source", "user", "command", "enabled"),
+    "module": ("name", "address", "size", "path", "sha256"),
+    "log_source": ("sourceId", "generation", "kind", "path", "firstEventAt", "lastEventAt"),
+    "log_event": ("sourceId", "cursor", "timestamp", "program", "message", "fields"),
+    "auth_event": ("sourceId", "cursor", "timestamp", "eventType", "username", "sourceAddress", "program", "success"),
+    "exec_event": ("sourceId", "cursor", "timestamp", "pid", "uid", "executable", "arguments", "cwd"),
+    "web_stack": ("kind", "instanceId", "version", "pid", "configPaths"),
+    "web_root": ("mountId", "device", "inode", "path", "server", "effective"),
+    "jvm": ("bootId", "pid", "startTicks", "version", "command", "attachSupported", "container"),
+    "java_component": ("jvmDigest", "componentKind", "name", "className", "mappings"),
+    "class": ("jvmDigest", "className", "loaderId", "codeSource", "bytecodeSha256", "modifiable"),
+    "package": ("manager", "name", "version", "architecture", "installedAt", "integrity"),
+}
+V2_RELATIONS: dict[str, tuple[str, ...]] = {
+    "process": ("parent", "children", "opens", "connects"), "socket": ("owned_by",),
+    "file": ("opened_by", "referenced_by_persistence", "requested_in"),
+    "account": ("authorized_key", "login_event"), "ssh_key": ("owned_by",),
+    "cron_entry": ("executes",), "unit": ("executes",), "persistence": ("executes",),
+    "log_source": ("contains",), "web_stack": ("serves_root",), "web_root": ("served_by",),
+    "package": ("owns_file",),
+}
+V2_PROBE_RELATIONS: dict[str, tuple[str, ...]] = {
+    "jvm": ("hosts_component", "loads_class"),
+    "class": ("loaded_by",),
+}
+V2_IDENTITY_FIELDS: dict[str, tuple[str, ...]] = {
+    "host": ("bootId",), "process": ("bootId", "pid", "startTicks", "exeInode", "exeSha256"),
+    "socket": ("protocol", "localAddress", "localPort", "remoteAddress", "remotePort", "inode"),
+    "file": ("mountId", "device", "inode"), "account": ("uid", "username"),
+    "ssh_key": ("fingerprint", "ownerUid"), "cron_entry": ("source", "line", "digest"),
+    "unit": ("name", "fragmentDigest"), "persistence": ("kind", "sourceDigest"),
+    "module": ("name", "address"), "log_source": ("sourceId", "generation"),
+    "log_event": ("sourceId", "cursor"), "auth_event": ("sourceId", "cursor"),
+    "exec_event": ("sourceId", "cursor"), "web_stack": ("kind", "instanceId"),
+    "web_root": ("mountId", "device", "inode"), "jvm": ("bootId", "pid", "startTicks"),
+    "java_component": ("jvmDigest", "componentKind", "name"),
+    "class": ("jvmDigest", "className", "loaderId"),
+    "package": ("manager", "name", "version", "architecture"),
+}
+V2_ENUMERABLE_NAMESPACES = {
+    "host", "process", "socket", "file", "account", "ssh_key", "cron_entry", "unit", "persistence",
+    "module", "log_source", "log_event", "auth_event", "exec_event", "web_stack", "web_root", "jvm", "package",
+}
+# Fields the Manifest allows but this collector does not produce. They must be advertised as
+# unavailable, otherwise the model sees them in the capability set, requests them, and gets a
+# PARTIAL result with FIELD_UNAVAILABLE instead of a clear "not supported" answer.
+# log_source first/lastEventAt would require reading the head and tail of every log source
+# including rotated .gz members, which the source listing deliberately does not do.
+V2_UNAVAILABLE_FIELDS: dict[str, set[str]] = {
+    "ssh_key": {"bits"},
+    "log_source": {"firstEventAt", "lastEventAt"},
+    "web_stack": {"version"},
+    "jvm": {"version"},
+    "package": {"installedAt", "integrity"},
+    "module": {"sha256"},
+}
+V2_NAMESPACE_VERBS: dict[str, tuple[str, ...]] = {
+    **{name: ("enumerate",) for name in V2_ENUMERABLE_NAMESPACES},
+    "process": ("enumerate", "project", "relate", "collect"),
+    "socket": ("enumerate", "relate"),
+    "file": ("enumerate", "project", "read", "match", "verify", "collect"),
+    "account": ("enumerate", "project"),
+    "jvm": ("enumerate", "probe"),
+    "java_component": (), "class": (),
+}
+for _relation_namespace in V2_RELATIONS:
+    _verbs = list(V2_NAMESPACE_VERBS.get(_relation_namespace, ()))
+    if "relate" not in _verbs:
+        _verbs.append("relate")
+    V2_NAMESPACE_VERBS[_relation_namespace] = tuple(_verbs)
+V2_VERBS = {"capabilities", "enumerate", "project", "read", "match", "relate", "verify", "collect", "probe"}
+V2_MAINTENANCE_VERBS = {"scope_resolve", "artifact_release", "get_action_receipt", "quarantine_file", "disable_account"}
+V2_WIRE_ERROR_CODES = {
+    "INVALID_ARGUMENT", "PERMISSION_DENIED", "UNSUPPORTED_CAPABILITY", "STALE_REF", "EPOCH_MISMATCH",
+    "DEADLINE_EXCEEDED", "BUDGET_EXHAUSTED", "SOURCE_CHANGED", "OUTPUT_LIMIT_EXCEEDED",
+    "EVIDENCE_COLLECTION_FAILED", "PROBE_FAILED", "TARGET_UNAVAILABLE", "INTERNAL_ERROR",
+}
+V2_NON_ENUMERABLE_FIELDS = {
+    "file": {"sha256", "content", "baseline", "baselineStatus"},
+    "module": {"sha256"},
+    "account": {"passwordHash"},
+}
+V2_NON_SORTABLE_FIELDS = {"groups", "configPaths", "mappings", "fields"}
+V2_YARA_RULESETS = {
+    "RULESET-WEBSHELL-BUILTIN-2": {
+        "path": pathlib.Path("/opt/huntwarden/rules/webshell.yar"),
+        "sha256": "6f90570d618fbd00b707148c74cfeddd4cffc1bfb712f1fb8ab397fe077a1660",
+    },
 }
 
 
+def v2_yara_ruleset_path(rule_set_ref: str) -> pathlib.Path:
+    ruleset = V2_YARA_RULESETS[rule_set_ref]
+    path = ruleset["path"]
+    if not path.is_file() or path.is_symlink() or sha256_file(path) != ruleset["sha256"]:
+        raise HelperError("UNSUPPORTED_CAPABILITY", "built-in YARA RuleSet integrity check failed")
+    return path
+
+
+def v2_wire_error_code(helper_code: str) -> str:
+    code = {"TOOL_TIMEOUT": "DEADLINE_EXCEEDED", "EVIDENCE_COLLECTION": "EVIDENCE_COLLECTION_FAILED",
+            "UNSUPPORTED_ENVIRONMENT": "UNSUPPORTED_CAPABILITY"}.get(helper_code, helper_code)
+    return code if code in V2_WIRE_ERROR_CODES else "INTERNAL_ERROR"
+
+
+def v2_cursor_binding(params: dict[str, Any], epoch_id: str) -> str:
+    bound = {key: value for key, value in params.items() if key != "cursor"}
+    encoded = json.dumps({"epochId": epoch_id, "params": bound}, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def v2_source_generation(namespace: str, params: dict[str, Any]) -> str:
+    values: list[Any] = [namespace, platform.node(), platform.machine()]
+    if namespace == "file":
+        scope, locator = params.get("scope"), params.get("locator")
+        path_value = scope.get("canonicalRoot") if isinstance(scope, dict) else locator.get("path") if isinstance(locator, dict) else None
+        if not isinstance(path_value, str):
+            raise HelperError("INVALID_ARGUMENT", "file cursor has no bound source")
+        info = pathlib.Path(path_value).stat()
+        values.extend([str(info.st_dev), str(info.st_ino), info.st_mtime_ns, info.st_size])
+    elif namespace in {"log_source", "log_event", "auth_event", "exec_event"}:
+        patterns = (*SYSTEM_LOG_PATTERNS, *AUTH_LOG_PATTERNS, *AUDIT_LOG_PATTERNS, *WEB_ACCESS_LOG_PATTERNS)
+        for raw in sorted({name for pattern in patterns for name in glob.glob(pattern)}):
+            try:
+                info = pathlib.Path(raw).stat()
+                values.extend([raw, str(info.st_dev), str(info.st_ino), info.st_mtime_ns, info.st_size])
+            except OSError:
+                continue
+        # The journal is one of these sources, so its store must take part in the generation.
+        # Leaving it out meant a page could straddle newly written journal entries while the
+        # cursor still claimed the source was unchanged.
+        generation = journal_generation()
+        values.extend([JOURNAL_SOURCE, generation or "journal-unavailable"])
+        try:
+            values.append(boot_id())
+        except (HelperError, OSError):
+            values.append("boot-unavailable")
+    else:
+        try:
+            values.append(boot_id())
+        except (HelperError, OSError):
+            values.append("boot-unavailable")
+    return hashlib.sha256(json.dumps(values, separators=(",", ":")).encode()).hexdigest()
+
+
+def v2_encode_cursor(namespace: str, offset: int, binding: str, source_generation: str) -> str:
+    body = {"v": 1, "namespace": namespace, "offset": offset, "binding": binding, "sourceGeneration": source_generation}
+    body["integrity"] = hashlib.sha256(json.dumps(body, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    return base64.urlsafe_b64encode(json.dumps(body, sort_keys=True, separators=(",", ":")).encode()).decode().rstrip("=")
+
+
+def v2_cursor_start(namespace: str, params: dict[str, Any], epoch_id: str,
+                    tolerate_source_change: bool = False) -> tuple[int, str, str, bool]:
+    binding, generation = v2_cursor_binding(params, epoch_id), v2_source_generation(namespace, params)
+    token = params.get("cursor")
+    if token is None:
+        return 0, binding, generation, False
+    if not isinstance(token, str) or not 1 <= len(token) <= 4096:
+        raise HelperError("INVALID_ARGUMENT", "invalid opaque cursor")
+    try:
+        padded = token + "=" * (-len(token) % 4)
+        payload = json.loads(base64.urlsafe_b64decode(padded.encode()))
+        integrity = payload.pop("integrity")
+        actual = hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    except (ValueError, TypeError, KeyError, json.JSONDecodeError, binascii.Error) as exc:
+        raise HelperError("INVALID_ARGUMENT", "invalid opaque cursor") from exc
+    if not secrets.compare_digest(str(integrity), actual) or payload.get("v") != 1 or payload.get("namespace") != namespace:
+        raise HelperError("INVALID_ARGUMENT", "opaque cursor identity mismatch")
+    if payload.get("binding") != binding:
+        raise HelperError("INVALID_ARGUMENT", "opaque cursor request binding mismatch")
+    source_changed = payload.get("sourceGeneration") != generation
+    if source_changed and not tolerate_source_change:
+        raise HelperError("SOURCE_CHANGED", "cursor source generation changed")
+    return safe_int(payload.get("offset"), 0, 10_000_000, "cursor offset"), binding, generation, source_changed
+
+
+def v2_cost(started: float, nodes: int = 0, byte_count: int = 0, probe_calls: int = 0) -> dict[str, int]:
+    return {"remoteCalls": 1, "nodes": nodes, "bytes": byte_count,
+            "wallTimeMs": max(0, int((time.monotonic() - started) * 1000)), "probeCalls": probe_calls}
+
+
+def v2_capabilities() -> dict[str, Any]:
+    probe_ready = PROBE_JAR.is_file() and java_binary() is not None
+    available_names = set(V2_ENUMERABLE_NAMESPACES)
+    # These namespaces are produced only as probe results, but still need to be
+    # declared so the controller can validate their observations.
+    if probe_ready:
+        available_names.update({"java_component", "class"})
+    available = {name: {"fields": [field for field in V2_NAMESPACE_FIELDS[name] if field not in V2_UNAVAILABLE_FIELDS.get(name, set())], "relations": list((*V2_RELATIONS.get(name, ()), *(V2_PROBE_RELATIONS.get(name, ()) if probe_ready else ()))), "verbs": list(V2_NAMESPACE_VERBS.get(name, ())) }
+                 for name in sorted(available_names)}
+    matchers = ["literal"]
+    if re2_engine is not None:
+        matchers.append("re2")
+    if shutil.which("yara"):
+        try:
+            for rule_set_ref in V2_YARA_RULESETS:
+                v2_yara_ruleset_path(rule_set_ref)
+        except (HelperError, OSError):
+            pass
+        else:
+            matchers.append("yara")
+    probes = ["jvm.tomcat.inventory", "jvm.class.inspect"] if probe_ready else []
+    return {
+        "protocolVersion": PROTOCOL_VERSION, "manifestVersion": MANIFEST_VERSION,
+        "helper": {"name": "huntwarden-helper-v2", "version": HELPER_VERSION},
+        "namespaces": available, "matchers": matchers,
+        "probes": probes,
+        "verbs": ["enumerate", "project", "read", "match", "relate", "verify", "collect", "probe"],
+        "limits": {"maxObjects": 500, "maxOutputBytes": MAX_OUTPUT_BYTES, "maxReadBytes": 65536,
+                   "maxCollectBytes": ARTIFACT_MAX_BYTES},
+    }
+
+
+def v2_identity(namespace: str, fields: dict[str, Any]) -> dict[str, Any]:
+    names = V2_IDENTITY_FIELDS.get(namespace)
+    if not names:
+        raise HelperError("UNSUPPORTED_ENVIRONMENT", f"stable identity is not implemented for {namespace}")
+    identity = {name: fields.get(name) for name in names}
+    if any(value is None or value == "" for value in identity.values()):
+        raise HelperError("UNSUPPORTED_ENVIRONMENT", f"collector did not produce stable {namespace} identity")
+    return identity
+
+
+def v2_observation(namespace: str, fields: dict[str, Any], consistency: str = "OBJECT_STABLE",
+                   requested_fields: tuple[str, ...] | None = None) -> dict[str, Any]:
+    allowed = V2_NAMESPACE_FIELDS.get(namespace)
+    if not allowed:
+        raise HelperError("UNSUPPORTED_ENVIRONMENT", f"namespace unavailable: {namespace}")
+    projected = {name: fields[name] for name in allowed if name in fields and fields[name] is not None}
+    identity = v2_identity(namespace, projected)
+    unavailable = [{"field": name, "reasonCode": "COLLECTOR_UNAVAILABLE"}
+                   for name in (requested_fields or ()) if name not in projected]
+    return {"namespace": namespace, "identity": identity, "fields": projected,
+            "observedAt": utc_iso(now_utc()), "consistency": consistency, "unavailableFields": unavailable}
+
+
+def v2_file_fields(path: pathlib.Path, include_hash: bool = False) -> dict[str, Any]:
+    resolved = path.resolve(strict=True)
+    info = resolved.stat()
+    if not stat.S_ISREG(info.st_mode):
+        raise HelperError("INVALID_ARGUMENT", "file primitive only accepts regular files")
+    value = {"mountId": str(info.st_dev), "device": str(info.st_dev), "inode": str(info.st_ino),
+             "path": str(resolved), "canonicalPath": str(resolved), "kind": "regular", "size": info.st_size,
+             "mode": stat.S_IMODE(info.st_mode), "uid": info.st_uid, "gid": info.st_gid,
+             "mtime": utc_iso(info.st_mtime), "contentClass": v2_content_class(resolved)}
+    if include_hash:
+        value["sha256"] = sha256_file(resolved)
+    return value
+
+
+def v2_open_regular(value: Any) -> tuple[int, str]:
+    if not isinstance(value, str) or not value.startswith("/") or "\x00" in value or ".." in pathlib.PurePosixPath(value).parts:
+        raise HelperError("INVALID_ARGUMENT", "file locator must be an absolute traversal-free path")
+    parts = [part for part in pathlib.PurePosixPath(value).parts if part != "/"]
+    if not parts:
+        raise HelperError("INVALID_ARGUMENT", "file locator cannot be root")
+    directory_flag = getattr(os, "O_PATH", os.O_RDONLY) | os.O_DIRECTORY
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    directory_fd = os.open("/", directory_flag)
+    try:
+        for part in parts[:-1]:
+            next_fd = os.open(part, directory_flag | nofollow, dir_fd=directory_fd)
+            os.close(directory_fd)
+            directory_fd = next_fd
+        descriptor = os.open(parts[-1], os.O_RDONLY | os.O_NONBLOCK | nofollow, dir_fd=directory_fd)
+    except OSError as exc:
+        raise HelperError("STALE_REF", "file locator changed, escaped, or became unreadable") from exc
+    finally:
+        os.close(directory_fd)
+    info = os.fstat(descriptor)
+    if not stat.S_ISREG(info.st_mode):
+        os.close(descriptor)
+        raise HelperError("PERMISSION_DENIED", "file primitive rejects devices, FIFOs, sockets, and directories")
+    try:
+        canonical = os.readlink(f"/proc/self/fd/{descriptor}").removesuffix(" (deleted)")
+    except OSError:
+        canonical = value
+    return descriptor, canonical
+
+
+def v2_sha256_fd(descriptor: int) -> str:
+    digest = hashlib.sha256()
+    duplicate = os.dup(descriptor)
+    try:
+        os.lseek(duplicate, 0, os.SEEK_SET)
+        with os.fdopen(duplicate, "rb", closefd=True) as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+        duplicate = -1
+    finally:
+        if duplicate >= 0:
+            os.close(duplicate)
+    return digest.hexdigest()
+
+
+def v2_file_fields_fd(descriptor: int, canonical: str, include_hash: bool = False) -> dict[str, Any]:
+    info = os.fstat(descriptor)
+    value = {"mountId": str(info.st_dev), "device": str(info.st_dev), "inode": str(info.st_ino),
+             "path": canonical, "canonicalPath": canonical, "kind": "regular", "size": info.st_size,
+             "mode": stat.S_IMODE(info.st_mode), "uid": info.st_uid, "gid": info.st_gid,
+             "mtime": utc_iso(info.st_mtime), "contentClass": v2_content_class(pathlib.Path(canonical))}
+    if include_hash:
+        value["sha256"] = v2_sha256_fd(descriptor)
+    return value
+
+
+def v2_bound_file(params: dict[str, Any], include_hash: bool = False) -> tuple[int, dict[str, Any]]:
+    namespace, identity, locator = v2_ref_params(params)
+    if namespace != "file":
+        raise HelperError("INVALID_ARGUMENT", "operation only accepts file refs")
+    descriptor, canonical = v2_open_regular(locator.get("path"))
+    try:
+        facts = v2_file_fields_fd(descriptor, canonical, include_hash)
+        if any(facts.get(key) != identity.get(key) for key in ("mountId", "device", "inode")):
+            raise HelperError("STALE_REF", "stable file identity changed")
+        return descriptor, facts
+    except Exception:
+        os.close(descriptor)
+        raise
+
+
+def v2_content_class(path: pathlib.Path) -> str:
+    text = str(path)
+    denied = ("/etc/shadow", "/etc/gshadow", "/proc/kcore")
+    if (text in denied or re.fullmatch(r"/proc/\d+/(?:mem|pagemap)", text)
+            or text.endswith(("id_rsa", "id_ed25519")) or "/.ssh/" in text and text.endswith(".pem")
+            or re.search(r"/(?:\.aws|\.gnupg|\.kube)/", text)):
+        return "DENIED_TEXT"
+    # systemd's canonical os-release lives in /usr/lib; /etc/os-release is
+    # commonly a symlink to it. File primitives intentionally reject symlink
+    # traversal, so both legitimate regular-file locations must be classified
+    # as safe system metadata.
+    safe = ("/etc/os-release", "/usr/lib/os-release", "/proc/version", "/proc/uptime", "/etc/hostname")
+    return "SAFE_TEXT" if text in safe else "SENSITIVE_TEXT"
+
+
+def v2_predicate(namespace: str, node: Any, fields: dict[str, Any], depth: int = 1, count: list[int] | None = None) -> bool:
+    count = count if count is not None else [0]
+    count[0] += 1
+    if depth > 4 or count[0] > 32 or not isinstance(node, dict):
+        raise HelperError("INVALID_ARGUMENT", "invalid predicate AST")
+    op = node.get("op")
+    if op in {"and", "or"}:
+        args = node.get("args")
+        if not isinstance(args, list) or not args:
+            raise HelperError("INVALID_ARGUMENT", "invalid predicate group")
+        values = [v2_predicate(namespace, child, fields, depth + 1, count) for child in args]
+        return all(values) if op == "and" else any(values)
+    if op == "not":
+        return not v2_predicate(namespace, node.get("arg"), fields, depth + 1, count)
+    field = node.get("field")
+    if (not isinstance(field, str) or field not in V2_NAMESPACE_FIELDS.get(namespace, ())
+            or field in {"passwordHash", "content"}):
+        raise HelperError("INVALID_ARGUMENT", "predicate field is not allowed by the v2 manifest")
+    actual, expected = fields.get(field), node.get("value")
+    if op == "exists":
+        if not isinstance(node.get("value", True), bool):
+            raise HelperError("INVALID_ARGUMENT", "exists predicate requires a boolean value")
+        return (actual is not None) == node.get("value", True)
+    if op == "eq": return actual == expected
+    if op == "neq": return actual != expected
+    if op == "in":
+        if not isinstance(expected, list) or not 1 <= len(expected) <= 64:
+            raise HelperError("INVALID_ARGUMENT", "in predicate requires 1..64 values")
+        return actual in expected
+    if op in {"contains", "starts_with"}:
+        if not isinstance(expected, str) or len(expected.encode("utf-8")) > 256:
+            raise HelperError("INVALID_ARGUMENT", "string predicate value is invalid")
+        if actual is not None and not isinstance(actual, str):
+            raise HelperError("INVALID_ARGUMENT", "string predicate used with a non-string field")
+        return isinstance(actual, str) and (expected in actual if op == "contains" else actual.startswith(expected))
+    if op in {"lt", "lte", "gt", "gte"}:
+        if isinstance(expected, bool) or not isinstance(expected, (int, float, str)):
+            raise HelperError("INVALID_ARGUMENT", "ordered predicate value is invalid")
+        try:
+            return {"lt": actual < expected, "lte": actual <= expected, "gt": actual > expected, "gte": actual >= expected}[op]
+        except TypeError:
+            return False
+    raise HelperError("INVALID_ARGUMENT", "unsupported predicate operator")
+
+
+def v2_requested_fields(namespace: str, params: dict[str, Any]) -> tuple[str, ...]:
+    requested = params.get("fields")
+    if requested is None:
+        requested = list(V2_IDENTITY_FIELDS[namespace])
+    if (not isinstance(requested, list) or not requested or len(requested) > 32
+            or any(not isinstance(field, str) or field not in V2_NAMESPACE_FIELDS[namespace]
+                   or field in V2_NON_ENUMERABLE_FIELDS.get(namespace, set())
+                   or field in V2_UNAVAILABLE_FIELDS.get(namespace, set()) for field in requested)):
+        raise HelperError("INVALID_ARGUMENT", "invalid enumerate fields")
+    # Identity is always present even when the caller asks for other cheap fields.
+    return tuple(dict.fromkeys((*V2_IDENTITY_FIELDS[namespace], *requested)))
+
+
+def v2_scope_root(params: dict[str, Any]) -> pathlib.Path:
+    scope = params.get("scope")
+    if not isinstance(scope, dict) or scope.get("namespace") not in {None, "file"}:
+        raise HelperError("PERMISSION_DENIED", "file enumerate requires a resolved file Scope Grant")
+    root_value = scope.get("canonicalRoot")
+    root = safe_path(root_value)
+    if str(root) == "/" or str(root) in PSEUDO_FILESYSTEM_ROOTS:
+        raise HelperError("PERMISSION_DENIED", "root and pseudo-filesystem scopes are forbidden")
+    info = root.stat()
+    if not stat.S_ISDIR(info.st_mode):
+        raise HelperError("INVALID_ARGUMENT", "file scope root must be a directory")
+    expected_mount = scope.get("mountId")
+    if expected_mount is not None and str(info.st_dev) != str(expected_mount):
+        raise HelperError("SOURCE_CHANGED", "file scope mount identity changed")
+    return root
+
+
+def v2_file_inventory(params: dict[str, Any], maximum: int) -> tuple[list[dict[str, Any]], list[str], bool]:
+    root = v2_scope_root(params)
+    ledger = SkipLedger()
+    rows: list[dict[str, Any]] = []
+    for directory, files in bounded_walk(root, ledger):
+        for filename in sorted(files):
+            path = directory / filename
+            try:
+                info = path.lstat()
+                if not stat.S_ISREG(info.st_mode):
+                    continue
+                facts = v2_file_fields(path)
+                if params.get("predicate") is None or v2_predicate("file", params.get("predicate"), facts):
+                    rows.append(facts)
+            except OSError:
+                ledger.add(SKIP_UNREADABLE)
+            if len(rows) >= maximum:
+                ledger.note("文件枚举达到结果上限")
+                return rows, ledger.warnings(), True
+    return rows, ledger.warnings(), ledger.partial
+
+
+def v2_web_stack_rows() -> tuple[list[dict[str, Any]], list[str], bool]:
+    inventory = inventory_web_stacks({})
+    config_paths = inventory.get("configPaths", [])
+    rows: list[dict[str, Any]] = []
+    for item in inventory.get("items", []):
+        command = str(item.get("command", ""))
+        lowered = command.lower()
+        kind = next((name for name in ("nginx", "apache2", "httpd", "php-fpm", "tomcat", "catalina") if name in lowered), "web")
+        pid = item.get("pid")
+        instance = hashlib.sha256(f"{kind}\0{pid}\0{command[:4096]}".encode()).hexdigest()
+        # 未采集到的字段一律不产出：v2_observation 会把它写成 unavailableFields，
+        # enumerate 再转成 FIELD_UNAVAILABLE gap。产出 "unknown" 之类占位值会让
+        # 控制端把「没测到」当成「已观察到的值」。
+        rows.append({"kind": kind, "instanceId": instance, "pid": pid, "configPaths": config_paths})
+    return rows, list(inventory.get("warnings", [])), bool(inventory.get("partial"))
+
+
+def v2_socket_row(value: dict[str, Any]) -> dict[str, Any]:
+    try:
+        local_address, local_port = str(value.get("local", "")).rsplit(":", 1)
+        remote_address, remote_port = str(value.get("remote", "")).rsplit(":", 1)
+        return {"protocol": value.get("protocol"), "localAddress": local_address,
+                "localPort": int(local_port), "remoteAddress": remote_address,
+                "remotePort": int(remote_port), "state": value.get("state"),
+                "inode": value.get("inode"), "pid": value.get("processPid")}
+    except (TypeError, ValueError) as exc:
+        raise HelperError("UNSUPPORTED_ENVIRONMENT", "collector produced an invalid socket endpoint") from exc
+
+
+def v2_optional_integer(value: Any) -> int | None:
+    """Normalize text-backed log fields to Manifest integers without inventing 0."""
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        return int(str(value), 10)
+    except (TypeError, ValueError):
+        return None
+
+
+# Which event namespaces a log source can contain, keyed by `log_source.kind`. journald backs
+# all three, so a journald source must be queried against each of them.
+LOG_SOURCE_EVENT_KINDS: dict[str, tuple[str, ...]] = {
+    JOURNAL_SOURCE: ("log_event", "auth_event", "exec_event"),
+    "auth": ("auth_event", "log_event"), "audit": ("exec_event",), "system": ("log_event",),
+}
+
+
+def v2_event_row(namespace: str, value: dict[str, Any]) -> dict[str, Any]:
+    """Project one collector event onto its namespace fields.
+
+    Shared by enumerate and relate so the same event yields identical fields and identity on
+    both paths; relate used to build its own literal and drifted from the enumerate shape.
+    """
+    row: dict[str, Any] = {"sourceId": value.get("sourceId"), "cursor": value.get("cursor"),
+                           "timestamp": value.get("timestamp")}
+    if namespace == "log_event":
+        return {**row, "program": value.get("program"), "message": value.get("message"),
+                "fields": value.get("fields") or {}}
+    if namespace == "auth_event":
+        return {**row, "eventType": value.get("eventType", "auth"), "username": value.get("username"),
+                "sourceAddress": value.get("sourceAddress"), "program": value.get("program"),
+                "success": value.get("success")}
+    return {**row, "pid": v2_optional_integer(value.get("pid")), "uid": v2_optional_integer(value.get("uid")),
+            "executable": value.get("executable", value.get("exe")),
+            "arguments": value.get("arguments"), "cwd": value.get("cwd")}
+
+
+def v2_query_events(namespace: str, hours: int, maximum: int) -> dict[str, Any]:
+    """Run the collector behind one event namespace."""
+    request = {"sinceHours": hours, "maxEvents": maximum}
+    if namespace == "log_event":
+        return query_log_events(request)
+    if namespace == "auth_event":
+        return query_auth_events(request)
+    return query_exec_events(request)
+
+
+def v2_cron_rows(maximum: int) -> tuple[list[dict[str, Any]], list[str], bool]:
+    output = list_cron_entries({"maxItems": maximum, "includeUserScope": False})
+    rows: list[dict[str, Any]] = []
+    for item in output.get("items", []):
+        source = str(item.get("path", ""))
+        line = int(item.get("line", 0))
+        schedule = str(item.get("schedule", ""))
+        command = str(item.get("commandSummary", ""))
+        digest = hashlib.sha256(f"{source}\0{line}\0{schedule}\0{command}".encode()).hexdigest()
+        rows.append({"source": source, "line": line, "digest": digest, "schedule": schedule,
+                     "user": str(item.get("username") or "root"), "command": command})
+    return rows, list(output.get("warnings", [])), bool(output.get("partial"))
+
+
+def v2_ssh_key_rows(maximum: int) -> tuple[list[dict[str, Any]], list[str], bool]:
+    rows: list[dict[str, Any]] = []
+    warnings: list[str] = []
+    for account in interactive_accounts():
+        path = pathlib.Path(account.pw_dir) / ".ssh/authorized_keys"
+        try:
+            for key in inspect_authorized_keys({"username": account.pw_name}):
+                rows.append({"fingerprint": key.get("fingerprint"), "ownerUid": account.pw_uid,
+                             "type": key.get("type"), "comment": key.get("comment", ""),
+                             "sourceFile": str(path)})
+                if len(rows) >= maximum:
+                    return rows, warnings + ["SSH Key 结果达到配置上限"], True
+        except (OSError, KeyError, PermissionError):
+            warnings.append(f"无法读取账户 {account.pw_name} 的 authorized_keys")
+    return rows, warnings[:200], bool(warnings)
+
+
+def v2_unit_rows(maximum: int) -> tuple[list[dict[str, Any]], list[str], bool]:
+    output = list_systemd_units({"maxItems": maximum, "includeUserScope": False})
+    active_names: set[str] | None = None
+    if shutil.which("systemctl"):
+        runtime = run(["systemctl", "list-units", "--all", "--no-legend", "--plain"], check=False)
+        if runtime.returncode == 0:
+            active_names = {parts[0] for line in runtime.stdout.splitlines()
+                            if len(parts := line.split()) >= 4 and parts[2] == "active"}
+    rows: list[dict[str, Any]] = []
+    for item in output.get("items", []):
+        path = str(item.get("path", ""))
+        exec_start = item.get("execStart", [])
+        name = str(item.get("unit", pathlib.Path(path).name))
+        row = {"name": name,
+                     "fragmentDigest": str(item.get("sha256", "")), "path": path,
+                     "enabled": bool(item.get("enabled")),
+                     "execStart": "\n".join(str(value) for value in exec_start) if isinstance(exec_start, list) else str(exec_start),
+                     "user": str(item.get("runAs", "root"))}
+        if active_names is not None:
+            row["active"] = name in active_names
+        rows.append(row)
+    return rows, list(output.get("warnings", [])), bool(output.get("partial"))
+
+
+def v2_persistence_rows(maximum: int) -> tuple[list[dict[str, Any]], list[str], bool]:
+    rows: list[dict[str, Any]] = []
+    warnings: list[str] = []
+    partial = False
+    for collector in (list_extended_persistence, list_shell_startup_files):
+        remaining = max(1, maximum - len(rows))
+        output = collector({"maxItems": remaining, "includeUserScope": False})
+        warnings.extend(output.get("warnings", []))
+        partial = partial or bool(output.get("partial"))
+        for item in output.get("items", []):
+            source = str(item.get("path", ""))
+            kind = str(item.get("persistenceType", item.get("kind", "extended")))
+            source_digest = hashlib.sha256(f"{kind}\0{source}\0{item.get('sha256', '')}".encode()).hexdigest()
+            commands = item.get("commandSummaries", [])
+            # user/enabled 需要解析 Unit/启动项的真实归属与启用状态，当前采集器不产出，
+            # 因此留空并由 unavailableFields 表达，而不是恒定写 root/True。
+            rows.append({"kind": kind, "sourceDigest": source_digest, "source": source,
+                         "command": "\n".join(str(value) for value in commands)})
+            if len(rows) >= maximum:
+                return rows, warnings + ["持久化结果达到配置上限"], True
+    return rows, warnings[:200], partial
+
+
+def v2_module_rows(maximum: int) -> tuple[list[dict[str, Any]], list[str], bool]:
+    source = pathlib.Path("/proc/modules")
+    if not source.is_file():
+        return [], ["/proc/modules 不可用"], True
+    rows: list[dict[str, Any]] = []
+    try:
+        for line in source.read_text(errors="replace").splitlines()[:maximum]:
+            fields = line.split()
+            if len(fields) < 6:
+                continue
+            rows.append({"name": fields[0], "size": int(fields[1]), "address": fields[5], "path": f"/sys/module/{fields[0]}"})
+    except (OSError, ValueError) as exc:
+        return rows, [f"内核模块清单读取不完整: {exc}"], True
+    return rows, [], len(rows) >= maximum
+
+
+def v2_journal_source_row() -> dict[str, Any] | None:
+    """The journal as a first-class `log_source`.
+
+    journald is the source of a large share of log/auth/exec events, but it used to be absent
+    from this list, so every journald event carried a `sourceId` that no `log_source` object
+    could resolve and `relate log_source contains` could never reach it.
+    """
+    if journal_binary() is None:
+        return None
+    storage = journal_storage_path()
+    if storage is None:
+        return None
+    generation = journal_generation()
+    if generation is None:
+        return None
+    return {"sourceId": log_source_id(JOURNAL_SOURCE), "generation": generation,
+            "kind": JOURNAL_SOURCE, "path": str(storage)}
+
+
+def v2_log_source_rows(maximum: int) -> tuple[list[dict[str, Any]], list[str], bool]:
+    paths = sorted({path for pattern in (*SYSTEM_LOG_PATTERNS, *AUTH_LOG_PATTERNS, *AUDIT_LOG_PATTERNS, *WEB_ACCESS_LOG_PATTERNS) for path in glob.glob(pattern)})
+    rows: list[dict[str, Any]] = []; warnings: list[str] = []
+    # An absent journal store is not a collection defect: the source simply does not exist on
+    # this host. Reporting it as a warning would mark every non-systemd target PARTIAL.
+    journal = v2_journal_source_row()
+    if journal is not None:
+        rows.append(journal)
+    for raw in paths:
+        try:
+            path = pathlib.Path(raw)
+            info = path.stat()
+            if not stat.S_ISREG(info.st_mode) or path.is_symlink():
+                continue
+            kind = "audit" if "/audit/" in raw else "web_access" if "access" in path.name else "auth" if path.name.startswith(("auth", "secure")) else "system"
+            source = log_source_key(path)
+            generation = hashlib.sha256(f"{info.st_dev}:{info.st_ino}:{info.st_mtime_ns}:{info.st_size}".encode()).hexdigest()
+            rows.append({"sourceId": log_source_id(source), "generation": generation, "kind": kind, "path": source})
+            if len(rows) >= maximum:
+                return rows, warnings + ["日志源清单达到结果上限"], True
+        except OSError as exc:
+            warnings.append(f"日志源不可读: {raw}: {exc}")
+    return rows, warnings[:200], bool(warnings)
+
+
+def v2_package_rows(maximum: int) -> tuple[list[dict[str, Any]], list[str], bool]:
+    rows: list[dict[str, Any]] = []
+    if shutil.which("dpkg-query"):
+        result = run(["dpkg-query", "-W", "-f=${binary:Package}\\t${Version}\\t${Architecture}\\n"], check=False)
+        for line in result.stdout.splitlines()[:maximum]:
+            parts = line.split("\t")
+            if len(parts) == 3:
+                rows.append({"manager": "dpkg", "name": parts[0], "version": parts[1], "architecture": parts[2]})
+        return rows, ([] if result.returncode == 0 else ["dpkg-query 返回非零状态"]), result.returncode != 0 or len(result.stdout.splitlines()) > maximum
+    if shutil.which("rpm"):
+        result = run(["rpm", "-qa", "--qf", "%{NAME}\\t%{VERSION}-%{RELEASE}\\t%{ARCH}\\n"], check=False)
+        for line in result.stdout.splitlines()[:maximum]:
+            parts = line.split("\t")
+            if len(parts) == 3:
+                rows.append({"manager": "rpm", "name": parts[0], "version": parts[1], "architecture": parts[2]})
+        return rows, ([] if result.returncode == 0 else ["rpm 返回非零状态"]), result.returncode != 0 or len(result.stdout.splitlines()) > maximum
+    return [], ["未发现受支持的 dpkg/rpm 软件包数据库"], True
+
+
+def v2_enumerate(params: dict[str, Any], epoch_id: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]], str | None, list[dict[str, Any]]]:
+    namespace = params.get("namespace")
+    if namespace == "task_ioc":
+        raise HelperError("INVALID_ARGUMENT", "task_ioc is controller-local")
+    if namespace not in V2_ENUMERABLE_NAMESPACES:
+        raise HelperError("UNSUPPORTED_ENVIRONMENT", "namespace unavailable")
+    requested_fields = v2_requested_fields(str(namespace), params)
+    limit = safe_int(params.get("limit"), 1, 500, "limit")
+    tolerate_cursor_drift = namespace in {"log_source", "log_event", "auth_event", "exec_event"}
+    offset, cursor_binding, source_generation, cursor_source_changed = v2_cursor_start(
+        str(namespace), params, epoch_id, tolerate_cursor_drift)
+    rows: list[dict[str, Any]] = []
+    partial = False
+    warnings: list[str] = []
+    if namespace == "host":
+        info = get_host_info({})
+        rows = [{"bootId": boot_id(), "hostname": info.get("hostname", platform.node()), "os": info.get("system", platform.system()),
+                 "release": info.get("release", platform.release()), "architecture": info.get("machine", platform.machine()),
+                 "timezone": host_timezone()[0], "observedAt": utc_iso(now_utc())}]
+    elif namespace == "process":
+        values, warnings, partial = enumerate_stable_processes(min(5000, offset + limit + 1))
+        rows = [{**value, "exe": value.get("exePath"), "command": value.get("command", value.get("comm"))} for value in values]
+    elif namespace == "socket":
+        values, warnings, partial = read_global_connections(min(20000, offset + limit + 1))
+        rows = [v2_socket_row(value) for value in values]
+    elif namespace == "account":
+        for value in pwd.getpwall():
+            row = {"uid": value.pw_uid, "username": value.pw_name, "gid": value.pw_gid, "home": value.pw_dir,
+                   "shell": value.pw_shell}
+            try:
+                inspected = inspect_account({"username": value.pw_name})
+                row.update({"groups": inspected.get("groups", []), "locked": bool(inspected.get("passwordLocked"))})
+            except (HelperError, OSError) as exc:
+                warnings.append(f"账户 {value.pw_name}: {str(exc)}")
+                partial = True
+            rows.append(row)
+    elif namespace == "ssh_key":
+        rows, warnings, partial = v2_ssh_key_rows(min(5000, offset + limit + 1))
+    elif namespace == "file":
+        rows, warnings, partial = v2_file_inventory(params, min(5000, offset + limit + 1))
+    elif namespace == "web_stack":
+        rows, warnings, partial = v2_web_stack_rows()
+    elif namespace == "web_root":
+        rows, warnings, partial = v2_web_root_rows()
+    elif namespace == "jvm":
+        for value in list_java_processes({}):
+            try:
+                stable = stable_process(int(value["pid"]))
+                container = detect_java_container({"pid": value["pid"]})
+                rows.append({"bootId": stable["bootId"], "pid": stable["pid"], "startTicks": stable["startTicks"],
+                             "command": container.get("command", ""), "attachSupported": PROBE_JAR.is_file(),
+                             "container": container.get("container", "unknown")})
+            except (HelperError, KeyError, ValueError):
+                partial = True
+    elif namespace == "cron_entry":
+        rows, warnings, partial = v2_cron_rows(min(5000, offset + limit + 1))
+    elif namespace == "unit":
+        rows, warnings, partial = v2_unit_rows(min(5000, offset + limit + 1))
+    elif namespace == "persistence":
+        rows, warnings, partial = v2_persistence_rows(min(5000, offset + limit + 1))
+    elif namespace == "module":
+        rows, warnings, partial = v2_module_rows(min(5000, offset + limit + 1))
+    elif namespace == "log_source":
+        rows, warnings, partial = v2_log_source_rows(min(5000, offset + limit + 1))
+    elif namespace == "package":
+        rows, warnings, partial = v2_package_rows(min(5000, offset + limit + 1))
+    elif namespace in {"log_event", "auth_event", "exec_event"}:
+        hours = safe_int(params.get("sinceHours", 24), 1, 24 * 365, "sinceHours")
+        output = v2_query_events(str(namespace), hours, min(5000, offset + limit + 1))
+        # sourceId/cursor come from the collector, which derives both from the real originating
+        # source. auth_event/exec_event used to get a hardcoded "auth"/"exec" string plus the
+        # page-local array index, so no event could be joined back to its log_source and the
+        # same event changed identity between calls.
+        rows.extend(v2_event_row(str(namespace), value) for value in output.get("items", []))
+        partial, warnings = bool(output.get("partial")), list(output.get("warnings", []))
+    else:
+        raise HelperError("UNSUPPORTED_ENVIRONMENT", f"collector not available for namespace {namespace}")
+    predicate = params.get("predicate")
+    if predicate is not None:
+        rows = [row for row in rows if v2_predicate(str(namespace), predicate, row)]
+    # 稳定身份是隐式末位排序键（设计 §5.4）：先按身份排序，再用稳定排序施加调用方排序键，
+    # 同值行在分页之间才不会互换位置，offset 游标才有意义。
+    identity_names = V2_IDENTITY_FIELDS[str(namespace)]
+    rows.sort(key=lambda row: tuple(str(row.get(name, "")) for name in identity_names))
+    sort_values = params.get("sort", [])
+    if not isinstance(sort_values, list) or len(sort_values) > 3:
+        raise HelperError("INVALID_ARGUMENT", "invalid sort")
+    for sort_value in reversed(sort_values):
+        if (not isinstance(sort_value, dict) or sort_value.get("field") not in V2_NAMESPACE_FIELDS[str(namespace)]
+                or sort_value.get("field") in V2_NON_SORTABLE_FIELDS
+                or sort_value.get("direction") not in {"asc", "desc"}):
+            raise HelperError("INVALID_ARGUMENT", "invalid sort")
+        field = str(sort_value["field"])
+        rows.sort(key=lambda row: (row.get(field) is None, str(row.get(field, ""))), reverse=sort_value["direction"] == "desc")
+    window = rows[offset:offset + limit]
+    more = offset + limit < len(rows)
+    projected_rows = [{field: row[field] for field in requested_fields if field in row} for row in window]
+    objects = [v2_observation(str(namespace), row, "CURSOR_BEST_EFFORT", requested_fields) for row in projected_rows]
+    gaps = []
+    missing_fields = sorted({item["field"] for observation in objects for item in observation.get("unavailableFields", [])})
+    for field in missing_fields:
+        gaps.append({"code": "FIELD_UNAVAILABLE", "field": field, "detail": "collector did not produce the requested field", "resumable": False})
+    if partial: gaps.append({"code": "COLLECTOR_ERROR", "detail": "; ".join(warnings[:20]), "resumable": False})
+    if more: gaps.append({"code": "NODE_LIMIT", "detail": "enumerate limit reached", "resumable": True})
+    # 源在分页期间变化时不能丢弃整页：设计 §5.2 要求存在可用部分数据就返回 PARTIAL + gap
+    # + cursor，游标改用当前源代，调用方才能继续；只有一条都没产出时才是纯错误。
+    current_generation = v2_source_generation(str(namespace), params)
+    if cursor_source_changed or current_generation != source_generation:
+        if not objects:
+            raise HelperError("SOURCE_CHANGED", "enumerate source changed before any object was produced")
+        gaps.append({"code": "SOURCE_CHANGED", "detail": "分页期间数据源发生变化，本页为 CURSOR_BEST_EFFORT 结果", "resumable": True})
+    next_cursor = v2_encode_cursor(str(namespace), offset + len(window), cursor_binding, current_generation) if more else None
+    return objects, [], next_cursor, gaps
+
+
+def v2_ref_params(params: dict[str, Any]) -> tuple[str, dict[str, Any], dict[str, Any]]:
+    namespace, identity, locator = params.get("namespace"), params.get("identity"), params.get("locator", {})
+    if namespace not in V2_NAMESPACE_FIELDS or not isinstance(identity, dict) or not isinstance(locator, dict):
+        raise HelperError("INVALID_ARGUMENT", "invalid object reference binding")
+    return str(namespace), identity, locator
+
+
+def v2_project(params: dict[str, Any]) -> list[dict[str, Any]]:
+    namespace, identity, locator = v2_ref_params(params)
+    fields = params.get("fields")
+    if not isinstance(fields, list) or not fields or any(field not in V2_NAMESPACE_FIELDS[namespace] for field in fields):
+        raise HelperError("INVALID_ARGUMENT", "invalid projection fields")
+    if namespace == "process":
+        current = process_request({**identity, **locator})
+        current = {**current, "exe": current.get("exePath"), "command": current.get("command", current.get("comm"))}
+    elif namespace == "file":
+        descriptor, current = v2_bound_file(params, "sha256" in fields)
+        os.close(descriptor)
+    elif namespace == "account":
+        current = inspect_account({"username": identity.get("username")})
+        current = {**current, "locked": current.get("passwordLocked")}
+        if current.get("uid") != identity.get("uid"):
+            raise HelperError("EVIDENCE_COLLECTION", "stable account identity changed")
+    else:
+        raise HelperError("UNSUPPORTED_ENVIRONMENT", f"project unavailable for {namespace}")
+    selected = {name: current.get(name) for name in fields if name in current}
+    selected.update(identity)
+    return [v2_observation(namespace, selected)]
+
+
+def v2_edge(from_namespace: str, from_fields: dict[str, Any], relation: str,
+            to_namespace: str, to_fields: dict[str, Any]) -> dict[str, Any]:
+    return {"relation": relation,
+            "fromIdentity": {"namespace": from_namespace, "identity": v2_identity(from_namespace, from_fields)},
+            "toIdentity": {"namespace": to_namespace, "identity": v2_identity(to_namespace, to_fields)},
+            "observedAt": utc_iso(now_utc())}
+
+
+def v2_find_identity_row(namespace: str, identity: dict[str, Any], rows: list[dict[str, Any]]) -> dict[str, Any]:
+    for row in rows:
+        try:
+            if v2_identity(namespace, row) == identity:
+                return row
+        except HelperError:
+            continue
+    raise HelperError("STALE_REF", f"{namespace} object no longer exists")
+
+
+def v2_related_command_files(command: str, maximum: int = 500) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    candidates = [match.group(1).rstrip(".,:)")
+                  for match in re.finditer(r"(?<![A-Za-z0-9_])(/[A-Za-z0-9_./+@:-]{1,4095})", command)]
+    # Persistence sources frequently invoke a command through PATH (for example
+    # ``run-parts``). Resolve only each shell segment's command position; never
+    # execute the source command or treat arbitrary argument tokens as programs.
+    for segment in re.split(r"(?:&&|\|\||[;|])", command):
+        try:
+            tokens = shlex.split(segment.strip().lstrip("("), comments=False, posix=True)
+        except ValueError:
+            continue
+        tokens = [token for token in tokens if token and token not in {"(", ")", "!"}]
+        while tokens and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", tokens[0]):
+            tokens.pop(0)
+        if tokens and tokens[0] == "env":
+            tokens.pop(0)
+            while tokens and (tokens[0].startswith("-") or re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", tokens[0])):
+                tokens.pop(0)
+        if tokens and not tokens[0].startswith(("/", "-")):
+            resolved = shutil.which(tokens[0])
+            if resolved:
+                candidates.append(resolved)
+    for raw in candidates:
+        try:
+            facts = v2_file_fields(safe_path(raw))
+        except (HelperError, OSError):
+            continue
+        key = (str(facts["device"]), str(facts["inode"]))
+        if key in seen:
+            continue
+        seen.add(key)
+        rows.append(facts)
+        if len(rows) >= maximum:
+            break
+    return rows
+
+
+def v2_web_root_rows() -> tuple[list[dict[str, Any]], list[str], bool]:
+    inventory, warnings = web_root_inventory()
+    rows: list[dict[str, Any]] = []
+    for value in inventory:
+        try:
+            path = safe_path(value.get("path"))
+            info = path.stat()
+            if not stat.S_ISDIR(info.st_mode):
+                continue
+            # effective 只有来自运行时生效配置（nginx -T）时才成立；静态配置解析与固定
+            # 兜底目录无法证明该 root 正在生效，此时不产出该字段。
+            row = {"mountId": str(info.st_dev), "device": str(info.st_dev), "inode": str(info.st_ino),
+                   "path": str(path.resolve())}
+            if isinstance(value.get("server"), str):
+                row["server"] = value["server"]
+            if value.get("configSource") == "nginx -T":
+                row["effective"] = True
+            rows.append(row)
+        except (HelperError, OSError):
+            warnings.append(f"Web Root 已变化或不可读: {value.get('path')}")
+    return rows, warnings[:200], bool(warnings)
+
+
+def v2_web_request_rows(path: str, maximum: int) -> tuple[list[dict[str, Any]], list[str], bool]:
+    output = search_web_access_log({"path": path, "fileName": pathlib.Path(path).name, "maxLines": maximum})
+    rows: list[dict[str, Any]] = []
+    for item in output.get("items", []):
+        source = str(item.get("log", "web-access"))
+        message = redact_secret_text(str(item.get("line", "")), 8192)
+        rows.append({
+            "sourceId": hashlib.sha256(source.encode()).hexdigest(),
+            "cursor": hashlib.sha256(f"{source}\0{message}".encode()).hexdigest(),
+            "program": "web_access", "message": message, "fields": {},
+        })
+    return rows, list(output.get("warnings", [])), bool(output.get("partial"))
+
+
+def v2_relate(params: dict[str, Any], epoch_id: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]], str | None, list[dict[str, Any]]]:
+    namespace, identity, locator = v2_ref_params(params)
+    relation = params.get("relation")
+    if relation not in V2_RELATIONS.get(namespace, ()):
+        raise HelperError("INVALID_ARGUMENT", "relation is not available for this namespace")
+    limit = safe_int(params.get("limit"), 1, 500, "limit")
+    tolerate_cursor_drift = namespace == "log_source" and relation == "contains"
+    offset, cursor_binding, source_generation, cursor_source_changed = v2_cursor_start(
+        namespace, params, epoch_id, tolerate_cursor_drift)
+    rows: list[tuple[str, dict[str, Any]]] = []
+    gaps: list[dict[str, Any]] = []
+    current: dict[str, Any]
+    if namespace == "process":
+        current = process_request({**identity, **locator})
+        current = {**current, "exe": current.get("exePath"), "command": current.get("command", current.get("comm"))}
+        if relation == "parent":
+            parent_pid = current.get("ppid")
+            if isinstance(parent_pid, int) and parent_pid > 0:
+                try:
+                    parent = stable_process(parent_pid)
+                    rows.append(("process", {**parent, "exe": parent.get("exePath"), "command": parent.get("command", parent.get("comm"))}))
+                except HelperError as exc:
+                    gaps.append({"code": "SOURCE_CHANGED", "detail": str(exc), "resumable": False})
+        elif relation == "children":
+            values, warnings, partial = enumerate_stable_processes(5000)
+            rows = [("process", {**value, "exe": value.get("exePath"), "command": value.get("command", value.get("comm"))})
+                    for value in values if value.get("ppid") == current.get("pid")]
+            if partial:
+                gaps.append({"code": "COLLECTOR_ERROR", "detail": "; ".join(warnings[:20]), "resumable": False})
+        elif relation == "connects":
+            output = list_process_connections({**identity, "maxConnections": 20000})
+            rows = [("socket", v2_socket_row(value)) for value in output.get("items", [])]
+            if output.get("partial"):
+                gaps.append({"code": "COLLECTOR_ERROR", "detail": "; ".join(output.get("warnings", [])[:20]), "resumable": False})
+        elif relation == "opens":
+            output = inspect_process_fds({**identity, "maxItems": 5000})
+            for value in output.get("items", []):
+                if value.get("type") != "file":
+                    continue
+                raw = str(value.get("target", "")).removesuffix(" (deleted)")
+                try:
+                    path = safe_path(raw)
+                    rows.append(("file", v2_file_fields(path)))
+                except (HelperError, OSError):
+                    continue
+            if output.get("partial"):
+                gaps.append({"code": "COLLECTOR_ERROR", "detail": "; ".join(output.get("warnings", [])[:20]), "resumable": False})
+    elif namespace == "socket" and relation == "owned_by":
+        current = dict(identity)
+        processes, warnings, partial = enumerate_stable_processes(5000)
+        for process in processes:
+            try:
+                for descriptor in pathlib.Path(f"/proc/{process['pid']}/fd").iterdir():
+                    match = re.fullmatch(r"socket:\[(\d+)\]", os.readlink(descriptor))
+                    if match and match.group(1) == str(identity.get("inode")):
+                        rows.append(("process", {**process, "exe": process.get("exePath"), "command": process.get("command", process.get("comm"))}))
+                        break
+            except OSError:
+                continue
+        if partial:
+            gaps.append({"code": "COLLECTOR_ERROR", "detail": "; ".join(warnings[:20]), "resumable": False})
+    elif namespace == "file":
+        descriptor, current = v2_bound_file(params)
+        os.close(descriptor)
+        if relation == "opened_by":
+            processes, warnings, partial = enumerate_stable_processes(5000)
+            for process in processes:
+                try:
+                    for entry in pathlib.Path(f"/proc/{process['pid']}/fd").iterdir():
+                        info = entry.stat()
+                        if str(info.st_dev) == str(identity.get("device")) and str(info.st_ino) == str(identity.get("inode")):
+                            rows.append(("process", {**process, "exe": process.get("exePath"), "command": process.get("command", process.get("comm"))}))
+                            break
+                except OSError:
+                    continue
+            if partial:
+                gaps.append({"code": "COLLECTOR_ERROR", "detail": "; ".join(warnings[:20]), "resumable": False})
+        elif relation == "referenced_by_persistence":
+            related: list[tuple[str, list[dict[str, Any]], list[str], bool]] = []
+            cron, cron_warnings, cron_partial = v2_cron_rows(5000)
+            units, unit_warnings, unit_partial = v2_unit_rows(5000)
+            persistence, persistence_warnings, persistence_partial = v2_persistence_rows(5000)
+            related.extend((("cron_entry", cron, cron_warnings, cron_partial),
+                            ("unit", units, unit_warnings, unit_partial),
+                            ("persistence", persistence, persistence_warnings, persistence_partial)))
+            for target_namespace, candidates, warnings, partial in related:
+                rows.extend((target_namespace, candidate) for candidate in candidates
+                            if str(current.get("path")) in str(candidate.get("command", "")))
+                if partial:
+                    gaps.append({"code": "COLLECTOR_ERROR", "detail": "; ".join(warnings[:20]), "resumable": False})
+        elif relation == "requested_in":
+            request_rows, warnings, partial = v2_web_request_rows(str(current.get("path")), 5000)
+            rows = [("log_event", row) for row in request_rows]
+            if partial:
+                gaps.append({"code": "COLLECTOR_ERROR", "detail": "; ".join(warnings[:20]), "resumable": False})
+    elif namespace == "account":
+        account = inspect_account({"username": identity.get("username")})
+        current = {**account, "locked": account.get("passwordLocked")}
+        if current.get("uid") != identity.get("uid"):
+            raise HelperError("STALE_REF", "stable account identity changed")
+        if relation == "authorized_key":
+            keys, warnings, partial = v2_ssh_key_rows(5000)
+            rows = [("ssh_key", key) for key in keys if key.get("ownerUid") == identity.get("uid")]
+            if partial:
+                gaps.append({"code": "COLLECTOR_ERROR", "detail": "; ".join(warnings[:20]), "resumable": False})
+        elif relation == "login_event":
+            output = v2_query_events("auth_event", 24 * 365, 5000)
+            rows.extend(("auth_event", v2_event_row("auth_event", value)) for value in output.get("items", [])
+                        if value.get("username") == identity.get("username"))
+            if output.get("partial"):
+                gaps.append({"code": "COLLECTOR_ERROR", "detail": "; ".join(output.get("warnings", [])[:20]), "resumable": False})
+    elif namespace == "ssh_key" and relation == "owned_by":
+        keys, warnings, partial = v2_ssh_key_rows(5000)
+        current = v2_find_identity_row("ssh_key", identity, keys)
+        source_file = pathlib.Path(str(current.get("sourceFile", "")))
+        owner_uid = identity.get("ownerUid")
+        # UID is not globally unique on a misconfigured or compromised host.
+        # Bind the owner through the authorized_keys path first, then confirm UID.
+        account_entries = [entry for entry in pwd.getpwall()
+                           if entry.pw_uid == owner_uid
+                           and source_file == pathlib.Path(entry.pw_dir) / ".ssh/authorized_keys"]
+        if account_entries:
+            rows = []
+            for account_entry in account_entries:
+                account = inspect_account({"username": account_entry.pw_name})
+                rows.append(("account", {**account, "locked": account.get("passwordLocked")}))
+        else:
+            gaps.append({"code": "SOURCE_CHANGED", "detail": "SSH Key owner account no longer exists", "resumable": False})
+        if partial:
+            gaps.append({"code": "COLLECTOR_ERROR", "detail": "; ".join(warnings[:20]), "resumable": False})
+    elif namespace in {"cron_entry", "unit", "persistence"} and relation == "executes":
+        if namespace == "cron_entry":
+            candidates, warnings, partial = v2_cron_rows(5000)
+        elif namespace == "unit":
+            candidates, warnings, partial = v2_unit_rows(5000)
+        else:
+            candidates, warnings, partial = v2_persistence_rows(5000)
+        current = v2_find_identity_row(namespace, identity, candidates)
+        rows = [("file", row) for row in v2_related_command_files(str(current.get("command") or current.get("execStart") or ""), 5000)]
+        if partial:
+            gaps.append({"code": "COLLECTOR_ERROR", "detail": "; ".join(warnings[:20]), "resumable": False})
+    elif namespace == "log_source" and relation == "contains":
+        sources, warnings, partial = v2_log_source_rows(5000)
+        # generation belongs to the versioned source identity, but invoking the Helper through
+        # sudo can itself append a journald record before this process starts. An exact
+        # (sourceId, generation) lookup therefore makes `enumerate log_source` -> `relate`
+        # impossible on a healthy, actively logging system. Resolve the logical source by its
+        # stable sourceId, retain the caller's generation on the emitted edge, and surface the
+        # version drift explicitly instead of silently treating it as the same snapshot.
+        source_id, requested_generation = identity.get("sourceId"), identity.get("generation")
+        if not isinstance(source_id, str) or not isinstance(requested_generation, str):
+            raise HelperError("INVALID_ARGUMENT", "log_source relation requires sourceId and generation")
+        observed_source = next((source for source in sources if source.get("sourceId") == source_id), None)
+        if observed_source is None:
+            raise HelperError("STALE_REF", "log_source object no longer exists")
+        if locator.get("path") is not None and locator.get("path") != observed_source.get("path"):
+            raise HelperError("STALE_REF", "log_source path no longer matches the bound source")
+        if observed_source.get("generation") != requested_generation:
+            gaps.append({"code": "SOURCE_CHANGED",
+                         "detail": "日志源 generation 已推进；关系按当前源内容执行并绑定原请求引用",
+                         "resumable": False})
+        current = {**observed_source, "generation": requested_generation}
+        # A source contains whichever event namespaces its kind actually produces. Querying only
+        # log_event used to return an empty relation for every auth and exec event, and for the
+        # journal it returned nothing at all because journald was not even a listed source.
+        wanted = LOG_SOURCE_EVENT_KINDS.get(str(observed_source.get("kind")), ())
+        if not wanted:
+            gaps.append({"code": "CAPABILITY_UNAVAILABLE",
+                         "detail": f"日志源类型 {observed_source.get('kind')} 不产生 log_event/auth_event/exec_event 事实",
+                         "resumable": False})
+        combined = list(warnings)
+        for target in wanted:
+            output = v2_query_events(target, 24 * 365, 5000)
+            rows.extend((target, v2_event_row(target, value)) for value in output.get("items", [])
+                        if value.get("sourceId") == identity.get("sourceId"))
+            combined.extend(output.get("warnings", []))
+            partial = partial or bool(output.get("partial"))
+        if partial:
+            gaps.append({"code": "COLLECTOR_ERROR", "detail": "; ".join(combined[:20]), "resumable": False})
+    elif namespace == "package" and relation == "owns_file":
+        packages, warnings, partial = v2_package_rows(5000)
+        current = v2_find_identity_row("package", identity, packages)
+        manager, name = str(current.get("manager")), str(current.get("name"))
+        if manager == "dpkg" and shutil.which("dpkg-query"):
+            output = run(["dpkg-query", "-L", name], check=False)
+        elif manager == "rpm" and shutil.which("rpm"):
+            output = run(["rpm", "-ql", name], check=False)
+        else:
+            raise HelperError("UNSUPPORTED_ENVIRONMENT", "package file ownership query is unavailable")
+        for raw in output.stdout.splitlines():
+            if not raw.startswith("/"):
+                continue
+            try:
+                rows.append(("file", v2_file_fields(safe_path(raw))))
+            except (HelperError, OSError):
+                continue
+        if partial or output.returncode != 0:
+            detail = [*warnings, f"{manager} 文件清单返回状态 {output.returncode}"]
+            gaps.append({"code": "COLLECTOR_ERROR", "detail": "; ".join(detail[:20]), "resumable": False})
+    elif namespace in {"web_stack", "web_root"}:
+        stacks, stack_warnings, stack_partial = v2_web_stack_rows()
+        roots, root_warnings, root_partial = v2_web_root_rows()
+        if namespace == "web_stack" and relation == "serves_root":
+            current = v2_find_identity_row("web_stack", identity, stacks)
+            kind = str(current.get("kind", "")).lower()
+            rows = [("web_root", root) for root in roots
+                    if kind in str(root.get("server", "")).lower() or str(root.get("server", "")).lower() in kind]
+        elif namespace == "web_root" and relation == "served_by":
+            current = v2_find_identity_row("web_root", identity, roots)
+            server = str(current.get("server", "")).lower()
+            rows = [("web_stack", stack) for stack in stacks
+                    if server in str(stack.get("kind", "")).lower() or str(stack.get("kind", "")).lower() in server]
+        if stack_partial or root_partial:
+            gaps.append({"code": "COLLECTOR_ERROR", "detail": "; ".join([*stack_warnings, *root_warnings][:20]), "resumable": False})
+    else:
+        raise HelperError("UNSUPPORTED_ENVIRONMENT", "remote relation collector is unavailable")
+    rows.sort(key=lambda item: (item[0], tuple(str(item[1].get(name, "")) for name in V2_IDENTITY_FIELDS.get(item[0], ()))))
+    window = rows[offset:offset + limit]
+    more = offset + limit < len(rows)
+    current_generation = v2_source_generation(namespace, params)
+    changed = cursor_source_changed or current_generation != source_generation
+    consistency = "CURSOR_BEST_EFFORT" if changed else "POINT_IN_TIME"
+    objects = [v2_observation(target_namespace, fields, consistency) for target_namespace, fields in window]
+    edges = [v2_edge(namespace, current, str(relation), target_namespace, fields) for target_namespace, fields in window]
+    if more:
+        gaps.append({"code": "NODE_LIMIT", "detail": "relate limit reached", "resumable": True})
+    if changed:
+        if not objects:
+            raise HelperError("SOURCE_CHANGED", "relation source changed before any object was produced")
+        gaps.append({"code": "SOURCE_CHANGED", "detail": "分页期间关系数据源发生变化，本页为 CURSOR_BEST_EFFORT 结果", "resumable": True})
+    next_cursor = v2_encode_cursor(namespace, offset + len(window), cursor_binding, current_generation) if more else None
+    return objects, edges, next_cursor, gaps
+
+
+def v2_read(params: dict[str, Any]) -> list[dict[str, Any]]:
+    descriptor, facts = v2_bound_file(params)
+    try:
+        if facts["contentClass"] == "DENIED_TEXT": raise HelperError("PERMISSION_DENIED", "DENIED_TEXT cannot be read")
+        offset = safe_int(params.get("offset"), 0, max(0, facts["size"]), "offset")
+        length = safe_int(params.get("length"), 1, 65536, "length")
+        os.lseek(descriptor, offset, os.SEEK_SET)
+        raw = os.read(descriptor, length)
+        facts["content"] = redact_secret_text(raw.decode(str(params.get("encoding", "utf-8")), errors="replace"), length)
+        return [v2_observation("file", facts)]
+    finally:
+        os.close(descriptor)
+
+
+MATCH_WINDOW_BYTES = 1024 * 1024
+# Hit context is a content egress path, so it is bounded the same way `read` is: a fixed number
+# of fixed-size windows per object. Offsets are byte offsets into the object so the caller can
+# re-read the exact region through `read` instead of guessing.
+MATCH_CONTEXT_BYTES = 256
+MATCH_CONTEXT_HITS = 4
+# `yara -s` prints one `0x<offset>:$<id>: <matched bytes>` line per string hit.
+YARA_STRING_OFFSET = re.compile(r"^0x([0-9a-fA-F]+):")
+
+
+def escape_context_line(text: str) -> str:
+    """Keep one context window on exactly one line.
+
+    The content field packs a hit marker and several windows separated by newlines. Window bytes
+    routinely contain newlines themselves, so an unescaped window silently splits into several
+    lines and the caller cannot tell windows apart.
+    """
+    return text.replace("\\", "\\\\").replace("\r", "\\r").replace("\n", "\\n")
+
+
+def match_context_windows(raw: bytes, byte_offsets: list[int]) -> list[str]:
+    """Bounded, redacted, single-line windows around each hit, labelled with the byte offset."""
+    windows: list[str] = []
+    half = MATCH_CONTEXT_BYTES // 2
+    for offset in byte_offsets[:MATCH_CONTEXT_HITS]:
+        start = max(0, offset - half)
+        window = raw[start:offset + half].decode("utf-8", errors="replace")
+        # Redact first so the secret patterns still see their original shape, then escape, then
+        # cap: escaping can double the length, so the cap has to apply to the final text.
+        escaped = escape_context_line(redact_secret_text(window, MATCH_CONTEXT_BYTES))
+        windows.append(f"@{start}:{escaped[:MATCH_CONTEXT_BYTES * 2]}")
+    return windows
+
+
+def literal_offsets(text: str, pattern: str) -> list[int]:
+    """Character offsets of the first few literal hits."""
+    offsets: list[int] = []
+    position = 0
+    while len(offsets) < MATCH_CONTEXT_HITS:
+        index = text.find(pattern, position)
+        if index < 0:
+            break
+        offsets.append(index)
+        position = index + max(1, len(pattern))
+    return offsets
+
+
+def re2_offsets(compiled: Any, text: str) -> list[int]:
+    """Character offsets of the first few RE2 hits, without falling back to another engine."""
+    offsets: list[int] = []
+    position = 0
+    while len(offsets) < MATCH_CONTEXT_HITS and position < len(text):
+        found = compiled.search(text[position:])
+        if found is None:
+            break
+        offsets.append(position + found.start())
+        position += max(1, found.end())
+    return offsets
+
+
+def decode_utf8_with_offsets(raw: bytes) -> tuple[str, list[int]]:
+    """Decode UTF-8 while retaining each character's original byte offset.
+
+    Re-encoding text decoded with ``errors=replace`` is not reversible: every invalid input byte
+    becomes a three-byte U+FFFD sequence and shifts all later offsets. This scanner follows the
+    same replacement policy while advancing one original byte for an invalid sequence.
+    """
+    characters: list[str] = []
+    offsets: list[int] = []
+    index = 0
+    while index < len(raw):
+        first = raw[index]
+        width = 1
+        if 0xC2 <= first <= 0xDF:
+            width = 2
+        elif 0xE0 <= first <= 0xEF:
+            width = 3
+        elif 0xF0 <= first <= 0xF4:
+            width = 4
+        candidate = raw[index:index + width]
+        try:
+            if len(candidate) != width:
+                raise UnicodeDecodeError("utf-8", raw, index, len(raw), "truncated sequence")
+            character = candidate.decode("utf-8")
+        except UnicodeDecodeError:
+            character = "\ufffd"
+            width = 1
+        offsets.append(index)
+        characters.append(character)
+        index += width
+    offsets.append(len(raw))
+    return "".join(characters), offsets
+
+
+def character_offsets_to_bytes(byte_offsets: list[int], offsets: list[int]) -> list[int]:
+    """Map decoded character offsets back to the original object bytes."""
+    return [byte_offsets[offset] for offset in offsets if 0 <= offset < len(byte_offsets)]
+
+
+def v2_match(params: dict[str, Any]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    refs, matcher = params.get("objects"), params.get("matcher")
+    if not isinstance(refs, list) or not isinstance(matcher, dict): raise HelperError("INVALID_ARGUMENT", "invalid match request")
+    engine, pattern, rule_set_ref = matcher.get("engine"), matcher.get("pattern"), matcher.get("ruleSetRef")
+    if engine not in {"literal", "re2", "yara"}:
+        raise HelperError("INVALID_ARGUMENT", "invalid matcher")
+    if engine in {"literal", "re2"} and (not isinstance(pattern, str) or not 1 <= len(pattern.encode()) <= 4096 or rule_set_ref is not None):
+        raise HelperError("INVALID_ARGUMENT", "literal/RE2 matcher requires only a bounded pattern")
+    if engine == "yara" and (pattern is not None or rule_set_ref not in V2_YARA_RULESETS):
+        raise HelperError("INVALID_ARGUMENT", "YARA requires a built-in versioned RuleSet reference")
+    if engine == "re2" and re2_engine is None:
+        raise HelperError("UNSUPPORTED_ENVIRONMENT", "RE2 is not installed; semantic fallback is forbidden")
+    compiled_re2 = None
+    if engine == "re2":
+        try:
+            compiled_re2 = re2_engine.compile(pattern)
+        except Exception as exc:
+            raise HelperError("INVALID_ARGUMENT", "pattern is not valid RE2 syntax") from exc
+    if engine == "yara" and not shutil.which("yara"):
+        raise HelperError("UNSUPPORTED_ENVIRONMENT", "YARA sandbox runtime is unavailable")
+    include_context = params.get("includeContext")
+    if not isinstance(include_context, bool):
+        raise HelperError("INVALID_ARGUMENT", "includeContext must be a boolean")
+    maximum = safe_int(params.get("maxHits"), 1, 500, "maxHits")
+    hits: list[dict[str, Any]] = []
+    truncated_objects = 0
+    contextless_hits = 0
+    for binding in refs:
+        if len(hits) >= maximum: break
+        if not isinstance(binding, dict) or binding.get("namespace") != "file": continue
+        try:
+            descriptor, facts = v2_bound_file(binding)
+            try:
+                if facts["contentClass"] == "DENIED_TEXT":
+                    # DENIED_TEXT may still be matched — a hit leaks no content — but its bytes
+                    # must never reach the model, so a context request over it is refused here
+                    # rather than silently downgraded to a context-free hit.
+                    if include_context:
+                        raise HelperError("PERMISSION_DENIED", "DENIED_TEXT does not permit match context")
+                    continue
+                raw = os.read(descriptor, MATCH_WINDOW_BYTES)
+                if isinstance(facts.get("size"), int) and facts["size"] > len(raw):
+                    truncated_objects += 1
+                text, text_byte_offsets = decode_utf8_with_offsets(raw)
+                match_names: list[str] = []
+                byte_offsets: list[int] = []
+                if engine == "literal":
+                    if include_context:
+                        byte_offsets = character_offsets_to_bytes(text_byte_offsets, literal_offsets(text, str(pattern)))
+                        matched = bool(byte_offsets)
+                    else:
+                        matched = pattern in text
+                elif engine == "re2":
+                    if include_context:
+                        byte_offsets = character_offsets_to_bytes(text_byte_offsets, re2_offsets(compiled_re2, text))
+                        matched = bool(byte_offsets)
+                    else:
+                        matched = compiled_re2.search(text) is not None
+                else:
+                    target = f"/proc/{os.getpid()}/fd/{descriptor}"
+                    # `-s` is only added when context was requested: it makes YARA print the
+                    # matched strings, and we parse the byte offsets out of that listing. The
+                    # printed strings themselves are never forwarded; the window is cut from the
+                    # object bytes and redacted like any other content egress.
+                    ruleset_path = v2_yara_ruleset_path(str(rule_set_ref))
+                    argv = ["yara", "--no-warnings", *(["-s"] if include_context else []),
+                            str(ruleset_path), target]
+                    result = run(argv, check=False)
+                    if result.returncode not in {0, 1}:
+                        raise HelperError("EVIDENCE_COLLECTION", "versioned YARA RuleSet execution failed")
+                    for line in result.stdout.splitlines():
+                        if not line.strip():
+                            continue
+                        offset_match = YARA_STRING_OFFSET.match(line)
+                        if offset_match is not None:
+                            if len(byte_offsets) < MATCH_CONTEXT_HITS:
+                                byte_offsets.append(int(offset_match.group(1), 16))
+                            continue
+                        match_names.append(line.split(None, 1)[0])
+                    matched = bool(match_names)
+                if matched:
+                    # The marker shares the content field with the windows, so it is capped too.
+                    marker = ("MATCH" if not match_names else f"YARA_MATCH:{','.join(match_names[:100])}")[:MATCH_CONTEXT_BYTES]
+                    if include_context:
+                        windows = match_context_windows(raw, byte_offsets)
+                        if not windows:
+                            contextless_hits += 1
+                        facts["content"] = "\n".join([marker, *windows])
+                    else:
+                        facts["content"] = marker
+                    hits.append(v2_observation("file", facts))
+            finally:
+                os.close(descriptor)
+        except HelperError:
+            # A stale/denied binding is not a valid negative match. Fail the
+            # request so Controller records a gap instead of false absence.
+            raise
+    gaps: list[dict[str, Any]] = []
+    if truncated_objects:
+        gaps.append({"code": "BYTE_LIMIT", "resumable": False,
+                     "detail": f"{truncated_objects} 个对象只匹配了前 {MATCH_WINDOW_BYTES} 字节，未命中不代表整个文件无命中"})
+    if contextless_hits:
+        gaps.append({"code": "OUTPUT_LIMIT", "resumable": False,
+                     "detail": f"{contextless_hits} 个命中未能定位偏移，只返回命中标记而没有上下文"})
+    return hits, gaps
+
+
+def v2_verify(params: dict[str, Any]) -> list[dict[str, Any]]:
+    namespace, identity, locator = v2_ref_params(params)
+    if namespace != "file": raise HelperError("UNSUPPORTED_ENVIRONMENT", "verify only supports file")
+    baseline = params.get("baseline")
+    if baseline not in {"package_db", "known_hash_set"}:
+        raise HelperError("INVALID_ARGUMENT", "invalid verify baseline")
+    data_set_ref = params.get("dataSetRef")
+    if baseline == "known_hash_set" and (not isinstance(data_set_ref, str) or re.fullmatch(r"DATASET-[0-9a-f-]{36}", data_set_ref) is None):
+        raise HelperError("INVALID_ARGUMENT", "known_hash_set requires a versioned controller dataSetRef")
+    if baseline == "package_db" and data_set_ref is not None:
+        raise HelperError("INVALID_ARGUMENT", "package_db does not accept dataSetRef")
+    descriptor, facts = v2_bound_file(params, include_hash=True)
+    try:
+        if baseline == "package_db":
+            result = verify_package_integrity({"path": facts["path"], "expectedInode": facts["inode"], "expectedSha256": facts["sha256"]})
+            status = "UNKNOWN" if result.get("partial") or not result.get("package") else "MISMATCH" if result.get("changed") else "MATCH"
+            facts["baseline"] = "package_db"
+        else:
+            # The versioned hash contents remain controller-local. Helper only
+            # re-observes the bound file hash; Controller adjudicates membership.
+            status = "UNKNOWN"
+            facts["baseline"] = f"known_hash_set:{data_set_ref}"
+        if v2_sha256_fd(descriptor) != facts["sha256"]:
+            raise HelperError("STALE_REF", "file changed during baseline verification")
+        facts["baselineStatus"] = status
+        return [v2_observation("file", facts, "EXTERNAL_BASELINE")]
+    finally:
+        os.close(descriptor)
+
+
+def v2_write_params(verb: str, params: dict[str, Any]) -> dict[str, Any]:
+    authorization = params.get("authorization")
+    action = params.get("action")
+    if not isinstance(authorization, dict) or not isinstance(action, dict):
+        raise HelperError("PERMISSION_DENIED", "write maintenance requires a bound approval envelope")
+    if authorization.get("mode") != "REMEDIATE" or authorization.get("tool") != verb:
+        raise HelperError("PERMISSION_DENIED", "SCAN mode or mismatched write approval")
+    if authorization.get("actionId") != action.get("actionId"):
+        raise HelperError("PERMISSION_DENIED", "write approval actionId mismatch")
+    expected = hashlib.sha256(json.dumps(action, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    if authorization.get("wireArgsDigest") != expected:
+        raise HelperError("PERMISSION_DENIED", "write approval arguments mismatch")
+    return action
+
+
+def v2_scope_resolve(params: dict[str, Any]) -> dict[str, Any]:
+    namespace = params.get("namespace")
+    if namespace != "file":
+        raise HelperError("UNSUPPORTED_ENVIRONMENT", "only file Scope resolution is implemented")
+    root = safe_path(params.get("requestedRoot"))
+    info = root.stat()
+    if not stat.S_ISDIR(info.st_mode) or str(root) == "/" or str(root) in PSEUDO_FILESYSTEM_ROOTS:
+        raise HelperError("PERMISSION_DENIED", "scope root is not an allowed directory")
+    expected = params.get("expectedCanonicalRoot")
+    if expected is not None and expected != str(root):
+        raise HelperError("SOURCE_CHANGED", "canonical Scope root differs from the approved expectation")
+    return {"namespace": "file", "canonicalRoot": str(root), "mountId": str(info.st_dev),
+            "device": str(info.st_dev), "inode": str(info.st_ino)}
+
+
+def v2_validate_request(request: dict[str, Any]) -> None:
+    request_id, epoch_id = request.get("requestId"), request.get("epochId")
+    if request.get("protocolVersion") != PROTOCOL_VERSION:
+        raise HelperError("INVALID_ARGUMENT", "invalid v2 protocolVersion")
+    if not isinstance(request_id, str) or not 1 <= len(request_id) <= 128:
+        raise HelperError("INVALID_ARGUMENT", "invalid v2 requestId")
+    if not isinstance(epoch_id, str) or not 1 <= len(epoch_id) <= 128:
+        raise HelperError("EPOCH_MISMATCH", "invalid or missing v2 epochId")
+    deadline = request.get("deadlineMs")
+    if isinstance(deadline, bool) or not isinstance(deadline, int) or not DEADLINE_MIN_MS <= deadline <= DEADLINE_MAX_MS:
+        raise HelperError("INVALID_ARGUMENT", "invalid v2 deadlineMs")
+    reservation = request.get("reservation")
+    if not isinstance(reservation, dict) or set(reservation) != {"reservationId", "estimate"}:
+        raise HelperError("INVALID_ARGUMENT", "invalid v2 budget reservation")
+    reservation_id, estimate = reservation.get("reservationId"), reservation.get("estimate")
+    if not isinstance(reservation_id, str) or not 1 <= len(reservation_id) <= 128 or not isinstance(estimate, dict):
+        raise HelperError("INVALID_ARGUMENT", "invalid v2 budget reservation identity")
+    cost_keys = {"remoteCalls", "nodes", "bytes", "wallTimeMs", "probeCalls"}
+    if set(estimate) != cost_keys:
+        raise HelperError("INVALID_ARGUMENT", "invalid v2 budget estimate fields")
+    if any(isinstance(estimate[key], bool) or not isinstance(estimate[key], int) or estimate[key] < 0 for key in cost_keys):
+        raise HelperError("INVALID_ARGUMENT", "invalid v2 budget estimate value")
+    if estimate["remoteCalls"] != 1 or estimate["wallTimeMs"] > deadline:
+        raise HelperError("BUDGET_EXHAUSTED", "v2 request is not covered by its reservation")
+
+
+def v2_dispatch(verb: str, request: dict[str, Any]) -> dict[str, Any]:
+    v2_validate_request(request)
+    params = request.get("params")
+    if not isinstance(params, dict): raise HelperError("INVALID_ARGUMENT", "params must be an object")
+    started = time.monotonic(); request_id = request["requestId"]
+    if verb == "capabilities":
+        return {"protocolVersion": PROTOCOL_VERSION, "requestId": request_id, "status": "SUCCESS",
+                "capabilities": v2_capabilities(), "cost": v2_cost(started, 1)}
+    if verb == "artifact_release":
+        released = release_artifact({"artifactToken": params.get("artifactToken")})
+        return {"protocolVersion": PROTOCOL_VERSION, "requestId": request_id, "status": "SUCCESS",
+                "objects": [], "edges": [], "gaps": [], "maintenanceResult": released,
+                "cost": v2_cost(started, 1)}
+    if verb == "scope_resolve":
+        resolved = v2_scope_resolve(params)
+        return {"protocolVersion": PROTOCOL_VERSION, "requestId": request_id, "status": "SUCCESS",
+                "objects": [], "edges": [], "gaps": [], "maintenanceResult": resolved,
+                "cost": v2_cost(started, 1)}
+    if verb == "get_action_receipt":
+        receipt = get_action_receipt({"actionId": params.get("actionId")})
+        return {"protocolVersion": PROTOCOL_VERSION, "requestId": request_id, "status": "SUCCESS",
+                "objects": [], "edges": [], "gaps": [], "maintenanceResult": receipt,
+                "cost": v2_cost(started, 1)}
+    if verb in {"quarantine_file", "disable_account"}:
+        action = v2_write_params(verb, params)
+        result = quarantine_file(action) if verb == "quarantine_file" else disable_account(action)
+        return {"protocolVersion": PROTOCOL_VERSION, "requestId": request_id, "status": "SUCCESS",
+                "objects": [], "edges": [], "gaps": [], "maintenanceResult": result,
+                "cost": v2_cost(started, 1)}
+    objects: list[dict[str, Any]] = []; edges: list[dict[str, Any]] = []; cursor = None; gaps: list[dict[str, Any]] = []; artifact = None
+    if verb == "enumerate": objects, edges, cursor, gaps = v2_enumerate(params, request["epochId"])
+    elif verb == "project": objects = v2_project(params)
+    elif verb == "read": objects = v2_read(params)
+    elif verb == "match": objects, gaps = v2_match(params)
+    elif verb == "relate": objects, edges, cursor, gaps = v2_relate(params, request["epochId"])
+    elif verb == "verify": objects = v2_verify(params)
+    elif verb == "collect":
+        namespace, identity, _locator = v2_ref_params(params)
+        if namespace == "file":
+            descriptor, facts = v2_bound_file(params, include_hash=True)
+            try:
+                # 采集固定经 /proc/self/fd 复用已复核过身份的 fd。procfs 缺失是能力问题，
+                # 必须显式声明为 UNSUPPORTED_CAPABILITY，而不是漏成 INTERNAL_ERROR traceback。
+                if not pathlib.Path("/proc/self/fd").is_dir():
+                    raise HelperError("UNSUPPORTED_CAPABILITY", "procfs is unavailable; fd-based Evidence collection is not supported")
+                staged = stage_artifact(pathlib.Path(f"/proc/self/fd/{descriptor}"), safe_int(params.get("maxBytes"), 1, ARTIFACT_MAX_BYTES, "maxBytes"))
+                if staged["sha256"] != facts["sha256"]:
+                    artifact_path(staged["artifactToken"]).unlink(missing_ok=True)
+                    raise HelperError("STALE_REF", "file changed during Evidence collection")
+                artifact = {"token": staged["artifactToken"], "sha256": staged["sha256"], "size": staged["size"],
+                            "complete": staged["size"] == facts["size"], "expiresAt": staged["expiresAt"]}
+                objects = [v2_observation("file", facts)]
+            finally:
+                os.close(descriptor)
+        elif namespace == "process":
+            collected = collect_process_executable({**identity, "maxBytes": params.get("maxBytes")})
+            staged = collected["artifact"]
+            current = process_request(identity)
+            process_fields = {**current, "exe": current.get("exePath"), "command": current.get("command", current.get("comm"))}
+            artifact = {"token": staged["artifactToken"], "sha256": staged["sha256"], "size": staged["size"],
+                        "complete": True, "expiresAt": staged["expiresAt"]}
+            objects = [v2_observation("process", process_fields)]
+        else:
+            raise HelperError("UNSUPPORTED_ENVIRONMENT", "collect only supports file and process executable objects")
+    elif verb == "probe":
+        namespace, identity, _locator = v2_ref_params(params)
+        if namespace != "jvm": raise HelperError("UNSUPPORTED_ENVIRONMENT", "probe only supports jvm")
+        kind = params.get("probeKind")
+        command = "list_components" if kind == "jvm.tomcat.inventory" else "inspect_class"
+        result = run_tomcat_probe({"pid": identity.get("pid"), "command": command, **params.get("parameters", {})})
+        jvm_digest = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
+        if command == "list_components":
+            for item in result.get("items", result.get("components", [])):
+                if isinstance(item, dict):
+                    fields = {"jvmDigest": jvm_digest, "componentKind": str(item.get("kind", "component")),
+                              "name": str(item.get("name", item.get("className", "unknown"))), "className": str(item.get("className", "unknown")),
+                              "mappings": item.get("mappings", [])}
+                    objects.append(v2_observation("java_component", fields, "POINT_IN_TIME"))
+                    edges.append(v2_edge("jvm", identity, "hosts_component", "java_component", fields))
+        else:
+            fields = {"jvmDigest": jvm_digest, "className": str(result.get("className")), "loaderId": str(result.get("loaderId", "unknown")),
+                      "codeSource": result.get("codeSource", ""), "bytecodeSha256": result.get("sha256", "unknown"), "modifiable": bool(result.get("modifiable"))}
+            objects.append(v2_observation("class", fields, "POINT_IN_TIME"))
+            edges.append(v2_edge("jvm", identity, "loads_class", "class", fields))
+            edges.append(v2_edge("class", fields, "loaded_by", "jvm", identity))
+    status_value = "PARTIAL" if gaps else "SUCCESS"
+    response = {"protocolVersion": PROTOCOL_VERSION, "requestId": request_id, "status": status_value,
+                "objects": objects, "edges": edges, "cost": v2_cost(started, len(objects), len(json.dumps(objects).encode()), 1 if verb == "probe" else 0), "gaps": gaps}
+    if cursor is not None: response["cursor"] = cursor
+    if artifact is not None: response["artifact"] = artifact
+    return response
+
+
 def main() -> int:
-    if len(sys.argv) != 2 or sys.argv[1] not in OPERATIONS:
-        emit({"ok": False, "error": {"code": "INVALID_ARGUMENT", "message": "unknown operation"}})
+    if len(sys.argv) != 2 or sys.argv[1] not in V2_VERBS | V2_MAINTENANCE_VERBS:
+        emit({"protocolVersion": PROTOCOL_VERSION, "requestId": "UNKNOWN", "status": "ERROR",
+              "error": {"code": "INVALID_ARGUMENT", "message": "unknown v2 verb"},
+              "cost": {"remoteCalls": 0, "nodes": 0, "bytes": 0, "wallTimeMs": 0, "probeCalls": 0}})
         return 2
     try:
         request = read_request()
         install_deadline(request)
-        result = OPERATIONS[sys.argv[1]](request)
-        emit({"ok": True, "result": result})
+        emit(v2_dispatch(sys.argv[1], request))
         return 0
     except HelperError as exc:
-        emit({"ok": False, "error": {"code": exc.code, "message": str(exc)}})
+        code = v2_wire_error_code(exc.code)
+        emit({"protocolVersion": PROTOCOL_VERSION, "requestId": locals().get("request", {}).get("requestId", "UNKNOWN"),
+              "status": "ERROR", "error": {"code": code, "message": str(exc)},
+              "cost": {"remoteCalls": 1, "nodes": 0, "bytes": 0, "wallTimeMs": 0, "probeCalls": 0}})
         return 1
     except Exception as exc:  # defensive boundary: never emit a Python traceback over SSH
-        emit({"ok": False, "error": {"code": "UNSUPPORTED_ENVIRONMENT", "message": f"{type(exc).__name__}: {exc}"}})
+        emit({"protocolVersion": PROTOCOL_VERSION, "requestId": locals().get("request", {}).get("requestId", "UNKNOWN"),
+              "status": "ERROR", "error": {"code": "INTERNAL_ERROR", "message": f"{type(exc).__name__}: {exc}"},
+              "cost": {"remoteCalls": 1, "nodes": 0, "bytes": 0, "wallTimeMs": 0, "probeCalls": 0}})
         return 1
 
 

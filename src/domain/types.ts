@@ -43,16 +43,9 @@ export const CHECK_CATEGORY_SHORT_LABELS: Record<CheckCategory, string> = {
   linux_persistence: "PERSIST",
   linux_intrusion_triage: "TRIAGE",
 };
-export type FindingStatus =
-  | "CONFIRMED"
-  | "HIGHLY_SUSPICIOUS"
-  | "SUSPICIOUS"
-  | "NO_FINDING"
-  | "NOT_CHECKED"
-  | "ERROR";
 export type Severity = "CRITICAL" | "HIGH" | "MEDIUM" | "LOW" | "INFO";
-export type ToolRisk = "LOCAL" | "READ" | "COLLECT" | "WRITE";
-export type ReplayPolicy = "SAFE" | "NEVER";
+export type ToolRisk = "LOCAL" | "READ" | "INTRUSIVE_READ" | "COLLECT" | "WRITE";
+export type ReplayPolicy = "SAFE" | "SAFE_REOBSERVE" | "LOCAL_REPLAY" | "IDEMPOTENT_LOCAL" | "RESUME_OR_RECOLLECT" | "NEVER";
 
 export interface TargetConfig {
   host: string;
@@ -77,13 +70,15 @@ export interface TaskContext {
   profile?: ScanProfile;
   timeWindowHours?: number;
   iocs?: InvestigationIocs;
-  coverage: Partial<Record<CheckCategory, FindingStatus>>;
   createdAt: string;
   updatedAt: string;
   /** 归档只影响默认列表可见性，不删除任务关联数据。 */
   archivedAt?: string;
   turnCount: number;
   toolCallCount: number;
+  /** 新任务恒为 2；字段缺失表示只读 v1 历史任务。 */
+  protocolVersion?: 2;
+  activeEpochId?: string;
   interruption?: {
     previousStatus: Extract<TaskStatus, "RUNNING" | "WAITING_APPROVAL" | "RECOVERING" | "REPORTING">;
     reason: "PROCESS_INTERRUPTED";
@@ -108,22 +103,6 @@ export interface SecurityToolDefinition<
   replayPolicy: ReplayPolicy;
   timeoutMs: number;
   auditEvent: string;
-}
-
-export interface Finding {
-  findingId: string;
-  taskId: string;
-  host: string;
-  category: CheckCategory;
-  severity: Severity;
-  confidence: number;
-  status: FindingStatus;
-  title: string;
-  summary: string;
-  evidenceRefs: string[];
-  recommendation?: string;
-  createdAt: string;
-  toolCallId: string;
 }
 
 export interface Evidence {
@@ -189,14 +168,6 @@ export interface AgentStreamUpdate {
   phase: "start" | "delta" | "end" | "error";
   timestamp: number;
   delta?: string;
-}
-
-export interface CandidateReference<T = Record<string, unknown>> {
-  ref: string;
-  taskId: string;
-  kind: "candidate" | "process" | "component" | "class" | "account" | "persistence" | "file" | "socket" | "timeline";
-  value: T;
-  createdAt: string;
 }
 
 export interface AuditEvent {

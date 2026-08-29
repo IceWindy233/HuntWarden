@@ -23,9 +23,11 @@ describe("Profile path repair", () => {
     const config = testConfig("/tmp/runtime");
     config.executor.privateKeyPath = "/workspace/SecHostAgent/out/SecHostAgent.app/Contents/Resources/app.asar/labs/.lab-state/id_ed25519";
     config.executor.knownHostsPath = "/workspace/HuntWarden/out/HuntWarden.app/Contents/Resources/app.asar/labs/.lab-state/known_hosts";
+    config.agent.promptVersion = "huntwarden-agent-v1";
     expect(repairProfilePaths(config, { appPath: "/workspace/HuntWarden/app.asar", currentUserData: "/data/HuntWarden", labStateDir: "/workspace/HuntWarden/labs/.lab-state" })).toBe(true);
     expect(config.executor.privateKeyPath).toBe("/workspace/HuntWarden/labs/.lab-state/id_ed25519");
     expect(config.executor.knownHostsPath).toBe("/workspace/HuntWarden/labs/.lab-state/known_hosts");
+    expect(config.agent.promptVersion).toBe("huntwarden-agent-v2");
     expect(isInvalidPackagedLabCredentialPath("/Applications/HuntWarden.app/Contents/Resources/app.asar/labs/.lab-state/id_ed25519")).toBe(true);
   });
 });

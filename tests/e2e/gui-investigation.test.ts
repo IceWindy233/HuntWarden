@@ -86,7 +86,7 @@ describe.skipIf(!enabled)("GUI 四场景只读调查与手动确认报告", () =
     ["java-scan", 2223, "java_memory_shell"],
     ["account-scan", 2224, "backdoor_account"],
     ["persistence-scan", 2225, "linux_persistence"],
-  ] as const)("%s 完成 Finding、Evidence，并在确认后生成 v1 报告", async (scenario, port, category) => {
+  ] as const)("%s 完成 v2 Coverage/Assessment，并在确认后生成报告", async (scenario, port, category) => {
     const { page, snapshot: investigation, streamEvents } = await runInvestigation(scenario, port, category);
     expect(investigation.reports).toHaveLength(0);
     expect(await page.locator(".report-pending-banner").innerText()).toContain("报告待确认");
@@ -140,12 +140,19 @@ describe.skipIf(!enabled)("GUI 四场景只读调查与手动确认报告", () =
     }
     page.once("dialog", async (dialog) => await dialog.accept());
     await page.getByRole("button", { name: "确认并生成报告" }).click();
-    await expect.poll(async () => (await page.evaluate((id) => window.huntwarden.getTaskSnapshot(id), investigation.task.taskId)).reports.length, { timeout: 30_000 }).toBe(1);
+    try {
+      await expect.poll(async () => (await page.evaluate((id) => window.huntwarden.getTaskSnapshot(id), investigation.task.taskId)).reports.length, { timeout: 30_000 }).toBe(1);
+    } catch (error) {
+      const failed = await page.evaluate((id) => window.huntwarden.getTaskSnapshot(id), investigation.task.taskId);
+      console.error("GUI report generation failed", JSON.stringify({ task: failed.task, audit: failed.audit.slice(-12) }, null, 2));
+      throw error;
+    }
     const result = await page.evaluate((id) => window.huntwarden.getTaskSnapshot(id), investigation.task.taskId);
-    expect(result.findings.some((finding) => finding.category === category)).toBe(true);
-    expect(result.findings.some((finding) => finding.category === category
-      && ["CONFIRMED", "HIGHLY_SUSPICIOUS"].includes(finding.status))).toBe(true);
-    expect(result.evidence.length).toBeGreaterThan(0);
+    expect(result.task.protocolVersion).toBe(2);
+    expect(result.protocolV2?.coverage.some((coverage) => coverage.category === category)).toBe(true);
+    expect(result.protocolV2?.assessments.some((assessment) => assessment.category === category && assessment.authorType === "MODEL" && assessment.verdict === "SUSPICIOUS")).toBe(true);
+    expect(result.protocolV2?.assessments.some((assessment) => assessment.category === category && assessment.authorType === "MODEL" && assessment.scope === "OBSERVED_CATEGORY")).toBe(true);
+    if (scenario === "web-scan") expect(result.evidence.length).toBeGreaterThan(0);
     expect(result.approvals).toHaveLength(0);
     expect(result.actionReceipts).toHaveLength(0);
     expect(result.reports).toMatchObject([{ version: 1 }]);

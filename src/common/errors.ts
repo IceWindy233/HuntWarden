@@ -9,7 +9,24 @@ export type SecurityErrorCode =
   | "APPROVAL_REQUIRED"
   | "APPROVAL_MISMATCH"
   | "BUDGET_EXCEEDED"
+  | "INTERNAL_ERROR"
   | "RECOVERY_UNCERTAIN";
+
+/** v2 Wire 协议错误码。与旧 UI 错误类别分开，避免把采集缺口折叠成环境不支持。 */
+export type ProtocolV2ErrorCode =
+  | "INVALID_ARGUMENT"
+  | "PERMISSION_DENIED"
+  | "UNSUPPORTED_CAPABILITY"
+  | "STALE_REF"
+  | "EPOCH_MISMATCH"
+  | "SOURCE_CHANGED"
+  | "BUDGET_EXHAUSTED"
+  | "DEADLINE_EXCEEDED"
+  | "OUTPUT_LIMIT_EXCEEDED"
+  | "EVIDENCE_COLLECTION_FAILED"
+  | "PROBE_FAILED"
+  | "TARGET_UNAVAILABLE"
+  | "INTERNAL_ERROR";
 
 export class SecurityError extends Error {
   constructor(

@@ -1,7 +1,4 @@
 import { isIP } from "node:net";
-import type { RuntimeStore } from "../storage/runtime-store.js";
-import { createReference } from "../tools/reference-utils.js";
-import type { NetworkConnectionReferenceValue } from "./types.js";
 
 function ipv4Bytes(value: string): number[] | undefined {
   if (isIP(value) !== 4) return undefined;
@@ -43,35 +40,4 @@ export function parseNetworkEndpoint(value: unknown): { ip: string; port: number
   const port = Number(value.slice(separator + 1));
   if (isIP(ip) === 0 || !Number.isInteger(port) || port < 0 || port > 65_535) return undefined;
   return { ip, port };
-}
-
-export function attachConnectionReferences(
-  store: RuntimeStore,
-  taskId: string,
-  connections: readonly Record<string, unknown>[],
-  defaultProcessRef?: string,
-): { items: Record<string, unknown>[]; refs: string[] } {
-  const refs: string[] = [];
-  const items = connections.map((connection) => {
-    const remote = parseNetworkEndpoint(connection.remote);
-    const state = typeof connection.state === "string" ? connection.state : "UNKNOWN";
-    if (!remote || remote.port === 0 || state === "LISTEN" || !isPublicThreatIntelIp(remote.ip)) {
-      return { ...connection, threatIntelEligible: false };
-    }
-    const processRef = typeof connection.processRef === "string" ? connection.processRef : defaultProcessRef;
-    const value: NetworkConnectionReferenceValue = {
-      protocol: typeof connection.protocol === "string" ? connection.protocol : "unknown",
-      local: typeof connection.local === "string" ? connection.local : "unknown",
-      remote: String(connection.remote),
-      state,
-      remoteIp: remote.ip,
-      remotePort: remote.port,
-      ...(processRef ? { processRef } : {}),
-      observedAt: new Date().toISOString(),
-    };
-    const reference = createReference(store, taskId, "socket", "socket", value);
-    refs.push(reference.ref);
-    return { ...connection, connectionRef: reference.ref, remoteIp: remote.ip, remotePort: remote.port, threatIntelEligible: true };
-  });
-  return { items, refs };
 }

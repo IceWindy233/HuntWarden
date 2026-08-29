@@ -118,7 +118,7 @@ if [[ ! -f ${rule_source} || -L ${rule_source} ]]; then
     >&2 echo "本脚本默认从仓库 rules/yara/webshell.yar 取规则；若只复制了 host-helper 目录，"
     >&2 echo "请用 --rule-source <webshell.yar> 显式指定。"
   fi
-  >&2 echo "WebShell 规则扫描固定读取 ${DEFAULT_RULE_PATH}，规则缺失会让 yara_scan_files 直接失败，因此拒绝安装。"
+  >&2 echo "WebShell 规则扫描固定读取 ${DEFAULT_RULE_PATH}；规则缺失会让 v2 YARA matcher 不可用，因此拒绝安装。"
   exit 2
 fi
 
@@ -172,7 +172,7 @@ else
   # 显式跳过并说明后果，禁止静默降级。
   >&2 echo "警告: 未找到 Tomcat 探针 JAR（${probe_source}），本次跳过探针下发。"
   >&2 echo "      影响: Java 内存马检测降级——Tomcat Filter/Servlet/Valve 运行时枚举与 Class Dump 不可用，"
-  >&2 echo "            get_capabilities 的 tomcatProbe 会报 UNSUPPORTED。"
+  >&2 echo "            v2 capabilities 的 probes 列表不会包含 JVM Probe。"
   >&2 echo "      补装: 在控制端仓库执行 npm run probe:build 构建探针，然后重新运行本脚本；"
   >&2 echo "            探针位于其它路径时用 --probe-source <jar> 指定。"
   if [[ -f ${DEFAULT_PROBE_PATH} ]]; then
@@ -201,7 +201,7 @@ if command -v restorecon >/dev/null; then
   restorecon -RF "${DEFAULT_STATE_ROOT}" "${DEFAULT_OPT_ROOT}"
 fi
 
-"${DEFAULT_HELPER_PATH}" get_capabilities <<<'{}' >/dev/null
+"${DEFAULT_HELPER_PATH}" capabilities <<<'{"protocolVersion":2,"requestId":"INSTALL-CHECK","epochId":"PRECHECK","deadlineMs":10000,"reservation":{"reservationId":"INSTALL-CHECK","estimate":{"remoteCalls":1,"nodes":1,"bytes":1572864,"wallTimeMs":10000,"probeCalls":0}},"params":{}}' >/dev/null
 
 echo "===== 本次安装/升级组件清单 ====="
 echo "模式          : ${install_mode}"

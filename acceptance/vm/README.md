@@ -1,21 +1,17 @@
 # HuntWarden 真实 VM 只读冒烟
 
-该入口用于授权临时 Linux VM 的只读验收；`v0.1.0` 的发布门槛为 Ubuntu 24.04 ARM64，Rocky Linux 9 x86_64/SELinux 保留为后续非阻塞兼容性验证。它只调用以下固定 READ 操作：
+该入口用于授权临时 Linux VM 的 v2 只读验收；当前发布门槛为 Ubuntu 24.04 ARM64，Rocky Linux 9 x86_64/SELinux 保留为后续非阻塞兼容性验证。它只调用以下固定 v2 只读/证据动词：
 
-最近一次已完成记录：[`Ubuntu 24.04.4 ARM64 GUI 只读验收`](../../docs/acceptance/VM_UBUNTU_24.04_ARM64_2026-08-20.md)，结果为 `PASS_WITH_LIMITATIONS`。该记录同时覆盖完整依赖下的真实 GUI/Provider/SSH 调查，以及最低依赖下缺少 YARA、auditd、JDK Attach 时的显式降级；Ubuntu 发布 Gate 已关闭。
+最近一次已完成记录：[`Ubuntu 24.04.4 ARM64 GUI 只读验收`](../../docs/acceptance/VM_UBUNTU_24.04_ARM64_2026-08-20.md)，结果为 `PASS_WITH_LIMITATIONS`。该记录属于 v1 历史基线；v2 必须重新执行本页冒烟，不能沿用该记录关闭发布 Gate。
 
-- `get_capabilities`
-- `get_host_info`
-- `capture_volatile_snapshot`
-- `discover_web_roots`
-- `list_java_processes`
-- `list_privileged_accounts`
-- `list_cron_entries`
-- `list_systemd_units`
-- `list_ssh_persistence`
-- `list_shell_startup_files`
+- `capabilities`
+- `enumerate`（host/process/file/account/cron_entry/unit/persistence/jvm）
+- `project`
+- `read`
+- `verify`
+- `collect`（仅固定良性夹具；SFTP 校验后立即释放远端 Artifact）
 
-它不会运行写操作，也不能替代 GUI 中五类检测包的 QUICK/STANDARD/DEEP 完整验收。
+它不会运行 `probe` 或任何处置写操作，也不能替代 GUI 中五类检测包的 QUICK/STANDARD/DEEP 完整验收。`collect` 会在 Helper 固定 spool 中短暂创建只读 Artifact，不修改源对象。
 
 ## 前置条件
 
@@ -64,6 +60,14 @@ export HUNTWARDEN_VM_EXPECT_ARCH=aarch64
 npm run test:acceptance:vm
 ```
 
+Multipass VM 还应执行 journald 身份与源代次专项验收。该测试会通过 Multipass 带外通道写入一条固定标签的无害 journal 记录，用于证明追加已有 journal 文件会推进 generation、事件 `sourceId` 可解析到 `log_source`，且 `relate log_source contains` 可到达该事件：
+
+```bash
+export HUNTWARDEN_VM_CONFIRM_JOURNAL_FIXTURE=I_HAVE_AUTHORIZATION
+export HUNTWARDEN_VM_MULTIPASS_NAME=hw-vm
+npm run test:acceptance:vm:journald
+```
+
 Rocky Linux 9 x86_64 使用：
 
 ```bash
@@ -92,3 +96,5 @@ sudo ./install-safe-fixtures.sh --remove
 ```
 
 验收要求：阳性文件形成引用自身 Evidence 的 WebShell Finding；良性文件不得仅因 `system`/`base64` 等单一关键词被判为 HIGH/CRITICAL。真实主机禁止安装该夹具，只能用于可销毁或可恢复快照的授权临时 VM。
+
+正式模型评测另使用 `install-model-eval-fixtures.sh`：它创建一个现有 YARA 不命中的、永久禁用分支内的动态回调链，并启动普通 Java Sleeper 供语料设计验证。脚本只允许 `--install/--status/--remove`，删除前核对 sentinel 与 Java PID 命令行。正式任务完成后必须执行 `--remove` 并确认 `.phtml` 为 `ABSENT`、Sleeper 为 `STOPPED`；冻结清单和阈值见 [`acceptance/model-eval/README.md`](../model-eval/README.md)。

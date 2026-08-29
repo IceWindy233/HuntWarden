@@ -53,8 +53,8 @@ export function repairProfilePaths(config: AppConfig, options: ProfilePathRepair
   if (containsOldBrand(config.storage.baseDir)) {
     replace(config.storage.baseDir, join(options.currentUserData, "runtime"), (value) => { config.storage.baseDir = value; });
   }
-  if (config.agent.promptVersion === "sechost-agent-v1") {
-    config.agent.promptVersion = "huntwarden-agent-v1";
+  if (config.agent.promptVersion === "sechost-agent-v1" || config.agent.promptVersion === "huntwarden-agent-v1") {
+    config.agent.promptVersion = "huntwarden-agent-v2";
     changed = true;
   }
   if (config.executor.helperPath === "/usr/local/libexec/sechost-agent-helper") {

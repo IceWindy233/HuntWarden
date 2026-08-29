@@ -1,8 +1,10 @@
 import type { AppConfig } from "../config/schema.js";
-import type { ActionReceipt, AgentStreamUpdate, ApprovalTicket, AuditEvent, Evidence, Finding, InvestigationIocs, ReportRecord, ScanProfile, TaskContext, TaskMode, CheckCategory } from "../domain/types.js";
+import type { ActionReceipt, AgentStreamUpdate, ApprovalTicket, AuditEvent, Evidence, InvestigationIocs, ReportRecord, ScanProfile, TaskContext, TaskMode, CheckCategory } from "../domain/types.js";
 import type { SshHostKeyDiscovery } from "../executor/ssh-host-key-service.js";
+import type { Assessment, AssessmentVerdict, CoverageRun, GrantRequest, InvestigationGap, ScanEpoch, TaskGrant } from "../protocol-v2/types.js";
+import type { KnownHashDataSetSummary } from "../datasets/known-hash-registry.js";
 
-export const DESKTOP_API_VERSION = 7 as const;
+export const DESKTOP_API_VERSION = 10 as const;
 
 export interface ConfigProfileSummary {
   profileId: string;
@@ -87,9 +89,10 @@ export interface NewTaskInput {
 
 export interface TaskSnapshot {
   task: TaskContext;
-  findings: Finding[];
   evidence: Evidence[];
   approvals: ApprovalTicket[];
+  grantRequests: GrantRequest[];
+  grants: TaskGrant[];
   actionReceipts: ActionReceipt[];
   reports: ReportRecord[];
   audit: AuditEvent[];
@@ -109,13 +112,19 @@ export interface TaskSnapshot {
     finishedAt?: string;
     error?: string;
   }[];
+  protocolV2?: {
+    epoch: ScanEpoch;
+    coverage: CoverageRun[];
+    assessments: Assessment[];
+    investigationGaps: InvestigationGap[];
+    modelState: Array<{ category: CheckCategory; state: "CONCLUDED" | "NOT_CONCLUDED" }>;
+  };
 }
 
 export type DesktopEvent =
   | { type: "task_updated"; task: TaskContext }
   | ({ type: "agent_stream" } & AgentStreamUpdate)
   | { type: "approval_requested"; ticket: ApprovalTicket }
-  | { type: "finding_recorded"; finding: Finding }
   | { type: "evidence_recorded"; evidence: Evidence }
   | { type: "audit_recorded"; event: AuditEvent }
   | { type: "runtime_error"; taskId?: string; message: string };
@@ -142,6 +151,8 @@ export interface HuntWardenDesktopApi {
   deleteConfigProfile(profileId: string): Promise<void>;
   importConfigProfile(): Promise<ConfigProfile | undefined>;
   exportConfigProfile(profileId: string): Promise<string | undefined>;
+  listKnownHashDataSets(): Promise<KnownHashDataSetSummary[]>;
+  importKnownHashDataSet(): Promise<KnownHashDataSetSummary | undefined>;
 
   listModelProviders(): Promise<ModelProviderSummary[]>;
   listModels(provider: string): Promise<ModelSummary[]>;
@@ -168,6 +179,9 @@ export interface HuntWardenDesktopApi {
   recoverTask(taskId: string): Promise<void>;
   steerTask(input: { taskId: string; text: string }): Promise<void>;
   decideApproval(input: { approvalId: string; approved: boolean }): Promise<void>;
+  decideGrantRequest(input: { requestId: string; approved: boolean }): Promise<void>;
+  recordHumanAssessment(input: { taskId: string; targetAssessmentId: string; verdict: AssessmentVerdict; rationale: string }): Promise<Assessment>;
+  revokeTaskGrant(input: { taskId: string; grantId: string; reason: string }): Promise<TaskGrant>;
   generateReport(taskId: string): Promise<ReportRecord>;
   listReports(taskId: string): Promise<ReportRecord[]>;
   readReport(input: { taskId: string; reportId?: string }): Promise<{ report: ReportRecord; markdown: string } | undefined>;

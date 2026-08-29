@@ -1,4 +1,4 @@
-import React, { type ButtonHTMLAttributes, type InputHTMLAttributes, type ReactNode, type SelectHTMLAttributes, type TextareaHTMLAttributes } from "react";
+import type { ButtonHTMLAttributes, InputHTMLAttributes, ReactNode, SelectHTMLAttributes, TextareaHTMLAttributes } from "react";
 
 export function Button({ variant = "secondary", busy, children, ...props }: ButtonHTMLAttributes<HTMLButtonElement> & { variant?: "primary" | "secondary" | "danger" | "ghost"; busy?: boolean }) {
   return <button className={`button button-${variant}`} disabled={busy || props.disabled} {...props}>{busy ? <span className="spinner" /> : null}{children}</button>;

@@ -7,6 +7,7 @@ import { _electron as electron, type ElectronApplication, type Page } from "@pla
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { HuntWardenDesktopApi, NewTaskInput, TaskSnapshot } from "../../src/gui/contracts.js";
 import { SSHExecutor } from "../../src/executor/ssh-executor.js";
+import { DockerV2Remote } from "../docker/v2-remote.js";
 
 const enabled = process.env.HUNTWARDEN_GUI_REMEDIATION_TESTS === "1";
 const projectRoot = resolve(".");
@@ -102,8 +103,9 @@ describe.skipIf(!enabled)("GUI REMEDIATE 真实审批闭环", () => {
 
     const remote = new SSHExecutor(target, "/usr/local/libexec/huntwarden-helper", 30_000);
     try {
-      const file = await remote.invoke({ operation: "inspect_script_file", params: { path: "/var/www/html/lab-webshell.php", maxBytes: 65_536 } });
-      expect(file.path).toBe("/var/www/html/lab-webshell.php");
+      const client = new DockerV2Remote(remote);
+      const files = await client.enumerate("file", ["path"], { scope: { namespace: "file", canonicalRoot: "/var/www/html" }, predicate: { op: "eq", field: "path", value: "/var/www/html/lab-webshell.php" } });
+      expect(files[0]?.fields.path).toBe("/var/www/html/lab-webshell.php");
     } finally { await remote.close(); }
     await page.getByRole("button", { name: "审计" }).click();
     expect(await page.locator(".audit-log").innerText()).toContain("write_tool_denied");
@@ -119,16 +121,13 @@ describe.skipIf(!enabled)("GUI REMEDIATE 真实审批闭环", () => {
     const completed = await waitCompleted(page, taskId);
     expect(completed.approvals).toMatchObject([{ tool: "quarantine_file", status: "CONSUMED" }]);
     expect(completed.actionReceipts).toMatchObject([{ tool: "quarantine_file", status: "SUCCEEDED" }]);
-    expect(completed.findings).toEqual(expect.arrayContaining([
-      expect.objectContaining({ category: "webshell", status: "CONFIRMED" }),
-    ]));
+    expect(completed.protocolV2?.assessments).toEqual(expect.arrayContaining([expect.objectContaining({ category: "webshell", authorType: "MODEL", verdict: "SUSPICIOUS" })]));
 
     const remote = new SSHExecutor(target, "/usr/local/libexec/huntwarden-helper", 30_000);
     try {
-      const files = await remote.invoke({ operation: "find_recent_web_files", params: {
-        roots: ["/var/www/html"], modifiedWithinHours: 168, maxFiles: 500, maxFileSizeBytes: 10 * 1024 * 1024,
-      } });
-      expect(files.some((item) => item.path === "/var/www/html/lab-webshell.php")).toBe(false);
+      const client = new DockerV2Remote(remote);
+      const files = await client.enumerate("file", ["path"], { scope: { namespace: "file", canonicalRoot: "/var/www/html" }, predicate: { op: "eq", field: "path", value: "/var/www/html/lab-webshell.php" } });
+      expect(files).toHaveLength(0);
     } finally { await remote.close(); }
     await page.getByRole("button", { name: "审计" }).click();
     expect(await page.locator(".receipt-section").innerText()).toContain("quarantine_file");
@@ -144,15 +143,13 @@ describe.skipIf(!enabled)("GUI REMEDIATE 真实审批闭环", () => {
     const completed = await waitCompleted(page, taskId);
     expect(completed.approvals).toMatchObject([{ tool: "disable_account", status: "CONSUMED" }]);
     expect(completed.actionReceipts).toMatchObject([{ tool: "disable_account", status: "SUCCEEDED" }]);
-    expect(completed.findings).toEqual(expect.arrayContaining([
-      expect.objectContaining({ category: "backdoor_account", status: "CONFIRMED" }),
-    ]));
+    expect(completed.protocolV2?.assessments).toEqual(expect.arrayContaining([expect.objectContaining({ category: "backdoor_account", authorType: "MODEL", verdict: "SUSPICIOUS" })]));
 
     const remote = new SSHExecutor(target, "/usr/local/libexec/huntwarden-helper", 30_000);
     try {
-      const account = await remote.invoke({ operation: "inspect_account", params: { username: "labroot" } });
-      expect(account.passwordLocked).toBe(true);
-      expect(String(account.accountExpireDays)).not.toBe("-1");
+      const client = new DockerV2Remote(remote);
+      const accounts = await client.enumerate("account", ["uid", "username", "locked"]);
+      expect(accounts.find((item) => item.fields.username === "labroot")?.fields.locked).toBe(true);
     } finally { await remote.close(); }
     await page.getByRole("button", { name: "审计" }).click();
     expect(await page.locator(".receipt-section").innerText()).toContain("disable_account");
