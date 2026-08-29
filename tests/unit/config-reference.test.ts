@@ -19,6 +19,8 @@ describe("配置与目标约束", () => {
     expect(Value.Check(ConfigSchema, config)).toBe(true);
     expect(config.model).toMatchObject({ source: "builtin", provider: "openai", model: "gpt-5.6-terra", thinkingLevel: "medium" });
     expect(config.remediation.requireApproval).toBe(true);
+    expect(config.remediation.allowedTools).toEqual(["quarantine_file"]);
+    expect(config.remediation.allowedTools).not.toContain("disable_account");
     expect(config.java.allowRuntimeModification).toBe(false);
     expect(config.storage.baseDir).toBe(resolve("data"));
   });
@@ -28,6 +30,7 @@ describe("配置与目标约束", () => {
     expect(config.model).toMatchObject({
       source: "builtin", provider: "deepseek", model: "deepseek-v4-flash", thinkingLevel: "high",
     });
+    expect(config.remediation.allowedTools).toEqual(["quarantine_file"]);
     const { model } = createModelBundle(config);
     expect(model).toMatchObject({ api: "openai-completions", baseUrl: "https://api.deepseek.com", reasoning: true });
   });

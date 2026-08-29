@@ -81,5 +81,6 @@ threatIntel:
 
 remediation:
   requireApproval: true
-  allowedTools: [quarantine_file, disable_account]
+  # disable_account 尚未覆盖活动会话和 SSH Key/CA 信任面，保持显式禁用。
+  allowedTools: [quarantine_file]
   quarantineRoot: /var/lib/huntwarden/quarantine
