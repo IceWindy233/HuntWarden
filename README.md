@@ -3,7 +3,7 @@
 [![CI](https://github.com/IceWindy233/HuntWarden/actions/workflows/ci.yml/badge.svg)](https://github.com/IceWindy233/HuntWarden/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-HuntWarden（猎卫）是面向安全分析师的 AI 主机安全调查与受控处置 Agent。它通过 SSH 调用目标主机上的白名单辅助程序，完成 WebShell、Tomcat 内存马、Linux 后门账户、Linux 持久化和通用 Linux 入侵分诊；文件隔离与账户禁用必须逐动作审批。
+HuntWarden（猎卫）是面向安全分析师的 AI 主机安全调查与受控处置 Agent。它通过 SSH 调用目标主机上的白名单辅助程序，完成 WebShell、Tomcat 内存马、Linux 后门账户、Linux 持久化和通用 Linux 入侵分诊；默认开放的文件隔离必须逐动作审批，尚未闭环的账户禁用保持关闭。
 
 ## 为什么值得看
 
@@ -80,7 +80,7 @@ sequenceDiagram
 | --- | --- |
 | WebShell / Web 攻击链 | Nginx/Apache 技术栈与 Web Root、近期脚本/模板/WAR 候选、受控文本读取、literal/RE2 匹配与文件基线校验 |
 | Java 内存马 | Tomcat Filter/Servlet/Listener/Valve/WebSocket、Spring MVC 映射与 Interceptor、ClassLoader/CodeSource/ProtectionDomain、只读 Class Dump（不清除、不重定义、不重启 JVM） |
-| 后门账户 | UID 0、sudo/wheel、NSS 来源、账户状态、SSH Key 指纹、登录历史、sudo/doas/polkit、有效 sshd 信任配置 |
+| 后门账户 | UID 0、sudo/wheel、NSS 来源、账户状态、SSH Key 指纹与登录历史；sudoers/doas/polkit 委派配置及有效 sshd 信任配置尚未迁移到 v2 |
 | Linux 持久化 | Cron、systemd service/timer/drop-in/generated/transient、at/anacron、SysV/rc.local、XDG、PAM、udev、modprobe、cloud-init、包管理 Hook |
 | Linux 入侵分诊 | 稳定进程身份、进程树/FD/maps/socket、删除后运行、近期与特权文件、dpkg/rpm 完整性、动态加载、按主机时区解析的认证与执行时间线 |
 | 外部情报 | 安恒威胁情报受控富化；只接受当前任务已建立的 socket/file/task IOC/Evidence 引用，私网地址本地过滤，命中不能单独形成 `CONFIRMED_MALICIOUS` |
@@ -97,7 +97,7 @@ npm run lint
 npm run typecheck
 ```
 
-带上 Docker 跑真实 SSH + Helper 链路（五套隔离 Lab，含真实文件隔离与账户禁用）：
+带上 Docker 跑真实 SSH + Helper 链路（五套隔离 Lab；处置回归会在测试配置中显式启用文件隔离与账户锁定）：
 
 ```bash
 npm run probe:build
@@ -109,7 +109,7 @@ npm run test:docker
 
 ## 范围与非范围
 
-**在范围内**：单台 Linux 主机、SSH 接入、单活动任务、上述五类检测、WebShell 文件隔离与账户禁用两个写操作。
+**在范围内**：单台 Linux 主机、SSH 接入、单活动任务、上述五类检测，以及默认开放的 WebShell 文件隔离。账户锁定实现仅保留用于隔离 Lab 回归，在完整信任面处置闭环完成前不属于默认支持能力。
 
 **刻意不做**：Windows、Kubernetes、批量 Hunt、多 Agent 编排、持续实时 EDR、企业 SSO/RBAC/多租户、SIEM 集成、自动网络隔离、内核 Rootkit 自动清除。长期方向记录在 [`docs/TODO_PLAN_REAL_WORLD.md`](docs/TODO_PLAN_REAL_WORLD.md)，它是路线图而非承诺。
 
@@ -122,7 +122,7 @@ npm run test:docker
 - **Java 检测只在 Tomcat 9 / JDK 17 上验证过。**
 - **事实可达不等于未采集数据可见。** `query_facts` 能到达当前任务已采集的 Model Fact，但每个原语仍受 scope、Capability、cursor 和持久化 Budget 约束；上限、权限或依赖造成的缺口会显式写入 Coverage。
 - **YARA 与哈希基线都只开放版本化引用。** Helper 在 YARA 依赖和内置规则文件均可用时声明 `yara`，模型只能选择静态注册的 `RuleSetRef`，不能提交源码或路径；RE2 同样只在依赖实际存在时声明。`known_hash_set` 由分析师在控制端导入，名称与版本不可变；模型只见 `DATASET-*` 引用，集合内容不发送目标机。`package_db` 基线校验也已可用。
-- **处置不可逆。** 没有 `restore_quarantined_file` / `restore_account_state`；`disable_account` 只锁定账户，不终止活动会话、不处理 `authorized_keys`，因此密钥型后门账户仍可登录。
+- **处置不可逆。** 没有 `restore_quarantined_file` / `restore_account_state`；`disable_account` 只锁定密码认证，不终止活动会话、不处理 `authorized_keys`/SSH CA，因此默认配置不开放该动作。文件隔离也应只在可恢复目标上使用。
 - **接入方式只有 SSH 私钥文件直连。** 不支持 SSH Agent、加密私钥与 ProxyJump。
 - **Helper 需要管理员预先安装**，不支持自动上传临时 Helper。
 - macOS arm64 未签名、未公证，无自动更新。

@@ -1,16 +1,16 @@
 # HuntWarden 实战可用版 TODO Plan
 
-> 文档用途：冻结 HuntWarden 从 Docker Lab MVP 演进为真实主机专项检测与受控查杀 Agent 的功能路线，作为后续开发、上下文恢复和验收的唯一长期 TODO 基线。
+> 文档用途：记录 HuntWarden 从 Docker Lab MVP 演进为真实主机专项检测与受控查杀 Agent 的长期功能路线；它不是 Tool Protocol v2 的完成定义或当前门禁记录。
 >
-> 最近更新：2026-08-20
+> 最近更新：2026-08-29
 >
-> **分工声明（2026-08-25）**：本文只负责**检测能力、语料质量与平台覆盖**的长期路线。协议形态、工具面、事实存储、结论模型与运行时架构一律以 [`docs/TOOL_PROTOCOL_V2_DESIGN.md`](TOOL_PROTOCOL_V2_DESIGN.md) 为准。两者冲突时以 v2 设计为准，本文不再作为架构承诺来源。
+> **权威性声明**：本文只负责**检测能力、语料质量与平台覆盖**的长期路线。协议与完成定义以 [`TOOL_PROTOCOL_V2_DESIGN.md`](TOOL_PROTOCOL_V2_DESIGN.md) 为准，当前门禁以 [`V2_INVARIANT_VERIFICATION.md`](V2_INVARIANT_VERIFICATION.md) 为准，平台声明以 [`SUPPORT_MATRIX.md`](SUPPORT_MATRIX.md) 为准。旧的 Finding、HostOperation、52 操作和历史测试数量仅作为演进背景，不得解释为当前 v2 状态。
 
 ## 0. 当前状态
 
 已具备：
 
-- Sprint 1～3 的检测能力、确定性执行图、Finding/Evidence/审计/报告闭环。
+- Sprint 1～3 的检测能力，以及 v2 Fact/Coverage/Assessment/Evidence/审计/报告闭环。
 - 安全边界：固定 Helper 操作集、不透明引用、三层写门控、一次性审批票据；模型拿不到 Shell 或任意路径。（v1 是 52 个按检测问题枚举的操作；v2 收敛为 8 个类型化取证动词，边界性质不变，见 v2 设计 §11。）
 - 数据正确性：主机时区感知的时间线、journald 与轮转日志采集、输出字节预算、Helper 墙钟 deadline 与遍历边界。
 - 工程门禁：Lint、core/renderer 双 typecheck、写操作与崩溃恢复不变量进必跑 CI、Helper 协议版本与 envelope 结构校验。
@@ -21,20 +21,20 @@
 - 已完成首个真实 Provider 的冻结 novel malicious + benign 发布评测；但语料仍为安全自造夹具，真实 WebShell、内存马、发行版输出快照与良性站点语料不足，因此当前召回率与精确率仍不能代表真实站点。
 - v2 已有五类冻结能力等价语料、Helper 集成测试和 Docker Lab；仍需扩大 namespace collector 的跨发行版 golden fixture，特别是日志、NSS/SSSD、复杂 Web 配置与多版本 JVM。
 - Ubuntu 24.04 ARM64 已完成真实 GUI/Provider/SSH VM 只读验收（`PASS_WITH_LIMITATIONS`）；其余发行版、架构与受限能力组合未验收。
-- 处置不可逆，且 `disable_account` 不处理密钥信任面。
+- 处置不可逆；`disable_account` 不处理密钥信任面，已从 `0.2.0` 默认白名单移除。
 
 工作队列按优先级冻结为：
 
-1. **真实语料与误报基线**：真实 WebShell/内存马语料、真实 CMS 良性对照，产出可复算的召回率/精确率报告。
-2. **扩展 golden fixture 与 Helper 测试**：在现有五类 v2 等价语料、集成测试和 Docker Lab 上继续固化跨发行版 collector 输出，见 v2 设计 §15.1 的 MERGE 层。
-3. **真实 Linux 兼容性门禁**：Ubuntu 22.04/24.04、Debian 12、Rocky/AlmaLinux 9、Amazon Linux 2023 的只读验收与降级记录。
-4. **处置补强**：`disable_account` 的会话终止与密钥信任面处置、动作后定向复扫。
-5. **Sprint 5 可逆处置**：`restore_quarantined_file` / `restore_account_state` 优先于其余处置动作。
+1. **补齐 v2 首批最低覆盖**：Web effective root、委派配置、有效 SSH trust，以及分诊 file scope/package verify。
+2. **处置 fail-close 与可逆性**：完整账户信任面、动作后定向复扫、`restore_quarantined_file` / `restore_account_state`。
+3. **扩展 golden fixture 与 Helper 测试**：固化八个原语、维护动词和跨发行版 collector 输出。
+4. **真实语料与误报基线**：真实 WebShell/内存马语料、真实 CMS 良性对照，产出可复算的召回率/精确率报告。
+5. **真实 Linux 兼容性门禁**：Ubuntu 22.04/24.04、Debian 12、Rocky/AlmaLinux 9、Amazon Linux 2023 的只读验收与降级记录。
 6. **真实连接补强**：SSH Agent、加密私钥、ProxyJump，以及连接/操作/空闲/任务超时拆分。
-7. **Sprint 4A LocalExecutor**：先建立统一 Transport 语义，再复用现有 HostOperation 和 Helper。
+7. **Sprint 4A LocalExecutor**：先建立统一 Transport 语义，再复用 v2 Helper。
 8. **Sprint 4B Collector/Offline Import**：一次性只读采集、完整性清单和安全离线导入。
 9. **Sprint 4C Container**：Docker/containerd 宿主机与容器关联调查。
-10. **Sprint 5 处置扩展**：持久化禁用与恢复、进程暂停/终止。
+10. **处置扩展**：持久化禁用与恢复、进程暂停/终止。
 
 ## 1. 目标定义
 
@@ -61,10 +61,10 @@
 
 - [x] WebShell：Web Root → 近期脚本 → YARA/特征 → 日志关联 → Evidence → 受控隔离。
 - [x] Tomcat 内存马：Java 进程 → Tomcat 识别 → Filter/Servlet/Listener → Class 来源 → Class Dump。
-- [x] 后门账户：特权账户 → 账户详情 → SSH Key 指纹 → 登录历史 → 受控禁用。
+- [x] 后门账户只读调查：特权账户 → 账户详情 → SSH Key 指纹 → 登录历史。
 - [x] Linux 持久化：Cron/systemd/SSH Key/Shell → 进程 → 网络连接 → Evidence。
 - [x] 单任务 Agent Tool Loop、Steering、逐动作审批、回执恢复和崩溃恢复。
-- [x] Finding、Evidence、审计日志、版本化 Markdown 报告。
+- [x] Fact、Coverage、RULE/MODEL/HUMAN Assessment、Evidence、审计日志和版本化 Markdown 报告。
 - [x] GUI/TUI 流式输出、任务归档、报告手动确认生成。
 - [x] Agent 消息与报告的安全 GFM Markdown 渲染，原始工具 JSON 保持等宽文本展示。
 - [x] 安恒威胁情报受控富化：公网 IP/域名/文件哈希、缓存、Evidence、审计和 GUI 情报视图。
@@ -119,14 +119,14 @@
 - [x] 大日志改为流式窗口读取，禁止整文件 `read_text().splitlines()`。
 - [x] YARA 改为批量扫描候选集合，禁止为每个文件重复启动一个进程。
 
-### 3.4 检测范围冻结与 Finding 聚合
+### 3.4 检测范围冻结与 Assessment 聚合
 
 - [x] 只注册当前任务所选择类别对应的工具包。
 - [x] `record_finding` 拒绝记录任务未选择的检测类别。
 - [x] 每个检测包拥有独立的最低必执行图。
 - [x] 覆盖状态由确定性执行图维护，不由模型自由声明。
-- [x] 同类别多条 Finding 按固定严重度、置信度和完整度规则聚合。
-- [x] 后续 `NO_FINDING` 不能覆盖已经存在的高风险 Finding。
+- [x] 同类别多条 Assessment 按固定严重度、置信度和完整度规则投影。
+- [x] 后续 `NO_OBSERVED_FINDING` 不能覆盖已经存在的高风险 RULE Assessment。
 - [ ] 保存扫描范围、跳过数量、截止原因和主机时间偏差。
 
 ## 4. 核心架构演进
@@ -175,7 +175,7 @@ interface TargetTransport {
 目标身份确认
   → 能力预检
   → 检测包最低必执行图
-  → 确定性规则产生候选与基础 Finding
+  → 确定性规则产生候选与 RULE Assessment
   → Agent 基于异常事实继续深挖
   → 覆盖校验
   → 用户复核并生成报告
@@ -185,7 +185,7 @@ interface TargetTransport {
 - [x] 新增不依赖 LLM 的 Scan Planner。
 - [x] Agent 只能扩展调查，不能跳过最低执行图。
 - [x] Provider 不可用时仍能完成最低调查并展示结构化结果。
-- [ ] 高风险 Finding 必须可以由结构化事实和规则重新计算。
+- [x] 高风险 RULE Assessment 可以由当前 PresetRun 的结构化 Fact 和版本化规则重新计算。
 - [ ] 模型输出不能直接提升确定性规则的风险等级，必须补充 Evidence。
 
 ### 4.3 外部威胁情报富化
@@ -320,10 +320,10 @@ interface TargetTransport {
 
 ### 7.3 后门账户与认证
 
-- [x] 解析 `/etc/sudoers`、`sudoers.d`、doas 和 polkit。**（v1 能力；v2 未迁移，相关 collector 已随 v1 残留清理删除，见 `docs/SUPPORT_MATRIX.md`）**
+- [ ] 在 v2 通用 Namespace/Fact 中采集 `/etc/sudoers`、`sudoers.d`、doas 和 polkit 委派配置；v1 collector 已删除。
 - [x] 使用 NSS `id/getent` 结果并标识 local/nss_directory 来源；真实 SSSD/LDAP 嵌套组待 VM 验收。
-- [x] 解析 sshd `Include`、`Match` 和有效 `AuthorizedKeysFile`。
-- [x] 检查 `AuthorizedKeysCommand`、SSH CA 和 authorized principals。
+- [ ] 在 v2 中解析 sshd `Include`、`Match` 和有效 `AuthorizedKeysFile`。
+- [ ] 在 v2 中检查 `AuthorizedKeysCommand`、SSH CA 和 authorized principals。
 - [ ] 关联 journal/auditd、失败登录、sudo/su 和云登录记录。
 - [x] 将 `checkAuthorizedKeys`、`checkLoginHistory` 配置真正接入执行图。
 
@@ -356,7 +356,7 @@ interface TargetTransport {
 - [ ] GUI 支持导入离线采集包。
 - [ ] 导入限制文件数、总大小、路径、压缩比和 Schema，防止 Zip Slip/Zip Bomb。
 - [ ] 任意文件或 Manifest 被修改时拒绝导入。
-- [ ] 重复导入相同 acquisition ID 不重复产生 Evidence/Finding。
+- [ ] 重复导入相同 acquisition ID 不重复产生 Evidence/Assessment。
 - [ ] 离线任务永久禁用处置，并明确“实时状态未知”。
 
 ### 8.3 Docker/containerd
@@ -474,10 +474,10 @@ Docker Lab 继续用于快速回归，但不能作为唯一实战验收。
 
 > 本节是持续性发布门禁，不因某一次测试通过而永久关闭。最近一次完整执行结果记录在 11.4；新增功能后必须重新执行。
 
-- [ ] 每个类别明确输出 `CONFIRMED | HIGHLY_SUSPICIOUS | SUSPICIOUS | NO_FINDING | NOT_CHECKED | ERROR`。
-- [ ] 采集失败、无权限和依赖缺失绝不能输出 `NO_FINDING`。
-- [ ] 高置信 Finding 至少具有两个独立信号，或一个可验证的确定性信号。
-- [ ] Finding 记录规则版本、采集器版本、证据引用、置信度依据和反证信息。
+- [x] Assessment verdict 使用 `CONFIRMED_MALICIOUS | HIGHLY_SUSPICIOUS | SUSPICIOUS | BENIGN | NO_OBSERVED_FINDING | INCONCLUSIVE`，Coverage 独立使用 `COMPLETE | PARTIAL | ERROR | NOT_RUN`。
+- [x] 采集失败、无权限和依赖缺失通过 Coverage/Gap 表达，绝不能输出安全结论。
+- [ ] 高置信 Assessment 至少具有两个独立信号，或一个可验证的确定性信号。
+- [x] Assessment 记录规则版本、Fact/Evidence/Query 引用、置信度依据和反证关系。
 - [ ] 命名攻击场景 100% 产生预期证据链。
 - [ ] 扩展变体召回率初始目标不低于 90%。
 - [ ] 良性语料 HIGH/CRITICAL 精确率初始目标不低于 95%，稳定后提高至 98%。
@@ -490,23 +490,23 @@ Docker Lab 继续用于快速回归，但不能作为唯一实战验收。
 
 ### 11.4 最近一次完整验收记录
 
-2026-08-17 的完整本地门禁为当前权威记录。执行范围：
+2026-08-29 在 `0.2.0` 实现基线 `7318233e1327111de12895867e09bbee965df5e2` 上完成：
 
 ```text
 npm run build                        PASS
-npm test                             PASS（25 文件通过 / 7 跳过；88 项通过 / 34 跳过）
+npm test                             PASS（29 文件通过 / 10 跳过；123 项通过 / 37 跳过）
 npm run probe:build                  PASS
-npm run test:docker                  PASS（10/10）
-npm run test:acceptance:real-world   PASS（Debian 12 ARM64 动态场景 6/6）
-npm run test:gui:investigation       PASS（4/4）
-npm run test:gui:remediation         PASS（3/3）
-npm run test:gui:recovery            PASS（6/6）
-npm run package:gui                  PASS
-npm run release:local                PASS（macOS arm64 ZIP/DMG + 打包 .app 启动冒烟）
+npm run test:docker                  PASS（11/11）
+npm run test:acceptance:real-world   PASS（Debian 12 ARM64 动态场景 5/5）
+npm run test:gui:all                 PASS（16/16，含调查、处置、恢复和 Grant）
+npm run test:acceptance:re2          PASS（macOS/Linux ARM64）
+npm run test:acceptance:vm           PASS（Ubuntu 24.04 ARM64，4/4）
+npm run test:acceptance:vm:journald  PASS（1/1）
+npm run eval:model                   PASS（冻结任务七项阈值）
 npm run audit:prod                   PASS（运行时依赖漏洞 0）
 ```
 
-该结果证明当前代码、五套 Docker Lab、三条 GUI 主流程和 macOS 未签名应用包形成一致闭环；它不替代第 11.1 节的真实 VM 兼容性验收，也不代表签名、公证或跨平台安装包已经完成。
+该结果证明当前代码、五套 Docker Lab、四条 GUI 主流程、RE2 与 Ubuntu ARM64 VM 形成一致闭环；本轮没有重新生成安装包，仍不代表签名、公证或跨平台安装包已经完成。
 
 ### 11.5 验收与回归体系缺口
 
@@ -522,30 +522,33 @@ npm run audit:prod                   PASS（运行时依赖漏洞 0）
 
 - [ ] 为 `src/desktop/electron-safe-storage-cipher.ts` 增加真实后端测试；当前单测使用 `TestCipher`，真实凭据加密路径零覆盖。
 
-**TS 与 Python 之间缺可回归的输出契约**：`tests/fixtures/` 为空目录；Helper 无 Python 单测，仅被 `tests/integration/host-helper.test.ts` 的 8 例覆盖 6 个操作。
+**TS 与 Python 之间仍缺完整的 golden 输出契约**：当前已有 v1→v2 等价 fixture 与 Helper 集成测试，但八个取证原语、维护动词及各 Namespace 尚未形成逐版本完整 golden 集；Helper 仍无独立 Python 单测。
 
-- [ ] 为全部 52 个操作固化 golden fixture，使 Helper 输出字段漂移在 CI 即可检出。
+- [ ] 为八个 v2 取证原语、维护动词和各 Namespace 固化 golden fixture，使 Helper 输出字段漂移在 CI 即可检出。
 - [ ] 增加 Helper Python 侧单测，优先覆盖日志解析、时区与年份推断、输出预算截断、deadline 到期、路径与过宽根校验、两个写动作。
 
 **覆盖率与代码质量门禁不完整**：69 个 `src` 模块中 29 个未被任何测试直接导入，含 `src/tui/App.tsx`、`src/renderer/components/SettingsView.tsx`、`src/agent/model-health.ts` 与 host/webshell/account/persistence/java 五个工具包。
 
 - [ ] 引入覆盖率采集与基线阈值，优先补齐五个检测工具包的行为断言。
-- [ ] 清零 Lint 的 19 条既有 warning（15 条 React 19 下多余的 `import React`、2 条未用参数、2 条 optional-chain 建议），随后把 `npm run lint` 改为 error-on-warnings。
+- [x] 清零 Lint warning；`npm run lint` 当前为零告警门禁。
 
 ## 12. 推荐实际开工顺序
 
 按以下顺序推进，不要同时铺开 Windows、Kubernetes 和云平台。
 
-1. **真实语料与误报基线**
+1. **v2 首批最低覆盖**
+   - Web Preset 纳入 effective root；增加委派配置和有效 SSH trust 的通用事实；分诊 Preset 纳入 file scope 与 package verify。
+2. **处置 fail-close、恢复与定向复扫**
+   - `disable_account` 只有在活动会话、密码、Key、AuthorizedKeysCommand、CA/principals 都可验证时才能报告成功。
+   - `restore_quarantined_file` / `restore_account_state` 优先于新增处置动作。
+3. **golden fixture 与 Helper Python 单测**
+   - 固化八个 v2 取证原语、维护动词和各 Namespace 的输出契约，以及时区、输出预算、deadline、遍历边界的行为。
+4. **真实语料与误报基线**
    - 真实 WebShell/内存马语料、真实 CMS 良性对照，产出可复算的召回率/精确率报告。
    - 在此之前无法回答“检测结论可不可信”，也无法度量 11.3 的两项数值目标。
-2. **golden fixture 与 Helper Python 单测**
-   - 固化 52 个操作的输出契约，以及时区、输出预算、deadline、遍历边界的行为。
-3. **真实 Linux VM 只读验收**
+5. **真实 Linux VM 只读验收**
    - 完成五发行版、两架构和典型权限/依赖缺失组合。
    - 将每次结果回填 `SUPPORT_MATRIX.md`，不通过的路径形成明确兼容性 TODO。
-4. **处置补强**：`disable_account` 的会话终止与密钥信任面处置、动作后定向复扫。
-5. **Sprint 5 可逆处置**：`restore_quarantined_file` / `restore_account_state` 优先于其余处置动作。
 6. **Sprint 4A：LocalExecutor 与统一 Transport 基础**。
 7. **Sprint 4B：一次性 Collector 与离线导入**。
 8. **Sprint 4C：Docker/containerd 调查**。
@@ -558,7 +561,7 @@ npm run audit:prod                   PASS（运行时依赖漏洞 0）
 后续新会话或上下文压缩后，优先读取本文件，并遵循：
 
 1. 不把“生产级”重新解释为企业平台治理，本阶段只关注实战检测、目标接入、兼容性和查杀闭环。
-2. 未勾选项是唯一的待办来源。当前首项是真实语料与误报基线，不是新功能。
+2. 未勾选项必须结合本文件顶部的权威性声明和工作队列排序；当前首项是补齐 v2 首批最低覆盖。
 3. 第 2 节的“已实现基线”指 Docker Lab 与本机门禁下成立；与 9.0、11.5 的未勾选项冲突时以后者为准。
 4. “host + port 自动解析指纹”是发现功能，绝不自动信任未知 Host Key。
 5. 在继续增加检测关键词前，先消除“工具成功但实际没有完整检查”的情况。Helper 输出超预算时会截断为 `partial`，报告必须如实呈现而不能当作已查完。

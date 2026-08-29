@@ -4,8 +4,13 @@
 
 ## [Unreleased]
 
+暂无。
+
+## [0.2.0] - 2026-08-29
+
 ### Changed
 
+- 默认 REMEDIATE 白名单只开放 `quarantine_file`；`disable_account` 在补齐活动会话、SSH Key/CA 信任面与恢复验证前保持显式禁用，避免把仅锁定密码认证误报为“账户已禁用”。
 - 生产调查链路切换到 Tool Protocol v2：新任务只创建 v2 Epoch，模型远程能力收敛为八个类型化取证原语，结果原子写入 Fact Store 后再通过本地 `query_facts` 暴露。
 - 五类检测迁移为版本化 Preset、CoverageRun 与不可覆盖的 RULE/MODEL/HUMAN Assessment；GUI、TUI、报告、审批、处置与崩溃恢复统一读取 v2 投影。
 - Helper 只接受 v2 静态动词白名单；控制端 v1 operation map、旧问题型工具、ScanPlanner 和旧规则运行时已删除，v1 历史任务仅可只读查看。
@@ -103,6 +108,7 @@
 - 重启前未消费授权全部过期；远端写动作恢复时优先核对 Action Receipt，禁止盲目重放。
 - `PARTIAL`、`ERROR` 与 `NOT_CHECKED` 不会被报告为安全，Prompt Injection 不得扩展工具范围。
 
-[Unreleased]: https://github.com/IceWindy233/HuntWarden/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/IceWindy233/HuntWarden/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/IceWindy233/HuntWarden/releases/tag/v0.2.0
 [0.1.1]: https://github.com/IceWindy233/HuntWarden/releases/tag/v0.1.1
 [0.1.0]: https://github.com/IceWindy233/HuntWarden/releases/tag/v0.1.0

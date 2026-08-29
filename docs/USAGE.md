@@ -54,6 +54,10 @@ HUNTWARDEN_CONFIG=./config/local.yaml npm run dev
 
 `schemaVersion: 1` 配置会经显式结构迁移为 v2 预算分组；旧检测工具的细分上限键仅保留为配置迁移输入，不是 v2 协议预算。生产运行时不保留 v1 Helper 协议分支。
 
+### 处置白名单
+
+`0.2.0` 的默认 `remediation.allowedTools` 只有 `quarantine_file`。`disable_account` 当前只能锁定密码认证和设置账户过期，无法保证活动会话、`authorized_keys`、`AuthorizedKeysCommand` 或 SSH CA/principals 同时失效，因此不属于默认支持能力。只有隔离 Lab 的回归配置可以显式启用它；真实目标在恢复动作、密钥信任面处置和定向复扫闭环完成前不得启用。
+
 ### 已知哈希数据集
 
 桌面 GUI 的“配置中心 → 已知哈希数据集”可导入版本化 JSON：
@@ -242,7 +246,7 @@ npm run lab:up
 npm run test:docker
 ```
 
-`npm run test:docker` 会先自动重置 Lab，再执行包含真实文件隔离和账户禁用的测试；若只想针对已经运行且状态已知的容器执行测试，可使用 `npm run test:docker:running`。
+`npm run test:docker` 会先自动重置 Lab，再执行包含真实文件隔离和账户锁定的测试；账户动作只由测试配置显式启用，不代表生产默认白名单开放。若只想针对已经运行且状态已知的容器执行测试，可使用 `npm run test:docker:running`。
 
 处置闭环的 Electron GUI 自动化会为每个用例重置 Lab，使用仅在测试环境启用的 Pi Faux 脚本模型，并真实点击拒绝、二次确认和审计回执界面：
 
@@ -275,7 +279,7 @@ npm run lab:reset
 npm run lab:down
 ```
 
-Lab 只允许在隔离开发环境使用。账户禁用与隔离测试会真实改变对应容器状态。
+Lab 只允许在隔离开发环境使用。账户锁定与隔离测试会真实改变对应容器状态。
 
 ## 安全与恢复语义
 
@@ -284,7 +288,7 @@ Lab 只允许在隔离开发环境使用。账户禁用与隔离测试会真实�
 - `SCAN` 模式在工具执行前硬阻断全部写操作。
 - `REMEDIATE` 模式仍要求绑定 `taskId + targetFingerprint + tool + argsDigest + actionId` 的一次性票据。
 - 文件隔离要求已有 Evidence，且远端当前哈希与审批时一致；仅同文件系统原子移动并设置 `000`。
-- 账户禁用永久拒绝 `root` 和当前 SSH 执行用户，保存前态并验证锁定/过期结果。
+- 账户锁定永久拒绝 `root` 和当前 SSH 执行用户，保存前态并验证密码锁定/过期结果；它不验证 SSH Key/CA 信任面，因此只属于隔离 Lab 回归。
 - SAFE 工具按原 `toolCallId` 幂等恢复；NEVER 工具先查远端 `actionId` 回执。状态未知时必须重新审批，绝不自动重放。
 - 启动时遗留活动任务会转为 `ABORTED + recoveryRequired`；GUI 仅在分析师点击后恢复。报告以 `v1/v2/...` 不可变保存，旧版单文件报告懒迁移为 LEGACY。
 - 已结束任务可归档并恢复到当前列表；归档只改变列表可见性，Coverage、Assessment、Evidence、报告和审计记录不会被删除，活动或待恢复任务禁止归档。

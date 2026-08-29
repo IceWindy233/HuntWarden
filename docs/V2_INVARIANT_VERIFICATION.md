@@ -2,11 +2,13 @@
 
 本表是 `TOOL_PROTOCOL_V2_DESIGN.md` 第 15 节的唯一验证归属清单。`PR` 为无外部环境的必跑门禁；`MERGE` 需要 Helper/Docker/GUI 环境；`RELEASE` 需要真实 VM 或平台矩阵。环境门禁未执行时只能标记“待验收”，不能据此宣称已验证。
 
-## 当前门禁状态（2026-08-27）
+实现基线：HuntWarden `0.2.0` / `7318233e1327111de12895867e09bbee965df5e2`。文档收口提交只修改说明，不改变该实现基线。
+
+## 当前门禁状态（2026-08-29）
 
 | 层级 | 状态 | 本轮结果 |
 | --- | --- | --- |
-| PR | PASS | `npm test`：29 个文件通过、10 个环境项跳过，123 项通过、37 项跳过（含 read 与 match `includeContext` 共用的内容出境门控、Helper 命中上下文的字节偏移/脱敏/上限、日志分页在 generation 漂移时的显式 best-effort 续页、GUI `INCOMPLETE` / `MODEL: NOT_CONCLUDED` 断言）；核心/Renderer 类型检查、生产构建、零告警 lint 与 `git diff --check` 通过。 |
+| PR | PASS | `npm test`：29 个文件通过、10 个环境项跳过，123 项通过、37 项跳过；核心/Renderer 类型检查、生产构建、零告警 lint、生产依赖审计、Java Probe、Helper Python 编译与 `git diff --check` 通过。P0 另有默认处置白名单回归，证明分发配置不再暴露 `disable_account`。 |
 | MERGE | PASS | 五套 Docker Lab 共 11/11 通过（包含 YARA 与 literal 的 `includeContext` 命中上下文、事件 `sourceId` 可在 `log_source` 解析、`contains` 覆盖 auth/log 事件、跨时间窗口的事件身份稳定性、Java Probe、日志脱敏、known hash 与五类 v1→v2 冻结能力等价）；GUI E2E 16/16：investigation 4/4、remediation 3/3、recovery 6/6、**grant 生命周期 3/3**；Debian 12 动态场景 5/5。 |
 | RELEASE / RE2 | PASS | macOS ARM64 与 Ubuntu 22.04 ARM64 均验证实际匹配及不支持反向引用时的 `INVALID_ARGUMENT`；见 `acceptance/RE2_MATRIX_2026-08-25.md`。 |
 | RELEASE / 真实 VM v2 | PASS_WITH_LIMITATIONS | Ubuntu 24.04.4 ARM64 的 v2 smoke 4/4、journald 专项 1/1、五类 QUICK、联合 STANDARD 与小上下文 DEEP 均完成；真实 VM 还验证了跨主机时钟漂移的 collect/SFTP/SHA-256，以及 journald generation、event/source join、稳定事件身份和跨页 `contains`。原始大上下文高推理 Profile 的长流式响应兼容性仍有限，现由单轮 600 秒超时 fail-close。详见 `acceptance/VM_UBUNTU_24.04_ARM64_V2_2026-08-26.md`。 |

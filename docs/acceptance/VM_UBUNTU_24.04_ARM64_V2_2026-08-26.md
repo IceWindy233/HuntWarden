@@ -4,9 +4,10 @@
 
 - 结果：`PASS_WITH_LIMITATIONS`（本目标 Release Gate 已闭环；Provider 高推理大上下文兼容性与跨平台矩阵仍有限）
 - 执行时间：2026-08-26（Asia/Shanghai）
-- 补充复验：2026-08-27（当前 Helper；真实 journald 身份、generation 与跨页 `contains`）
+- 补充复验：2026-08-27（真实 journald 身份、generation 与跨页 `contains`）；2026-08-29（可复现 Git 基线、smoke 4/4、journald 1/1 与 Helper 摘要一致性）
 - 执行方式：HuntWarden Electron GUI、真实 DeepSeek/SiliconFlow Provider、Multipass VM
-- 验收基线 commit：`283a8d0b3387d4d7d06af57d843cef7637bb096e`（工作树包含本轮 v2 重构与验收修复）
+- 可复现实现基线 commit：`7318233e1327111de12895867e09bbee965df5e2`（HuntWarden `0.2.0`；包含 v2 重构、默认处置 fail-close 与全部验收代码）
+- 历史说明：2026-08-26 原始 GUI/Provider 验收运行在 `283a8d0` 加未提交 v2 工作树上；2026-08-29 已将相同实现固化到上述基线，并用当前目标端 Helper SHA-256 `bbd4463cb0a60fc7026d2cefaa3942c55b47266669bca1ff6d2780b9ac443753` 复验。
 - 协议：Tool Protocol v2 / Manifest `2.0.0`
 - 主要正式报告：STANDARD `RPT-d12f2c8c-451b-4451-8427-7dfe94c2f708`，SHA-256 `b1e577ee441882d55b8e8130b2b4bb778871b4dda7cee0fb45e404c6dbead832`
 
