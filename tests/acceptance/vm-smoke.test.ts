@@ -48,9 +48,9 @@ describe.skipIf(!enabled)("授权真实 VM v2 只读兼容性冒烟", () => {
   afterAll(async () => await remote?.close());
 
   it("绑定 Manifest v2、架构和受支持 namespace", async () => {
-    expect(capabilities).toMatchObject({ protocolVersion: 2, manifestVersion: "2.0.0", helper: { name: "huntwarden-helper-v2", version: expect.any(String) } });
+    expect(capabilities).toMatchObject({ protocolVersion: 2, manifestVersion: "2.1.0", helper: { name: "huntwarden-helper-v2", version: expect.any(String) } });
     expect(capabilities.verbs).toEqual(expect.arrayContaining(["enumerate", "project", "read", "match", "relate", "verify", "collect", "probe"]));
-    expect(Object.keys(capabilities.namespaces)).toEqual(expect.arrayContaining(["host", "process", "socket", "file", "account", "web_root", "jvm", "cron_entry", "unit", "persistence"]));
+    expect(Object.keys(capabilities.namespaces)).toEqual(expect.arrayContaining(["host", "process", "socket", "file", "account", "delegation_rule", "ssh_trust_config", "web_root", "jvm", "cron_entry", "unit", "persistence", "package"]));
     const host = await invoke("enumerate", { namespace: "host", fields: ["bootId", "hostname", "os", "release", "architecture"], limit: 1 });
     expect(host.objects[0]?.fields).toMatchObject({ hostname: expect.any(String), architecture: expectedArchitecture });
   }, 120_000);
@@ -98,11 +98,27 @@ describe.skipIf(!enabled)("授权真实 VM v2 只读兼容性冒烟", () => {
     for (const [namespace, fields] of [
       ["process", ["pid", "comm", "exe"]], ["socket", ["protocol", "localAddress", "localPort", "state"]],
       ["account", ["uid", "username", "groups", "locked"]], ["web_root", ["path", "server", "effective"]],
+      ["delegation_rule", ["mechanism", "sourceDigest", "line", "ruleDigest", "source", "effect", "subject", "runAs", "statement"]],
+      ["ssh_trust_config", ["scope", "directive", "valueDigest", "value", "source", "effective"]],
       ["jvm", ["pid", "command", "attachSupported"]], ["cron_entry", ["source", "schedule", "command"]],
-      ["unit", ["name", "enabled", "execStart"]], ["persistence", ["kind", "source", "command"]],
+      ["unit", ["name", "enabled", "execStart"]], ["persistence", ["kind", "source", "command"]], ["package", ["manager", "name", "version", "architecture"]],
     ] as const) {
       const result = await invoke("enumerate", { namespace, fields, limit: 500 });
       expect(result.objects).toBeInstanceOf(Array); expect(result.gaps).toBeInstanceOf(Array);
     }
+    const roots = await invoke("enumerate", { namespace: "web_root", fields: ["path", "server", "effective"], limit: 500 });
+    expect(roots.objects.some((object) => object.fields.effective === true)).toBe(true);
+    const delegation = await invoke("enumerate", { namespace: "delegation_rule", fields: ["mechanism", "sourceDigest", "line", "ruleDigest", "source", "statement"], limit: 500 });
+    expect(delegation.objects.some((object) => object.fields.mechanism === "sudo")).toBe(true);
+    const trust = await invoke("enumerate", { namespace: "ssh_trust_config", fields: ["scope", "directive", "valueDigest", "value", "effective"], limit: 200 });
+    expect(trust.objects.some((object) => object.fields.directive === "authorizedkeysfile" && object.fields.effective === true)).toBe(true);
+    const packages = await invoke("enumerate", { namespace: "package", fields: ["manager", "name", "version", "architecture"], limit: 500 });
+    const coreutils = packages.objects.find((object) => object.fields.name === "coreutils");
+    if (!coreutils) throw new Error("未发现 coreutils 软件包对象");
+    const owned = await invoke("relate", { namespace: "package", identity: coreutils.identity, locator: {}, relation: "owns_file", limit: 20 });
+    const packagedFile = owned.objects.find((object) => object.namespace === "file");
+    if (!packagedFile || typeof packagedFile.fields.path !== "string") throw new Error("coreutils 未返回可验证文件对象");
+    const verified = await invoke("verify", { namespace: "file", identity: packagedFile.identity, locator: { path: packagedFile.fields.path }, baseline: "package_db" });
+    expect(verified.objects[0]?.fields).toMatchObject({ baseline: "package_db", baselineStatus: expect.stringMatching(/^(MATCH|MISMATCH|UNKNOWN)$/) });
   }, 240_000);
 });

@@ -46,7 +46,7 @@ describe("TaskWorkspace Agent 流式预览", () => {
       protocolV2: {
         epoch: {
           epochId: "EPOCH-INV14", taskId: task.taskId, targetFingerprint: task.target.hostFingerprint,
-          protocolVersion: 2, manifestVersion: "2.0.0", helperVersion: "2.0.0",
+          protocolVersion: 2, manifestVersion: "2.1.0", helperVersion: "2.1.0",
           reason: "INITIAL", status: "PARTIAL", startedAt: createdAt,
         },
         coverage: [{

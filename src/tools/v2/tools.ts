@@ -8,16 +8,17 @@ import type { ForensicVerb } from "../../executor/protocol-v2-executor.js";
 import { categoryGrantAllowsNamespace } from "../../protocol-v2/capability.js";
 import { PROTOCOL_MANIFEST, assertManifestField, identityFields, requireNamespace } from "../../protocol-v2/manifest.js";
 import { validatePredicate } from "../../protocol-v2/predicate.js";
-import type {
-  Assessment,
-  AssessmentVerdict,
-  FactSource,
-  NamespaceName,
-  Predicate,
-  WireCost,
-  WireFailure,
-  WireRequest,
-  WireSuccess,
+import {
+  MANIFEST_VERSION,
+  type Assessment,
+  type AssessmentVerdict,
+  type FactSource,
+  type NamespaceName,
+  type Predicate,
+  type WireCost,
+  type WireFailure,
+  type WireRequest,
+  type WireSuccess,
 } from "../../protocol-v2/types.js";
 import { assertCostWithinReservation } from "../../protocol-v2/wire.js";
 import { defaultFactQuerySelect, FACT_QUERY_SELECT_FIELDS, validateFactQuery, type FactQueryAst, type FactQueryPage } from "../../facts/query.js";
@@ -414,7 +415,7 @@ function remoteTool<T extends TSchema>(deps: V2ToolDependencies, verb: ForensicV
         const placeholder: RemoteResultDetails = { status: response.status === "PARTIAL" ? "partial" : "success", runId: toolCallId, factRefs: [], objectRefs: [], edgeRefs: [], evidenceRefs, gaps: response.gaps, ...(cursorRef ? { cursorRef } : {}), cost: response.cost };
         const batch = deps.store.commitFactBatch({
           taskId: deps.task.taskId, epochId: deps.epoch.epochId, sourceRunId: toolCallId, source,
-          targetFingerprint: deps.task.target.hostFingerprint, requestId: request.requestId, collector: { name: verb, version: "2.0.0" },
+          targetFingerprint: deps.task.target.hostFingerprint, requestId: request.requestId, collector: { name: verb, version: MANIFEST_VERSION },
           observations: response.objects, edges: response.edges, gaps: response.gaps, wireDigest: rawWireDigest,
           toolRun: { toolCallId, status: "SUCCEEDED", resultFactory: (prepared) => {
             const finalDetails: RemoteResultDetails = { ...placeholder, factRefs: prepared.facts.map((fact) => fact.factId), objectRefs: [...new Set(prepared.facts.map((fact) => fact.subjectRef))], edgeRefs: prepared.edges.map((edge) => edge.edgeId) };

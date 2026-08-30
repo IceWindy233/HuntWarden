@@ -23,7 +23,7 @@ afterEach(async () => {
 });
 
 const helper: HelperCapabilitiesV2 = {
-  protocolVersion: 2, manifestVersion: "2.0.0", helper: { name: "helper", version: "2.0.0" },
+  protocolVersion: 2, manifestVersion: "2.1.0", helper: { name: "helper", version: "2.1.0" },
   namespaces: { account: { fields: ["uid", "username", "gid", "home", "shell", "locked"], relations: [], verbs: ["enumerate"] } },
   matchers: [], probes: [], verbs: ["enumerate"],
   limits: { maxObjects: 100, maxOutputBytes: 1_572_864, maxReadBytes: 65_536, maxCollectBytes: 104_857_600 },
@@ -39,7 +39,7 @@ async function fixture(remoteStatus: "SUCCEEDED" | "STARTED" | "UNKNOWN") {
   task.checks = ["backdoor_account"];
   task.activeEpochId = "EPOCH-00000000-0000-4000-8000-000000000031";
   store.createTask(task);
-  const epoch: ScanEpoch = { epochId: task.activeEpochId, taskId: task.taskId, targetFingerprint: task.target.hostFingerprint, protocolVersion: 2, manifestVersion: "2.0.0", helperVersion: "2.0.0", reason: "RECOVERY_REOBSERVE", status: "RUNNING", startedAt: new Date().toISOString() };
+  const epoch: ScanEpoch = { epochId: task.activeEpochId, taskId: task.taskId, targetFingerprint: task.target.hostFingerprint, protocolVersion: 2, manifestVersion: "2.1.0", helperVersion: "2.1.0", reason: "RECOVERY_REOBSERVE", status: "RUNNING", startedAt: new Date().toISOString() };
   store.createScanEpoch(epoch);
   const grant: TaskGrant = { grantId: "GRANT-RECOVERY", taskId: task.taskId, targetFingerprint: task.target.hostFingerprint, kind: "CATEGORY", status: "ACTIVE", binding: { category: "backdoor_account" }, createdAt: new Date().toISOString() };
   store.putTaskGrant(grant);

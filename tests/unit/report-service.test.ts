@@ -20,7 +20,7 @@ async function fixture() {
   task.checks = ["webshell"];
   task.activeEpochId = "EPOCH-00000000-0000-4000-8000-000000000041";
   store.createTask(task);
-  const epoch: ScanEpoch = { epochId: task.activeEpochId, taskId: task.taskId, targetFingerprint: task.target.hostFingerprint, protocolVersion: 2, manifestVersion: "2.0.0", helperVersion: "2.0.0", reason: "INITIAL", status: "PARTIAL", startedAt: new Date().toISOString(), finishedAt: new Date().toISOString() };
+  const epoch: ScanEpoch = { epochId: task.activeEpochId, taskId: task.taskId, targetFingerprint: task.target.hostFingerprint, protocolVersion: 2, manifestVersion: "2.1.0", helperVersion: "2.1.0", reason: "INITIAL", status: "PARTIAL", startedAt: new Date().toISOString(), finishedAt: new Date().toISOString() };
   store.createScanEpoch(epoch);
   store.putCoverageRun({ coverageId: "COV-00000000-0000-4000-8000-000000000041", taskId: task.taskId, epochId: epoch.epochId, category: "webshell", presetId: "webshell-baseline", presetVersion: "2.0.0", status: "PARTIAL", applicability: "APPLICABLE", completedCriteria: ["web-root"], missingCriteria: [{ criterion: "web-log", reasonCode: "CAPABILITY_UNAVAILABLE" }], createdAt: new Date().toISOString() });
   store.putAssessment({ assessmentId: "ASM-00000000-0000-4000-8000-000000000041", taskId: task.taskId, epochId: epoch.epochId, authorType: "RULE", category: "webshell", scope: "OBSERVED_CATEGORY", verdict: "INCONCLUSIVE", severity: "INFO", confidence: 0.5, rationale: "日志覆盖不完整", evidenceRefs: [], factRefs: [], queryRefs: [], createdAt: new Date().toISOString() });

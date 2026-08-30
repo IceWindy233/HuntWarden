@@ -28,7 +28,7 @@ async function v2Store() {
   const task = testTask(); task.protocolVersion = 2; store.createTask(task);
   const epoch: ScanEpoch = {
     epochId: "EPOCH-00000000-0000-4000-8000-000000000001", taskId: task.taskId,
-    targetFingerprint: task.target.hostFingerprint, protocolVersion: 2, manifestVersion: "2.0.0", helperVersion: "2.0.0",
+    targetFingerprint: task.target.hostFingerprint, protocolVersion: 2, manifestVersion: "2.1.0", helperVersion: "2.1.0",
     reason: "INITIAL", status: "RUNNING", startedAt: new Date().toISOString(),
   };
   store.createScanEpoch(epoch);
@@ -47,9 +47,9 @@ describe("Tool Protocol v2 invariants", () => {
     const steps = Object.fromEntries(PRESET_REGISTRY.map((preset) => [preset.category, new Set(preset.steps.map((step) => step.stepId))]));
     expect([...steps.webshell!]).toEqual(expect.arrayContaining(["web-stack", "web-root", "web-candidate-file", "web-log-sources"]));
     expect([...steps.java_memory_shell!]).toEqual(expect.arrayContaining(["jvm-discovery", "tomcat-inventory", "jvm-class-inspect"]));
-    expect([...steps.backdoor_account!]).toEqual(expect.arrayContaining(["account-db", "authorized-keys", "account-auth-events"]));
+    expect([...steps.backdoor_account!]).toEqual(expect.arrayContaining(["account-db", "authorized-keys", "delegation-rules", "effective-ssh-trust", "account-auth-events"]));
     expect([...steps.linux_persistence!]).toEqual(expect.arrayContaining(["cron-source", "unit-source", "ssh-persistence", "shell-loader-persistence"]));
-    expect([...steps.linux_intrusion_triage!]).toEqual(expect.arrayContaining(["process-snapshot", "socket-snapshot", "auth-events", "exec-events", "kernel-modules", "package-baseline"]));
+    expect([...steps.linux_intrusion_triage!]).toEqual(expect.arrayContaining(["process-snapshot", "socket-snapshot", "triage-file-scopes", "auth-events", "exec-events", "kernel-modules", "package-baseline", "package-owned-files", "package-file-verify"]));
     for (const preset of PRESET_REGISTRY) expect(DETERMINISTIC_RULES_V2.some((rule) => rule.category === preset.category && /^HW2-/.test(rule.ruleId) && /^2\./.test(rule.version))).toBe(true);
   });
 
@@ -64,7 +64,7 @@ describe("Tool Protocol v2 invariants", () => {
     task.checks = ["linux_intrusion_triage"];
     store.saveTask(task);
     const helper: HelperCapabilitiesV2 = {
-      protocolVersion: 2, manifestVersion: "2.0.0", helper: { name: "helper", version: "2.0.0" },
+      protocolVersion: 2, manifestVersion: "2.1.0", helper: { name: "helper", version: "2.1.0" },
       namespaces: { process: { fields: ["bootId", "pid", "startTicks", "exeInode", "exeSha256"], relations: ["children"], verbs: ["enumerate", "project", "relate"] } },
       matchers: ["literal"], probes: [], verbs: ["enumerate", "project", "read", "match", "relate", "verify", "collect", "probe"],
       limits: { maxObjects: 500, maxOutputBytes: 1_572_864, maxReadBytes: 65_536, maxCollectBytes: 104_857_600 },
@@ -99,7 +99,7 @@ describe("Tool Protocol v2 invariants", () => {
     const { store, task, epoch } = await v2Store();
     task.checks = ["webshell"]; store.saveTask(task);
     const helper: HelperCapabilitiesV2 = {
-      protocolVersion: 2, manifestVersion: "2.0.0", helper: { name: "helper", version: "2.0.0" },
+      protocolVersion: 2, manifestVersion: "2.1.0", helper: { name: "helper", version: "2.1.0" },
       namespaces: {
         file: { fields: ["mountId", "device", "inode", "path", "kind", "size", "contentClass", "content"], relations: [], verbs: ["enumerate", "read", "match"] },
         process: { fields: ["bootId", "pid", "startTicks", "exeInode", "exeSha256"], relations: [], verbs: ["enumerate"] },
@@ -177,7 +177,7 @@ describe("Tool Protocol v2 invariants", () => {
 
   it("Manifest 是静态安全上限，Helper 的未知能力只记录异常且 task_ioc 不进入远程能力", () => {
     const capabilities: HelperCapabilitiesV2 = {
-      protocolVersion: 2, manifestVersion: "2.0.0", helper: { name: "helper", version: "2.0.0" },
+      protocolVersion: 2, manifestVersion: "2.1.0", helper: { name: "helper", version: "2.1.0" },
       namespaces: { process: { fields: ["pid", "doesNotExist"], relations: ["children", "invented"] }, task_ioc: { fields: ["kind"], relations: [] } },
       matchers: ["literal"], probes: [], verbs: ["enumerate"],
       limits: { maxObjects: 99999, maxOutputBytes: 99999999, maxReadBytes: 99999999, maxCollectBytes: 999999999 },
@@ -290,7 +290,7 @@ describe("Tool Protocol v2 invariants", () => {
     }
     const grant: TaskGrant = { grantId: "GRANT-QUERY-SIZE", taskId: task.taskId, targetFingerprint: task.target.hostFingerprint, kind: "CATEGORY", status: "ACTIVE", binding: { category: "backdoor_account" }, createdAt: new Date().toISOString() };
     store.putTaskGrant(grant);
-    const helper: HelperCapabilitiesV2 = { protocolVersion: 2, manifestVersion: "2.0.0", helper: { name: "helper", version: "2.0.0" }, namespaces: { account: { fields: ["uid", "username", "home"], relations: [], verbs: ["enumerate"] } }, matchers: [], probes: [], verbs: ["enumerate"], limits: { maxObjects: 10, maxOutputBytes: 4096, maxReadBytes: 1024, maxCollectBytes: 1024 } };
+    const helper: HelperCapabilitiesV2 = { protocolVersion: 2, manifestVersion: "2.1.0", helper: { name: "helper", version: "2.1.0" }, namespaces: { account: { fields: ["uid", "username", "home"], relations: [], verbs: ["enumerate"] } }, matchers: [], probes: [], verbs: ["enumerate"], limits: { maxObjects: 10, maxOutputBytes: 4096, maxReadBytes: 1024, maxCollectBytes: 1024 } };
     const config = testConfig("/tmp/query-size");
     config.llmData.maxTextBytes = 1024;
     const tools = createV2SecurityTools({ task, epoch, config, store, executor: new FakeProtocolV2Executor(helper, async () => { throw new Error("本测试不应远程调用 helper"); }), evidence: new EvidenceStore("/tmp/query-size", store), capabilities: gateCapabilities(helper, [grant]), approvals: new ApprovalService(store), budgetOwner: "MODEL" });
@@ -394,7 +394,7 @@ describe("Tool Protocol v2 invariants", () => {
       batchFileInfo: async () => { throw new Error("不应调用文件情报"); },
     };
     const config = testConfig(directory); config.threatIntel.enabled = true;
-    const helper: HelperCapabilitiesV2 = { protocolVersion: 2, manifestVersion: "2.0.0", helper: { name: "helper", version: "2.0.0" }, namespaces: { process: { fields: ["pid"], relations: [], verbs: ["enumerate"] } }, matchers: [], probes: [], verbs: ["enumerate"], limits: { maxObjects: 1, maxOutputBytes: 1024, maxReadBytes: 1024, maxCollectBytes: 1024 } };
+    const helper: HelperCapabilitiesV2 = { protocolVersion: 2, manifestVersion: "2.1.0", helper: { name: "helper", version: "2.1.0" }, namespaces: { process: { fields: ["pid"], relations: [], verbs: ["enumerate"] } }, matchers: [], probes: [], verbs: ["enumerate"], limits: { maxObjects: 1, maxOutputBytes: 1024, maxReadBytes: 1024, maxCollectBytes: 1024 } };
     const grants = store.listTaskGrants(task.taskId);
     const tools = createV2SecurityTools({ task, epoch, config, store, executor: new FakeProtocolV2Executor(helper, async () => { throw new Error("不应远程调用 helper"); }), evidence: new EvidenceStore(directory, store), capabilities: gateCapabilities(helper, grants), approvals: new ApprovalService(store), threatIntel, budgetOwner: "MODEL" });
     const tool = tools.find((candidate) => candidate.name === "enrich_threat_intel");

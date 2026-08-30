@@ -43,9 +43,9 @@ ARTIFACT_TOKEN = re.compile(r"^[a-f0-9]{64}$")
 ARTIFACT_MAX_BYTES = 100 * 1024 * 1024
 ARTIFACT_TTL_SECONDS = 15 * 60
 LOG_SCAN_MAX_BYTES = 64 * 1024 * 1024
-HELPER_VERSION = "2.0.0"
+HELPER_VERSION = "2.1.0"
 PROTOCOL_VERSION = 2
-MANIFEST_VERSION = "2.0.0"
+MANIFEST_VERSION = "2.1.0"
 PROBE_JAR = pathlib.Path("/opt/huntwarden/huntwarden-tomcat-probe.jar")
 USERNAME = re.compile(r"^[a-z_][a-z0-9_-]{0,31}$", re.I)
 CLASS_NAME = re.compile(r"^[A-Za-z_$][A-Za-z0-9_$.]{0,511}$")
@@ -2150,6 +2150,8 @@ V2_NAMESPACE_FIELDS: dict[str, tuple[str, ...]] = {
     "file": ("mountId", "device", "inode", "path", "canonicalPath", "kind", "size", "mode", "uid", "gid", "mtime", "sha256", "contentClass", "content", "baseline", "baselineStatus"),
     "account": ("uid", "username", "gid", "home", "shell", "groups", "locked", "passwordHash"),
     "ssh_key": ("fingerprint", "ownerUid", "type", "bits", "comment", "sourceFile"),
+    "delegation_rule": ("mechanism", "sourceDigest", "line", "ruleDigest", "source", "effect", "subject", "runAs", "statement"),
+    "ssh_trust_config": ("scope", "directive", "valueDigest", "value", "source", "effective"),
     "cron_entry": ("source", "line", "digest", "schedule", "user", "command"),
     "unit": ("name", "fragmentDigest", "path", "enabled", "active", "execStart", "user"),
     "persistence": ("kind", "sourceDigest", "source", "user", "command", "enabled"),
@@ -2182,6 +2184,8 @@ V2_IDENTITY_FIELDS: dict[str, tuple[str, ...]] = {
     "socket": ("protocol", "localAddress", "localPort", "remoteAddress", "remotePort", "inode"),
     "file": ("mountId", "device", "inode"), "account": ("uid", "username"),
     "ssh_key": ("fingerprint", "ownerUid"), "cron_entry": ("source", "line", "digest"),
+    "delegation_rule": ("mechanism", "sourceDigest", "line", "ruleDigest"),
+    "ssh_trust_config": ("scope", "directive", "valueDigest"),
     "unit": ("name", "fragmentDigest"), "persistence": ("kind", "sourceDigest"),
     "module": ("name", "address"), "log_source": ("sourceId", "generation"),
     "log_event": ("sourceId", "cursor"), "auth_event": ("sourceId", "cursor"),
@@ -2192,7 +2196,7 @@ V2_IDENTITY_FIELDS: dict[str, tuple[str, ...]] = {
     "package": ("manager", "name", "version", "architecture"),
 }
 V2_ENUMERABLE_NAMESPACES = {
-    "host", "process", "socket", "file", "account", "ssh_key", "cron_entry", "unit", "persistence",
+    "host", "process", "socket", "file", "account", "ssh_key", "delegation_rule", "ssh_trust_config", "cron_entry", "unit", "persistence",
     "module", "log_source", "log_event", "auth_event", "exec_event", "web_stack", "web_root", "jvm", "package",
 }
 # Fields the Manifest allows but this collector does not produce. They must be advertised as
@@ -2272,6 +2276,14 @@ def v2_source_generation(namespace: str, params: dict[str, Any]) -> str:
             raise HelperError("INVALID_ARGUMENT", "file cursor has no bound source")
         info = pathlib.Path(path_value).stat()
         values.extend([str(info.st_dev), str(info.st_ino), info.st_mtime_ns, info.st_size])
+    elif namespace in {"delegation_rule", "ssh_trust_config"}:
+        paths = v2_delegation_config_paths() if namespace == "delegation_rule" else v2_ssh_config_paths()
+        for path in paths:
+            try:
+                info = path.lstat()
+                values.extend([str(path), str(info.st_dev), str(info.st_ino), info.st_mtime_ns, info.st_size])
+            except OSError:
+                continue
     elif namespace in {"log_source", "log_event", "auth_event", "exec_event"}:
         patterns = (*SYSTEM_LOG_PATTERNS, *AUTH_LOG_PATTERNS, *AUDIT_LOG_PATTERNS, *WEB_ACCESS_LOG_PATTERNS)
         for raw in sorted({name for pattern in patterns for name in glob.glob(pattern)}):
@@ -2800,6 +2812,160 @@ def v2_log_source_rows(maximum: int) -> tuple[list[dict[str, Any]], list[str], b
     return rows, warnings[:200], bool(warnings)
 
 
+def v2_regular_files(fixed: tuple[str, ...], directories: tuple[tuple[str, tuple[str, ...]], ...]) -> list[pathlib.Path]:
+    candidates = [pathlib.Path(value) for value in fixed]
+    for raw_directory, suffixes in directories:
+        directory = pathlib.Path(raw_directory)
+        try:
+            for child in directory.iterdir():
+                if child.name.startswith(".") or child.name.endswith(("~", ".bak", ".disabled")):
+                    continue
+                try:
+                    child_info = child.lstat()
+                except OSError:
+                    candidates.append(child)
+                    continue
+                if stat.S_ISDIR(child_info.st_mode) and not child.is_symlink():
+                    try:
+                        candidates.extend(grandchild for grandchild in child.iterdir()
+                                          if not grandchild.name.startswith(".")
+                                          and not grandchild.name.endswith(("~", ".bak", ".disabled"))
+                                          and (not suffixes or grandchild.suffix in suffixes))
+                    except OSError:
+                        continue
+                    continue
+                if suffixes and child.suffix not in suffixes:
+                    continue
+                candidates.append(child)
+        except FileNotFoundError:
+            continue
+        except OSError:
+            # The collector will surface unreadable configured facilities below when a
+            # concrete file is opened. Optional directories that do not exist are not gaps.
+            continue
+    values: list[pathlib.Path] = []
+    for path in sorted(set(candidates), key=str):
+        try:
+            info = path.lstat()
+            if stat.S_ISREG(info.st_mode) and not path.is_symlink():
+                values.append(path)
+        except FileNotFoundError:
+            continue
+        except OSError:
+            values.append(path)
+    return values
+
+
+def v2_delegation_config_paths() -> list[pathlib.Path]:
+    return v2_regular_files(
+        ("/etc/sudoers", "/etc/doas.conf"),
+        (("/etc/sudoers.d", ()),
+         ("/etc/polkit-1/rules.d", (".rules",)),
+         ("/usr/share/polkit-1/rules.d", (".rules",)),
+         ("/etc/polkit-1/localauthority", (".pkla",)),
+         ("/var/lib/polkit-1/localauthority", (".pkla",))),
+    )
+
+
+def v2_ssh_config_paths() -> list[pathlib.Path]:
+    return v2_regular_files(("/etc/ssh/sshd_config",), (("/etc/ssh/sshd_config.d", (".conf",)),))
+
+
+def v2_bounded_config_lines(path: pathlib.Path) -> tuple[list[tuple[int, str]], str | None]:
+    try:
+        descriptor, canonical = v2_open_regular(str(path))
+    except HelperError as exc:
+        return [], f"配置不可读: {path}: {exc}"
+    try:
+        info = os.fstat(descriptor)
+        if info.st_size > 512 * 1024:
+            return [], f"配置超过 512 KiB 上限: {canonical}"
+        duplicate = os.dup(descriptor)
+        with os.fdopen(duplicate, "r", encoding="utf-8", errors="replace", closefd=True) as handle:
+            return [(number, line.rstrip("\r\n")) for number, line in enumerate(handle, 1)], None
+    except OSError as exc:
+        return [], f"配置读取失败: {path}: {exc}"
+    finally:
+        os.close(descriptor)
+
+
+def v2_delegation_rows(maximum: int) -> tuple[list[dict[str, Any]], list[str], bool]:
+    rows: list[dict[str, Any]] = []
+    warnings: list[str] = []
+    for path in v2_delegation_config_paths():
+        lines, warning = v2_bounded_config_lines(path)
+        if warning is not None:
+            warnings.append(warning)
+            continue
+        source = str(path)
+        mechanism = "sudo" if source == "/etc/sudoers" or source.startswith("/etc/sudoers.d/") else "doas" if source == "/etc/doas.conf" else "polkit"
+        source_digest = hashlib.sha256(source.encode()).hexdigest()
+        for number, raw in lines:
+            statement = raw.strip()
+            if not statement or statement.startswith("#"):
+                continue
+            if len(statement.encode("utf-8")) > 8192:
+                warnings.append(f"委派规则行超过 8 KiB，已跳过: {source}:{number}")
+                continue
+            effect, subject, run_as = "policy", "policy", "unspecified"
+            tokens = statement.split()
+            if mechanism == "sudo":
+                if tokens and not tokens[0].lower().startswith(("defaults", "user_alias", "runas_alias", "host_alias", "cmnd_alias", "@include", "#include")):
+                    subject = tokens[0]
+                match = re.search(r"\(([^)]{1,256})\)", statement)
+                if match is not None:
+                    run_as = match.group(1).strip()
+            elif mechanism == "doas":
+                if tokens and tokens[0].lower() in {"permit", "deny"}:
+                    effect = tokens[0].lower()
+                    for token in tokens[1:]:
+                        if token.lower() not in {"nopass", "nolog", "persist", "keepenv"} and not token.startswith(("setenv", "{")):
+                            subject = token
+                            break
+                    if "as" in tokens:
+                        index = tokens.index("as")
+                        if index + 1 < len(tokens):
+                            run_as = tokens[index + 1]
+            else:
+                subject, run_as = "dynamic", "dynamic"
+            rows.append({"mechanism": mechanism, "sourceDigest": source_digest, "line": number,
+                         "ruleDigest": hashlib.sha256(statement.encode()).hexdigest(), "source": source,
+                         "effect": effect, "subject": subject, "runAs": run_as, "statement": statement})
+            if len(rows) >= maximum:
+                return rows, warnings + ["委派规则达到结果上限"], True
+    return rows, warnings[:200], bool(warnings)
+
+
+V2_SSH_TRUST_DIRECTIVES = frozenset({
+    "authorizedkeysfile", "authorizedkeyscommand", "authorizedkeyscommanduser", "trustedusercakeys",
+    "authorizedprincipalsfile", "permitrootlogin", "pubkeyauthentication", "passwordauthentication",
+    "kbdinteractiveauthentication", "authenticationmethods", "allowusers", "allowgroups", "denyusers", "denygroups",
+})
+
+
+def v2_ssh_trust_rows(maximum: int) -> tuple[list[dict[str, Any]], list[str], bool]:
+    binary = shutil.which("sshd")
+    if binary is None:
+        return [], [], False
+    output = run([binary, "-T"], timeout=20, check=False)
+    if output.returncode != 0:
+        detail = output.stderr.strip() or f"sshd -T 返回状态 {output.returncode}"
+        return [], [detail[:4096]], True
+    rows: list[dict[str, Any]] = []
+    for raw in output.stdout.splitlines():
+        key, separator, value = raw.strip().partition(" ")
+        directive = key.lower()
+        value = value.strip()
+        if not separator or directive not in V2_SSH_TRUST_DIRECTIVES:
+            continue
+        rows.append({"scope": "default", "directive": directive,
+                     "valueDigest": hashlib.sha256(value.encode()).hexdigest(), "value": value,
+                     "source": "sshd -T", "effective": True})
+        if len(rows) >= maximum:
+            return rows, ["sshd 有效信任配置达到结果上限"], True
+    return rows, [], False
+
+
 def v2_package_rows(maximum: int) -> tuple[list[dict[str, Any]], list[str], bool]:
     rows: list[dict[str, Any]] = []
     if shutil.which("dpkg-query"):
@@ -2857,6 +3023,10 @@ def v2_enumerate(params: dict[str, Any], epoch_id: str) -> tuple[list[dict[str, 
             rows.append(row)
     elif namespace == "ssh_key":
         rows, warnings, partial = v2_ssh_key_rows(min(5000, offset + limit + 1))
+    elif namespace == "delegation_rule":
+        rows, warnings, partial = v2_delegation_rows(min(5000, offset + limit + 1))
+    elif namespace == "ssh_trust_config":
+        rows, warnings, partial = v2_ssh_trust_rows(min(5000, offset + limit + 1))
     elif namespace == "file":
         rows, warnings, partial = v2_file_inventory(params, min(5000, offset + limit + 1))
     elif namespace == "web_stack":
@@ -3251,7 +3421,10 @@ def v2_relate(params: dict[str, Any], epoch_id: str) -> tuple[list[dict[str, Any
             if not raw.startswith("/"):
                 continue
             try:
-                rows.append(("file", v2_file_fields(safe_path(raw))))
+                path = safe_path(raw)
+                info = path.stat()
+                if stat.S_ISREG(info.st_mode) and not path.is_symlink():
+                    rows.append(("file", v2_file_fields(path)))
             except (HelperError, OSError):
                 continue
         if partial or output.returncode != 0:

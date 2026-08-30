@@ -21,7 +21,7 @@ async function observedCase(store: RuntimeStore, input: { suffix: string; userna
   store.createTask(task);
   const epoch: ScanEpoch = {
     epochId: `EPOCH-00000000-0000-4000-8000-0000000000${input.suffix}`, taskId: task.taskId,
-    targetFingerprint: task.target.hostFingerprint, protocolVersion: 2, manifestVersion: "2.0.0", helperVersion: "2.0.0",
+    targetFingerprint: task.target.hostFingerprint, protocolVersion: 2, manifestVersion: "2.1.0", helperVersion: "2.1.0",
     reason: "INITIAL", status: "RUNNING", startedAt: new Date(Date.now() - 1000).toISOString(),
   };
   store.createScanEpoch(epoch);

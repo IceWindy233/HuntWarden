@@ -13,7 +13,7 @@ describe.skipIf(!enabled)("Docker 五类 Lab v2 通用取证原语", () => {
   it("Lab-Web 通过 web_stack/web_root/file + match/collect 完成事实链", async () => {
     const client = await remote(2222);
     const capabilities = await client.executor.getCapabilitiesV2();
-    expect(capabilities).toMatchObject({ protocolVersion: 2, manifestVersion: "2.0.0" });
+    expect(capabilities).toMatchObject({ protocolVersion: 2, manifestVersion: "2.1.0" });
     const stacks = await client.enumerate("web_stack", ["kind", "instanceId", "pid", "configPaths"]);
     expect(stacks.some((item) => String(item.fields.kind).match(/nginx|apache|httpd/))).toBe(true);
     const roots = await client.enumerate("web_root", ["path", "server", "effective"]);
@@ -73,7 +73,7 @@ describe.skipIf(!enabled)("Docker 五类 Lab v2 通用取证原语", () => {
     expect(inspected.edges.map((edge) => edge.relation)).toEqual(expect.arrayContaining(["loads_class", "loaded_by"]));
   }, 180_000);
 
-  it("Lab-Account 通过 account/ssh_key/auth_event 建立账户与信任事实", async () => {
+  it("Lab-Account 通过账户、委派、有效 sshd 配置与认证事件建立信任事实", async () => {
     const client = await remote(2224);
     const accounts = await client.enumerate("account", ["uid", "username", "gid", "home", "shell", "groups", "locked"]);
     const lab = accounts.find((item) => item.fields.username === "labroot");
@@ -88,6 +88,12 @@ describe.skipIf(!enabled)("Docker 五类 Lab v2 通用取证原语", () => {
     expect(owner.objects.some((item) => item.namespace === "account" && item.fields.username === "labroot")).toBe(true);
     const auth = await client.enumerate("auth_event", ["timestamp", "eventType", "username", "sourceAddress", "success"], { sinceHours: 168 });
     expect(auth).toBeInstanceOf(Array);
+    const delegation = await client.enumerate("delegation_rule", ["mechanism", "sourceDigest", "line", "ruleDigest", "source", "effect", "subject", "runAs", "statement"]);
+    expect(delegation.some((item) => item.fields.mechanism === "sudo" && String(item.fields.statement).includes("huntwarden-helper"))).toBe(true);
+    expect([...new Set(delegation.map((item) => item.fields.mechanism))]).toEqual(expect.arrayContaining(["sudo", "doas", "polkit"]));
+    const trust = await client.enumerate("ssh_trust_config", ["scope", "directive", "valueDigest", "value", "source", "effective"]);
+    expect(trust.some((item) => item.fields.directive === "authorizedkeysfile" && item.fields.effective === true)).toBe(true);
+    expect(trust.some((item) => item.fields.directive === "permitrootlogin" && item.fields.effective === true)).toBe(true);
   }, 180_000);
 
   it("Lab-Persistence 通过 cron/unit/persistence 覆盖四类来源", async () => {

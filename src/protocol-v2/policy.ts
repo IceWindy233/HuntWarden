@@ -10,5 +10,8 @@ const probesByCategory: Partial<Record<CheckCategory, readonly string[]>> = Obje
 const discoveredScopesByCategory: Partial<Record<CheckCategory, Readonly<{ namespace: "file"; sourceNamespace: "web_root"; maximum: number }>>> = Object.freeze({
   webshell: Object.freeze({ namespace: "file", sourceNamespace: "web_root", maximum: 20 }),
 });
+const fixedScopesByCategory: Partial<Record<CheckCategory, readonly string[]>> = Object.freeze({
+  linux_intrusion_triage: Object.freeze(["/usr/bin", "/tmp"]),
+});
 
-export const INITIAL_GRANT_POLICY = Object.freeze({ probesByCategory, discoveredScopesByCategory });
+export const INITIAL_GRANT_POLICY = Object.freeze({ probesByCategory, discoveredScopesByCategory, fixedScopesByCategory });

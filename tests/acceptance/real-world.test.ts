@@ -34,7 +34,7 @@ describe.skipIf(!enabled)("Debian 12 动态真实攻击链 v2 验收", () => {
 
   it("在官方 Debian 目标完成 v2 Capability 与主机事实协商", async () => {
     const capabilities = await remote.getCapabilitiesV2();
-    expect(capabilities).toMatchObject({ protocolVersion: 2, manifestVersion: "2.0.0", helper: { name: "huntwarden-helper-v2" } });
+    expect(capabilities).toMatchObject({ protocolVersion: 2, manifestVersion: "2.1.0", helper: { name: "huntwarden-helper-v2" } });
     expect(Object.keys(capabilities.namespaces)).toEqual(expect.arrayContaining(["web_root", "process", "account", "cron_entry", "auth_event", "exec_event"]));
     const hosts = await client.enumerate("host", ["hostname", "os", "release", "architecture"]);
     expect(hosts[0]?.fields).toMatchObject({ os: "Linux", architecture: expect.any(String) });
@@ -86,6 +86,11 @@ describe.skipIf(!enabled)("Debian 12 动态真实攻击链 v2 验收", () => {
       const coverage = store.listCoverageRuns(task.taskId, result.epoch.epochId);
       expect(coverage.map((item) => item.category)).toEqual(expect.arrayContaining(task.checks));
       expect(coverage.some((item) => item.status === "ERROR" && item.applicability !== "UNKNOWN")).toBe(false);
+      const facts = store.listFacts(task.taskId, result.epoch.epochId);
+      expect(facts.some((fact) => fact.namespace === "web_root" && fact.privatePayload.effective === true)).toBe(true);
+      expect(facts.some((fact) => fact.namespace === "delegation_rule" && String(fact.privatePayload.statement).includes("huntwarden-helper"))).toBe(true);
+      expect(facts.some((fact) => fact.namespace === "ssh_trust_config" && fact.privatePayload.effective === true)).toBe(true);
+      expect(facts.some((fact) => fact.namespace === "file" && fact.privatePayload.baseline === "package_db")).toBe(true);
       const assessments = store.listAssessments(task.taskId, result.epoch.epochId);
       expect(assessments).toEqual(expect.arrayContaining([expect.objectContaining({ authorType: "RULE", category: "backdoor_account", verdict: "SUSPICIOUS" })]));
     } finally { store.close(); await rm(directory, { recursive: true, force: true }); }

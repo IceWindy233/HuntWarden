@@ -20,7 +20,7 @@ afterEach(async () => {
 });
 
 const helper: HelperCapabilitiesV2 = {
-  protocolVersion: 2, manifestVersion: "2.0.0", helper: { name: "helper", version: "2.0.0" },
+  protocolVersion: 2, manifestVersion: "2.1.0", helper: { name: "helper", version: "2.1.0" },
   namespaces: {
     file: { fields: ["mountId", "device", "inode", "path", "size", "sha256"], relations: [], verbs: ["enumerate", "collect"] },
     account: { fields: ["uid", "username", "gid", "home", "shell", "locked"], relations: [], verbs: ["enumerate"] },
@@ -41,7 +41,7 @@ async function fixture(check: "webshell" | "backdoor_account") {
   store.createTask(task);
   const epoch: ScanEpoch = {
     epochId: task.activeEpochId, taskId: task.taskId, targetFingerprint: task.target.hostFingerprint,
-    protocolVersion: 2, manifestVersion: "2.0.0", helperVersion: "2.0.0", reason: "INITIAL", status: "RUNNING", startedAt: new Date().toISOString(),
+    protocolVersion: 2, manifestVersion: "2.1.0", helperVersion: "2.1.0", reason: "INITIAL", status: "RUNNING", startedAt: new Date().toISOString(),
   };
   store.createScanEpoch(epoch);
   const grant: TaskGrant = {

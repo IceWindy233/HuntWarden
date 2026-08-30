@@ -2,10 +2,10 @@ import type { CheckCategory, Severity } from "../domain/types.js";
 import type { ProtocolV2ErrorCode } from "../common/errors.js";
 
 export const PROTOCOL_VERSION = 2 as const;
-export const MANIFEST_VERSION = "2.0.0";
+export const MANIFEST_VERSION = "2.1.0";
 
 export const NAMESPACE_NAMES = [
-  "host", "process", "socket", "file", "account", "ssh_key", "cron_entry", "unit",
+  "host", "process", "socket", "file", "account", "ssh_key", "delegation_rule", "ssh_trust_config", "cron_entry", "unit",
   "persistence", "module", "log_source", "log_event", "auth_event", "exec_event", "web_stack",
   "web_root", "jvm", "java_component", "class", "package", "task_ioc",
 ] as const;

@@ -28,7 +28,7 @@ readonly VM_USER="ubuntu"
 readonly REMOTE_REPO="/home/${VM_USER}/HuntWarden"
 readonly PROBE_JAR="java/tomcat-probe/build/libs/huntwarden-tomcat-probe.jar"
 # 完整依赖：yara 影响 WebShell 批量扫描，auditd 影响执行事件，JDK 影响 Tomcat Attach。
-readonly FULL_DEPS=("yara" "auditd" "openjdk-17-jdk-headless")
+readonly FULL_DEPS=("yara" "auditd" "openjdk-17-jdk-headless" "nginx")
 
 script_dir="$(cd "$(dirname "$0")" && pwd)"
 repo_root="$(cd "${script_dir}/../.." && pwd)"

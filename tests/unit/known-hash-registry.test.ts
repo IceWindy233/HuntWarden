@@ -21,7 +21,7 @@ describe("v2 known_hash_set 数据集注册表", () => {
     const store = await RuntimeStore.open(directory, "runtime.db");
     const task = { ...testTask(), protocolVersion: 2 as const };
     store.createTask(task);
-    const epoch: ScanEpoch = { epochId: "EPOCH-00000000-0000-4000-8000-000000000211", taskId: task.taskId, targetFingerprint: task.target.hostFingerprint, protocolVersion: 2, manifestVersion: "2.0.0", helperVersion: "2.0.0", reason: "INITIAL", status: "RUNNING", startedAt: new Date().toISOString() };
+    const epoch: ScanEpoch = { epochId: "EPOCH-00000000-0000-4000-8000-000000000211", taskId: task.taskId, targetFingerprint: task.target.hostFingerprint, protocolVersion: 2, manifestVersion: "2.1.0", helperVersion: "2.1.0", reason: "INITIAL", status: "RUNNING", startedAt: new Date().toISOString() };
     store.createScanEpoch(epoch);
     store.initializeBudget(task.taskId, epoch.epochId, "MODEL", testConfig(directory).protocolV2.remoteBudget.model);
     const observedAt = new Date().toISOString();
@@ -35,7 +35,7 @@ describe("v2 known_hash_set 数据集注册表", () => {
 
     const grant: TaskGrant = { grantId: "GRANT-DATASET", taskId: task.taskId, targetFingerprint: task.target.hostFingerprint, kind: "CATEGORY", status: "ACTIVE", binding: { category: "webshell" }, createdAt: observedAt };
     store.putTaskGrant(grant);
-    const helper: HelperCapabilitiesV2 = { protocolVersion: 2, manifestVersion: "2.0.0", helper: { name: "helper", version: "2.0.0" }, namespaces: { file: { fields: ["path", "sha256", "baseline", "baselineStatus"], relations: [], verbs: ["verify"] } }, matchers: [], probes: [], verbs: ["verify"], limits: { maxObjects: 10, maxOutputBytes: 1_572_864, maxReadBytes: 65_536, maxCollectBytes: 1024 } };
+    const helper: HelperCapabilitiesV2 = { protocolVersion: 2, manifestVersion: "2.1.0", helper: { name: "helper", version: "2.1.0" }, namespaces: { file: { fields: ["path", "sha256", "baseline", "baselineStatus"], relations: [], verbs: ["verify"] } }, matchers: [], probes: [], verbs: ["verify"], limits: { maxObjects: 10, maxOutputBytes: 1_572_864, maxReadBytes: 65_536, maxCollectBytes: 1024 } };
     const executor = new FakeProtocolV2Executor(helper, async (_verb, request) => ({ protocolVersion: 2, requestId: request.requestId, status: "SUCCESS", objects: [{ namespace: "file", identity: { mountId: "1", device: "1", inode: "211" }, fields: { mountId: "1", device: "1", inode: "211", path: "/usr/bin/example", sha256: observedSha, baseline: `known_hash_set:${imported.dataSetRef}`, baselineStatus: "UNKNOWN" }, observedAt, consistency: "EXTERNAL_BASELINE" }], edges: [], cost: { remoteCalls: 1, nodes: 1, bytes: 2048, wallTimeMs: 1, probeCalls: 0 }, gaps: [] }));
     const tools = createV2SecurityTools({ task: { ...task, activeEpochId: epoch.epochId }, epoch, config: testConfig(directory), store, executor, evidence: new EvidenceStore(directory, store), capabilities: gateCapabilities(helper, [grant]), approvals: new ApprovalService(store), budgetOwner: "MODEL" });
     const describe = tools.find((tool) => tool.name === "describe_capabilities");

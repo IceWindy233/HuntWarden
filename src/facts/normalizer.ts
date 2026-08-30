@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { InvalidArgumentError, SecurityError } from "../common/errors.js";
 import { digestObject } from "../common/json.js";
 import { identityFields, requireNamespace } from "../protocol-v2/manifest.js";
-import type { EdgeRecord, FactBatchInput, FactRecord, NamespaceName, ObjectReference, WireObservation } from "../protocol-v2/types.js";
+import { MANIFEST_VERSION, type EdgeRecord, type FactBatchInput, type FactRecord, type NamespaceName, type ObjectReference, type WireObservation } from "../protocol-v2/types.js";
 
 export interface PreparedFactBatch {
   batchId: string;
@@ -91,7 +91,7 @@ function normalizeObservation(
   const payloadDigest = digestObject({ privatePayload, unavailableFields });
   return {
     factId: `FACT-${randomUUID()}`, factSeq: 0, taskId: input.taskId, epochId: input.epochId,
-    namespace: observation.namespace, subjectRef: subject.ref, schemaVersion: "2.0.0",
+    namespace: observation.namespace, subjectRef: subject.ref, schemaVersion: MANIFEST_VERSION,
     observedAt: observation.observedAt, sourceRunId: input.sourceRunId, source: structuredClone(input.source),
     collector: structuredClone(input.collector), consistency: observation.consistency,
     completeness: combinedGaps.length > 0 ? "PARTIAL" : "COMPLETE", gaps: combinedGaps,

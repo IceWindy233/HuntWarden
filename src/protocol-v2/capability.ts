@@ -15,7 +15,7 @@ export interface EffectiveCapabilities {
 const CATEGORY_NAMESPACES: Readonly<Record<CheckCategory, ReadonlySet<NamespaceName>>> = {
   webshell: new Set(["host", "process", "file", "log_source", "log_event", "web_stack", "web_root"]),
   java_memory_shell: new Set(["host", "process", "file", "module", "jvm", "java_component", "class"]),
-  backdoor_account: new Set(["host", "account", "ssh_key", "file", "log_source", "auth_event"]),
+  backdoor_account: new Set(["host", "account", "ssh_key", "delegation_rule", "ssh_trust_config", "file", "log_source", "auth_event"]),
   linux_persistence: new Set(["host", "process", "file", "ssh_key", "cron_entry", "unit", "persistence", "module"]),
   linux_intrusion_triage: new Set(["host", "process", "socket", "file", "account", "ssh_key", "cron_entry", "unit", "persistence", "module", "log_source", "log_event", "auth_event", "exec_event", "package"]),
 };

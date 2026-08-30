@@ -36,9 +36,9 @@ python3 - "${capabilities_file}" <<'PY'
 import json, pathlib, sys
 
 REQUIRED_PROTOCOL = 2
-REQUIRED_MANIFEST = "2.0.0"
+REQUIRED_MANIFEST = "2.1.0"
 REQUIRED_VERBS = {"enumerate", "project", "read", "match", "relate", "verify", "collect", "probe"}
-REQUIRED_NAMESPACES = {"host", "process", "socket", "file", "account", "jvm"}
+REQUIRED_NAMESPACES = {"host", "process", "socket", "file", "account", "delegation_rule", "ssh_trust_config", "jvm"}
 
 raw = pathlib.Path(sys.argv[1]).read_text("utf-8", errors="replace")
 try:

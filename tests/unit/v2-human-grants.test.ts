@@ -24,7 +24,7 @@ describe("v2 HUMAN Assessment 与 Grant 撤销", () => {
     const models = createModels(); const faux = fauxProvider({ tokensPerSecond: 0 }); models.setProvider(faux.provider);
     const application = new Application(testConfig(directory), store, models, faux.getModel());
     const task = application.createTask({ request: "复核 v2 人工裁定", mode: "SCAN", checks: ["webshell"], target: testTask().target });
-    const epoch: ScanEpoch = { epochId: "EPOCH-00000000-0000-4000-8000-000000000099", taskId: task.taskId, targetFingerprint: task.target.hostFingerprint, protocolVersion: 2, manifestVersion: "2.0.0", helperVersion: "2.0.0", reason: "INITIAL", status: "RUNNING", startedAt: new Date().toISOString() };
+    const epoch: ScanEpoch = { epochId: "EPOCH-00000000-0000-4000-8000-000000000099", taskId: task.taskId, targetFingerprint: task.target.hostFingerprint, protocolVersion: 2, manifestVersion: "2.1.0", helperVersion: "2.1.0", reason: "INITIAL", status: "RUNNING", startedAt: new Date().toISOString() };
     store.createScanEpoch(epoch); task.activeEpochId = epoch.epochId; store.saveTask(task);
     const observedAt = new Date().toISOString();
     const facts = store.commitFactBatch({ taskId: task.taskId, epochId: epoch.epochId, sourceRunId: "HUMAN-FACT", source: { kind: "SYSTEM" }, targetFingerprint: task.target.hostFingerprint, requestId: "HUMAN-FACT", collector: { name: "test", version: "2.0.0" }, observations: [{ namespace: "file", identity: { mountId: "1", device: "1", inode: "99" }, fields: { mountId: "1", device: "1", inode: "99", path: "/srv/www/x.php", kind: "regular", size: 12, mode: 420, uid: 33, gid: 33, mtime: observedAt }, observedAt, consistency: "OBJECT_STABLE" }], edges: [], gaps: [], wireDigest: "9".repeat(64) });
@@ -37,7 +37,7 @@ describe("v2 HUMAN Assessment 与 Grant 撤销", () => {
 
     const grant: TaskGrant = { grantId: "GRANT-REVOKE", taskId: task.taskId, targetFingerprint: task.target.hostFingerprint, kind: "CATEGORY", status: "ACTIVE", binding: { category: "webshell" }, createdAt: observedAt };
     store.putTaskGrant(grant);
-    const helper: HelperCapabilitiesV2 = { protocolVersion: 2, manifestVersion: "2.0.0", helper: { name: "helper", version: "2.0.0" }, namespaces: { file: { fields: ["path"], relations: [], verbs: ["enumerate"] }, account: { fields: ["uid"], relations: [], verbs: ["enumerate"] } }, matchers: [], probes: [], verbs: ["enumerate"], limits: { maxObjects: 10, maxOutputBytes: 4096, maxReadBytes: 1024, maxCollectBytes: 1024 } };
+    const helper: HelperCapabilitiesV2 = { protocolVersion: 2, manifestVersion: "2.1.0", helper: { name: "helper", version: "2.1.0" }, namespaces: { file: { fields: ["path"], relations: [], verbs: ["enumerate"] }, account: { fields: ["uid"], relations: [], verbs: ["enumerate"] } }, matchers: [], probes: [], verbs: ["enumerate"], limits: { maxObjects: 10, maxOutputBytes: 4096, maxReadBytes: 1024, maxCollectBytes: 1024 } };
     const capabilities = gateCapabilities(helper, [grant]);
     expect(capabilities.namespaces.file).toBeDefined(); expect(capabilities.namespaces.account).toBeUndefined();
     const executor = new FakeProtocolV2Executor(helper, async () => { throw new Error("撤销后不应到达 helper"); });

@@ -70,6 +70,24 @@ export const DETERMINISTIC_RULES_V2: readonly V2Rule[] = [
     matches: (payload) => typeof payload.executable === "string" && ["/tmp/", "/var/tmp/", "/dev/shm/"].some((prefix) => String(payload.executable).startsWith(prefix)),
     rationale: (payload) => `执行事件显示临时目录程序：${String(payload.executable)}；需关联进程身份、文件与网络连接。`,
   },
+  {
+    ruleId: "HW2-DELEGATION-NOPASSWD-ALL-001", version: "2.2.0", category: "backdoor_account", namespace: "delegation_rule",
+    verdict: "HIGHLY_SUSPICIOUS", severity: "HIGH", confidence: 0.84,
+    matches: (payload) => payload.mechanism === "sudo" && typeof payload.statement === "string" && /\bNOPASSWD\s*:\s*ALL(?:\s|$)/i.test(payload.statement),
+    rationale: (payload) => `委派配置 ${String(payload.source)}:${String(payload.line)} 授予无密码执行任意命令；需确认主体、来源和变更授权。`,
+  },
+  {
+    ruleId: "HW2-SSH-ROOT-LOGIN-001", version: "2.2.0", category: "backdoor_account", namespace: "ssh_trust_config",
+    verdict: "SUSPICIOUS", severity: "MEDIUM", confidence: 0.74,
+    matches: (payload) => payload.effective === true && payload.directive === "permitrootlogin" && payload.value === "yes",
+    rationale: () => "sshd 有效配置允许 root 直接登录；需结合 root 授权密钥、认证方式和登录事件复核。",
+  },
+  {
+    ruleId: "HW2-PACKAGE-INTEGRITY-001", version: "2.2.0", category: "linux_intrusion_triage", namespace: "file",
+    verdict: "HIGHLY_SUSPICIOUS", severity: "HIGH", confidence: 0.88,
+    matches: (payload) => payload.baseline === "package_db" && payload.baselineStatus === "MISMATCH",
+    rationale: (payload) => `文件 ${String(payload.path)} 与软件包数据库基线不一致；需固化 Evidence 并关联进程、持久化和执行事件。`,
+  },
 ];
 
 /**

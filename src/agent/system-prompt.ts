@@ -9,9 +9,9 @@ function buildV2SystemPrompt(task: TaskContext): string {
   const fastPathNamespaces: Record<string, readonly string[]> = {
     webshell: ["web_stack", "web_root", "file", "log_source"],
     java_memory_shell: ["jvm", "java_component", "class"],
-    backdoor_account: ["account", "ssh_key", "auth_event"],
+    backdoor_account: ["account", "ssh_key", "delegation_rule", "ssh_trust_config", "auth_event"],
     linux_persistence: ["cron_entry", "unit", "persistence"],
-    linux_intrusion_triage: ["process", "socket", "auth_event", "exec_event", "module", "package"],
+    linux_intrusion_triage: ["process", "socket", "file", "auth_event", "exec_event", "module", "package"],
   };
   const fastPath = Object.fromEntries(task.checks.map((category) => [category, fastPathNamespaces[category] ?? []]));
   return `你是 HuntWarden v2 主机取证调查 Agent。

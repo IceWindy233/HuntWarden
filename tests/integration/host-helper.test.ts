@@ -121,12 +121,14 @@ describe("目标辅助程序边界", () => {
     });
     expect(result.status).toBe(0);
     expect(result.envelope).toMatchObject({ protocolVersion: 2, requestId: "REQ-CAPABILITIES", status: "SUCCESS", capabilities: {
-      protocolVersion: 2, manifestVersion: "2.0.0", helper: { name: "huntwarden-helper-v2", version: "2.0.0" },
+      protocolVersion: 2, manifestVersion: "2.1.0", helper: { name: "huntwarden-helper-v2", version: "2.1.0" },
       verbs: ["enumerate", "project", "read", "match", "relate", "verify", "collect", "probe"],
       namespaces: {
         process: { fields: expect.arrayContaining(["pid", "startTicks", "exeInode", "exeSha256"]), relations: expect.arrayContaining(["parent", "children", "opens", "connects"]) },
         file: { relations: expect.arrayContaining(["opened_by", "referenced_by_persistence", "requested_in"]) },
         account: { relations: expect.arrayContaining(["authorized_key", "login_event"]) },
+        delegation_rule: { fields: expect.arrayContaining(["mechanism", "sourceDigest", "line", "ruleDigest", "statement"]), verbs: expect.arrayContaining(["enumerate"]) },
+        ssh_trust_config: { fields: expect.arrayContaining(["scope", "directive", "valueDigest", "effective"]), verbs: expect.arrayContaining(["enumerate"]) },
         log_event: { fields: expect.arrayContaining(["sourceId", "cursor", "program", "message"]) },
         log_source: { relations: expect.arrayContaining(["contains"]) },
         web_stack: { relations: expect.arrayContaining(["serves_root"]) },
