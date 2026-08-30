@@ -2,7 +2,7 @@
 
 该入口用于授权临时 Linux VM 的 v2 只读验收；当前发布门槛为 Ubuntu 24.04 ARM64，Rocky Linux 9 x86_64/SELinux 保留为后续非阻塞兼容性验证。它只调用以下固定 v2 只读/证据动词：
 
-最近一次 P1 增量记录：[`Ubuntu 24.04.4 ARM64 v2 P1 验收`](../../docs/acceptance/VM_UBUNTU_24.04_ARM64_V2_P1_2026-08-30.md)，结果为 `PASS_WITH_LIMITATIONS`。完整 GUI/Provider v2 基线见 [`2026-08-26 记录`](../../docs/acceptance/VM_UBUNTU_24.04_ARM64_V2_2026-08-26.md)；P1 记录只证明其列明的增量能力，不能代替尚未重跑的 Provider 模型评测。
+最近一次 P1 增量记录：[`Ubuntu 24.04.4 ARM64 v2 P1 验收`](../../docs/acceptance/VM_UBUNTU_24.04_ARM64_V2_P1_2026-08-30.md)，结果为 `PASS_WITH_LIMITATIONS`。完整 GUI/Provider v2 基线见 [`2026-08-26 记录`](../../docs/acceptance/VM_UBUNTU_24.04_ARM64_V2_2026-08-26.md)；P1 已重新执行冻结 Provider 模型评测，但未重跑五类 QUICK/STANDARD/DEEP 的全部 GUI Profile 矩阵。
 
 - `capabilities`
 - `enumerate`（host/process/file/account/cron_entry/unit/persistence/jvm）
@@ -97,4 +97,4 @@ sudo ./install-safe-fixtures.sh --remove
 
 验收要求：阳性文件形成引用自身 Evidence 的 WebShell Finding；良性文件不得仅因 `system`/`base64` 等单一关键词被判为 HIGH/CRITICAL。真实主机禁止安装该夹具，只能用于可销毁或可恢复快照的授权临时 VM。
 
-正式模型评测另使用 `install-model-eval-fixtures.sh`：它创建一个现有 YARA 不命中的、永久禁用分支内的动态回调链，并启动普通 Java Sleeper 供语料设计验证。脚本只允许 `--install/--status/--remove`，删除前核对 sentinel 与 Java PID 命令行。正式任务完成后必须执行 `--remove` 并确认 `.phtml` 为 `ABSENT`、Sleeper 为 `STOPPED`；冻结清单和阈值见 [`acceptance/model-eval/README.md`](../model-eval/README.md)。
+正式模型评测另使用 `install-model-eval-fixtures.sh`：`--install` 创建一个现有 YARA 不命中的、永久禁用分支内动态回调链，并启动普通 Java Sleeper；`--install-effective-root` 单独创建只监听 `127.0.0.1`、根目录位于 `/tmp` 的 P1 Web effective-root 专项夹具。`--remove` 在删除前核对文件 sentinel 与 Java PID 命令行，并统一清理两类夹具。正式任务完成后必须确认 `.phtml` 与 nginx 专项配置/Web 根均为 `ABSENT`、Sleeper 为 `STOPPED`；冻结清单和阈值见 [`acceptance/model-eval/README.md`](../model-eval/README.md)。

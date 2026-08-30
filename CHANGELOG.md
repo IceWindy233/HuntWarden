@@ -9,6 +9,7 @@
 - Tool Protocol v2 Manifest/Helper 升级为 `2.1.0`，新增通用 `delegation_rule` 与 `ssh_trust_config` Namespace；后门账户 Preset 现在采集 sudoers/doas/polkit 策略语句和 `sshd -T` 默认上下文有效信任配置。
 - Linux 分诊 Preset 通过固定策略绑定 `/usr/bin`、`/tmp` file Scope，并执行 `package → owns_file → verify(package_db)` 有界基线链路；新增软件包不一致确定性规则。
 - 新增 Ubuntu 24.04 ARM64 P1 增量实机验收记录；Helper `2.1.0` smoke 4/4 与 journald 回归 1/1 通过，限制与环境准备过程完整留档。
+- 新增 Manifest `2.1.0` 真实 Provider P1 发布评测：重新冻结 novel malicious + benign 已完成任务，七项门槛全部通过；模型评测脚本新增可独立安装、loopback-only 的 effective-root 专项夹具。
 
 ### Changed
 

@@ -28,3 +28,5 @@ npm run eval:model -- \
 只有七个阈值全部通过且没有语料错误时进程才返回 0。报告不包含目标地址、原始事实值、Evidence 路径、凭据或模型原始响应；`rowRefs` 仅保存在本地 QuerySnapshot，用于证明预期事实是否真的到达过模型查询结果。
 
 示例清单中的路径和 Task ID 是不可执行占位符，禁止把它当作发布结果。阈值必须由发布负责人在执行前冻结，不能在看到结果后调低。
+
+当前 P1 冻结清单为 `manifest.release.json`，对应 Manifest/Helper `2.1.0` 的 2026-08-30 真实 Provider 已完成任务；发布结果见 [`MODEL_EVAL_P1_2026-08-30.md`](../../docs/acceptance/MODEL_EVAL_P1_2026-08-30.md)。基础发布语料用 `acceptance/vm/install-model-eval-fixtures.sh --install` 安装。`--install-effective-root` 是独立的 loopback-only P1 专项夹具；若其 Coverage 不是 `COMPLETE`，不得把该任务混入冻结统计清单。两类夹具都由 `--remove` 统一校验 sentinel 后清理。

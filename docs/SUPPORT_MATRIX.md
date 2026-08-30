@@ -6,7 +6,7 @@
 >
 > v2 完整 GUI/Provider 基线：[`VM_UBUNTU_24.04_ARM64_V2_2026-08-26.md`](acceptance/VM_UBUNTU_24.04_ARM64_V2_2026-08-26.md)；P1 增量实机复验：[`VM_UBUNTU_24.04_ARM64_V2_P1_2026-08-30.md`](acceptance/VM_UBUNTU_24.04_ARM64_V2_P1_2026-08-30.md)。综合结果为 `PASS_WITH_LIMITATIONS`。
 >
-> 已产生首个真实 Provider 发布评测结果：冻结的惰性 novel malicious 与独立 benign 场景七项门槛全部通过；详见 [`MODEL_EVAL_2026-08-26.md`](acceptance/MODEL_EVAL_2026-08-26.md)。该语料仍是自造安全夹具，不能外推为真实站点召回率或误报率。
+> Manifest/Helper `2.1.0` 已重新创建真实 Provider 发布评测语料：冻结的惰性 novel malicious 与独立 benign 场景七项门槛全部通过；详见 [`MODEL_EVAL_P1_2026-08-30.md`](acceptance/MODEL_EVAL_P1_2026-08-30.md)。另有 loopback-only effective-root 专项任务验证 P1 Web 根识别，但因该任务 Coverage 为 `PARTIAL/UNKNOWN`，未混入七项统计门槛。语料仍是自造安全夹具，不能外推为真实站点召回率或误报率。
 
 ## 目标与接入
 

@@ -1,10 +1,10 @@
 {
   "schemaVersion": 1,
-  "suiteId": "v2-release-ubuntu-24.04-arm64-2026-08-26",
+  "suiteId": "v2-p1-release-ubuntu-24.04-arm64-2026-08-30",
   "cases": [
     {
       "caseId": "novel-inert-php-dynamic-callback-chain",
-      "taskId": "TASK-d77591cc-823c-424b-9e67-23869b422448",
+      "taskId": "TASK-1070864d-da46-4e8f-ace9-a090b2015708",
       "disposition": "MALICIOUS",
       "novel": true,
       "expectedCategories": ["webshell"],
@@ -19,7 +19,7 @@
     },
     {
       "caseId": "benign-no-jvm-control-ioc",
-      "taskId": "TASK-7b08a8ae-256f-45d9-b38a-0e37f45e15da",
+      "taskId": "TASK-14a15b17-fa07-4991-8343-1141c56eb85f",
       "disposition": "BENIGN",
       "novel": false,
       "expectedCategories": ["java_memory_shell"],

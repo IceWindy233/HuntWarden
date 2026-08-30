@@ -6,10 +6,13 @@ readonly NOVEL_FILE="/var/www/html/huntwarden-novel-callback.phtml"
 readonly JAVA_SOURCE="${FIXTURE_DIR}/HuntWardenBenignSleeper.java"
 readonly JAVA_CLASS="${FIXTURE_DIR}/HuntWardenBenignSleeper.class"
 readonly JAVA_PID="${FIXTURE_DIR}/java.pid"
+readonly NGINX_CONFIG="/etc/nginx/conf.d/huntwarden-model-eval.conf"
+readonly NOVEL_WEB_ROOT="/tmp/huntwarden-model-eval-root"
+readonly NOVEL_WEB_INDEX="${NOVEL_WEB_ROOT}/index.html"
 readonly SENTINEL="HUNTWARDEN_MODEL_EVAL_FIXTURE_V1"
 
 usage() {
-  >&2 echo "用法: sudo $0 --install | sudo $0 --remove | $0 --status"
+  >&2 echo "用法: sudo $0 --install | sudo $0 --install-effective-root | sudo $0 --remove | $0 --status"
   exit 2
 }
 
@@ -37,6 +40,16 @@ show_status() {
     echo "RUNNING HuntWardenBenignSleeper pid=${pid}"
   else
     echo "STOPPED HuntWardenBenignSleeper"
+  fi
+  if [[ -f "${NGINX_CONFIG}" && ! -L "${NGINX_CONFIG}" ]]; then
+    echo "PRESENT ${NGINX_CONFIG}"
+  else
+    echo "ABSENT ${NGINX_CONFIG}"
+  fi
+  if [[ -f "${NOVEL_WEB_INDEX}" && ! -L "${NOVEL_WEB_INDEX}" ]]; then
+    stat -c '%n %U:%G %a %s bytes %y' "${NOVEL_WEB_INDEX}"
+  else
+    echo "ABSENT ${NOVEL_WEB_INDEX}"
   fi
 }
 
@@ -85,6 +98,36 @@ JAVA
     echo "模型评测夹具已安装；PHP 恶意模拟位于永久禁用分支，不读取输入、不调用回调。"
     show_status
     ;;
+  --install-effective-root)
+    [[ ${EUID} -eq 0 ]] || { >&2 echo "安装 effective root 夹具必须以 root 运行"; exit 1; }
+    command -v nginx >/dev/null || { >&2 echo "缺少 nginx，无法安装 effective root 夹具"; exit 1; }
+    systemctl is-active --quiet nginx || { >&2 echo "nginx 未运行，拒绝安装 effective root 夹具"; exit 1; }
+    nginx_temp="$(mktemp)"
+    index_temp="$(mktemp)"
+    cleanup() { rm -f "${nginx_temp}" "${index_temp}"; }
+    trap cleanup EXIT
+    cat >"${nginx_temp}" <<'NGINX'
+# HUNTWARDEN_MODEL_EVAL_FIXTURE_V1
+# Loopback-only malicious simulation: serving an effective web root from /tmp is an unsafe trust-boundary change.
+server {
+    listen 127.0.0.1:18088;
+    server_name huntwarden-model-eval.invalid;
+    root /tmp/huntwarden-model-eval-root;
+    location / { try_files $uri =404; }
+}
+NGINX
+    cat >"${index_temp}" <<'HTML'
+<!-- HUNTWARDEN_MODEL_EVAL_FIXTURE_V1 -->
+HuntWarden loopback-only effective-root evaluation fixture.
+HTML
+    install -d -o root -g root -m 0755 "${NOVEL_WEB_ROOT}"
+    install -o root -g root -m 0644 "${index_temp}" "${NOVEL_WEB_INDEX}"
+    install -o root -g root -m 0644 "${nginx_temp}" "${NGINX_CONFIG}"
+    nginx -t
+    systemctl reload nginx
+    echo "effective root 专项夹具已安装；仅监听 127.0.0.1。"
+    show_status
+    ;;
   --remove)
     [[ ${EUID} -eq 0 ]] || { >&2 echo "移除夹具必须以 root 运行"; exit 1; }
     if pid="$(java_fixture_pid)"; then
@@ -99,6 +142,19 @@ JAVA
       [[ -f "${NOVEL_FILE}" && ! -L "${NOVEL_FILE}" ]] || { >&2 echo "拒绝移除非常规文件: ${NOVEL_FILE}"; exit 1; }
       grep -Fq "${SENTINEL}" "${NOVEL_FILE}" || { >&2 echo "拒绝移除缺少固定标记的文件: ${NOVEL_FILE}"; exit 1; }
       rm -f -- "${NOVEL_FILE}"
+    fi
+    if [[ -e "${NGINX_CONFIG}" ]]; then
+      [[ -f "${NGINX_CONFIG}" && ! -L "${NGINX_CONFIG}" ]] || { >&2 echo "拒绝移除非常规 nginx 夹具: ${NGINX_CONFIG}"; exit 1; }
+      grep -Fq "${SENTINEL}" "${NGINX_CONFIG}" || { >&2 echo "拒绝移除缺少固定标记的 nginx 夹具"; exit 1; }
+      rm -f -- "${NGINX_CONFIG}"
+      nginx -t
+      systemctl reload nginx
+    fi
+    if [[ -e "${NOVEL_WEB_ROOT}" ]]; then
+      [[ -f "${NOVEL_WEB_INDEX}" && ! -L "${NOVEL_WEB_INDEX}" ]] || { >&2 echo "拒绝移除异常 Web Root 夹具: ${NOVEL_WEB_ROOT}"; exit 1; }
+      grep -Fq "${SENTINEL}" "${NOVEL_WEB_INDEX}" || { >&2 echo "拒绝移除缺少固定标记的 Web Root 夹具"; exit 1; }
+      rm -f -- "${NOVEL_WEB_INDEX}"
+      rmdir "${NOVEL_WEB_ROOT}"
     fi
     if [[ -e "${FIXTURE_DIR}" ]]; then
       [[ -f "${JAVA_SOURCE}" && ! -L "${JAVA_SOURCE}" ]] || { >&2 echo "拒绝移除异常夹具目录: ${FIXTURE_DIR}"; exit 1; }

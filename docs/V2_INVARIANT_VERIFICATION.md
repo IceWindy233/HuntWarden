@@ -12,7 +12,7 @@
 | MERGE | PASS | 五套 Docker Lab 共 11/11 通过，并新增 sudoers/doas/polkit 与 `sshd -T` 默认上下文事实断言；GUI E2E 16/16：investigation 4/4、remediation 3/3、recovery 6/6、grant 生命周期 3/3；Debian 12 动态场景 5/5，包含 P1 新事实断言。REMEDIATE 默认关闭不完整账户处置的 fail-close 行为由 E2E 明确验证。 |
 | RELEASE / RE2 | PASS | macOS ARM64 与 Ubuntu 22.04 ARM64 均验证实际匹配及不支持反向引用时的 `INVALID_ARGUMENT`；见 `acceptance/RE2_MATRIX_2026-08-25.md`。 |
 | RELEASE / 真实 VM v2 | PASS_WITH_LIMITATIONS | Ubuntu 24.04.4 ARM64 上将 Helper 升级到 Manifest `2.1.0` 后，P1 smoke 4/4、journald 回归 1/1；新 Namespace、effective web root、固定 Scope 与 package verify 均通过。首次 smoke 因目标缺 nginx 与无害 Web fixture 失败，补齐发布依赖与安全夹具后按原断言重跑通过，夹具随后清理。此前五类 QUICK、联合 STANDARD 与小上下文 DEEP 仍由 2.0.0 基线记录承担，未冒充为 P1 重跑。详见 `acceptance/VM_UBUNTU_24.04_ARM64_V2_P1_2026-08-30.md`。 |
-| RELEASE / 模型能力统计 | PASS（沿用 2.0.0 语料） | `siliconflow/deepseek-ai/DeepSeek-V4-Flash` 的冻结 novel malicious + benign 清单七项门槛在 Manifest `2.0.0` 基线上全部通过。P1 没有新建已完成 Provider 任务语料，故未把该结果表述为 2.1.0 模型复验。结果见 `acceptance/MODEL_EVAL_2026-08-26.md`。 |
+| RELEASE / 模型能力统计 | PASS | Manifest/Helper `2.1.0` 上重新创建并冻结 `siliconflow/deepseek-ai/DeepSeek-V4-Flash` 的 novel malicious + benign 已完成任务：事实可达率与 novel recall 均为 100%，截断损失、MODEL NOT_CONCLUDED、Preset partial、非法工具调用和良性误报均为 0%。七项门槛全部通过，结果见 `acceptance/MODEL_EVAL_P1_2026-08-30.md`。 |
 
 | ID | 层级 | 自动化/验收归属 | 主要断言 |
 | --- | --- | --- | --- |
