@@ -1,8 +1,8 @@
 # HuntWarden v2 类型化取证能力协议与运行时设计
 
-> 状态：Accepted / v2.0 实施基线（2026-08-29）
+> 状态：Accepted / v2.1 P1 实施基线（2026-08-30）
 >
-> 产品基线：HuntWarden `0.2.0`，实现提交 `7318233e1327111de12895867e09bbee965df5e2`。
+> 发布基线：HuntWarden `0.2.0` / Manifest `2.0.0`，实现提交 `7318233e1327111de12895867e09bbee965df5e2`。当前 P1 实施基线：Manifest/Helper `2.1.0`，实现提交 `88d8198de6a30a079c245552208edaca3c606890`。
 >
 > 决策：v2 直接替换 v1，不提供运行时双协议兼容；旧任务只保证可读，不保证恢复执行。
 >
@@ -765,7 +765,9 @@ SCAN 模式不注册写工具，即使错误注册也必须在远程执行前被
 
 首批 namespace：
 
-`host`、`process`、`socket`、`file`、`account`、`ssh_key`、`cron_entry`、`unit`、`persistence`、`module`、`log_source`、`log_event`、`auth_event`、`exec_event`、`web_stack`、`web_root`、`jvm`、`java_component`、`class`、`package`、`task_ioc`。
+`host`、`process`、`socket`、`file`、`account`、`ssh_key`、`delegation_rule`、`ssh_trust_config`、`cron_entry`、`unit`、`persistence`、`module`、`log_source`、`log_event`、`auth_event`、`exec_event`、`web_stack`、`web_root`、`jvm`、`java_component`、`class`、`package`、`task_ioc`。
+
+`delegation_rule` 记录 sudoers/doas/polkit 的版本化策略语句与来源身份；`ssh_trust_config` 只记录 `sshd -T` 产出的默认上下文有效信任配置。二者都是数据源事实，不是“后门账户检查”专用工具。`Match` 条件下的逐用户/逐来源地址有效配置需要显式上下文，未采集时不得把默认上下文结果外推到所有连接。
 
 `task_ioc` 是唯一不来自 Helper 的 namespace，由控制端在任务创建时物化；它不出现在 Helper capabilities，远程 `enumerate(task_ioc)` 必须拒绝。
 
@@ -895,7 +897,7 @@ v2 完成必须同时满足：
 
 实现开始前通过 ADR 或本文件修订冻结：
 
-- Manifest v2.0 完整 namespace/field/relation 表；
+- Manifest v2.1 完整 namespace/field/relation 表；
 - 字段 sensitivity/modelExposure；
 - 默认 / 禁止 Scope 与 SAFE/SENSITIVE/DENIED 内容分类规则；
 - Predicate/Query AST 硬限制；
@@ -913,4 +915,4 @@ v2 完成必须同时满足：
 
 这些常量必须形成单一事实源，不得分别散落在 Helper、TypeScript schema、Profile 默认值和测试 fixture 中。
 
-当前冻结实现：Preset 初始 Grant 的唯一控制端常量为 `src/protocol-v2/policy.ts` 的 `INITIAL_GRANT_POLICY`。分析师选择 `java_memory_shell` 类别时授权两个只读 JVM Probe；选择 `webshell` 时允许最低 Preset 对 Helper 已发现并稳定绑定的最多 20 个有效 `web_root` 建立 file Scope。模型不能借此提交路径，后续 Scope/Sensitive-read 扩展仍须走 Grant Request。字段敏感度与模型暴露策略的唯一控制端来源为 `src/protocol-v2/manifest.ts`。
+当前冻结实现：Preset 初始 Grant 的唯一控制端常量为 `src/protocol-v2/policy.ts` 的 `INITIAL_GRANT_POLICY`。分析师选择 `java_memory_shell` 类别时授权两个只读 JVM Probe；选择 `webshell` 时允许最低 Preset 对 Helper 已发现并稳定绑定的最多 20 个有效 `web_root` 建立 file Scope；选择 `linux_intrusion_triage` 时只允许最低 Preset 解析并绑定固定的 `/usr/bin`、`/tmp` file Scope。模型不能借此提交路径，后续 Scope/Sensitive-read 扩展仍须走 Grant Request。字段敏感度与模型暴露策略的唯一控制端来源为 `src/protocol-v2/manifest.ts`。

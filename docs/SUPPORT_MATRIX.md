@@ -1,10 +1,10 @@
 # HuntWarden 实战试用支持矩阵
 
-> 更新日期：2026-08-29。`已验证`仅表示仓库自动化或明确环境已通过；`待实机验收`不等同于不支持，而是不应在报告中宣称已验证。HuntWarden `0.2.0` 的可复现实现基线为 `7318233e1327111de12895867e09bbee965df5e2`；本轮重跑 PR、Docker、Debian、GUI、RE2、真实 VM smoke/journald 与冻结模型评测均通过。
+> 更新日期：2026-08-30。`已验证`仅表示仓库自动化或明确环境已通过；`待实机验收`不等同于不支持，而是不应在报告中宣称已验证。当前 P1 可复现实现基线为 Tool Protocol v2 Manifest/Helper `2.1.0`、commit `88d8198de6a30a079c245552208edaca3c606890`；`0.2.0` 发布标签仍对应 Manifest `2.0.0`。
 >
 > 最近基线：Ubuntu 24.04.4 ARM64 已用真实 GUI、Provider、SSH 和 root Helper 完成 QUICK/STANDARD/DEEP 只读 VM 验收，并完成缺少 YARA、auditd、JDK Attach 的最低依赖降级补测，结果为 `PASS_WITH_LIMITATIONS`；详见 [`VM_UBUNTU_24.04_ARM64_2026-08-20.md`](acceptance/VM_UBUNTU_24.04_ARM64_2026-08-20.md)。Rocky Linux 9 x86_64/SELinux 及其余矩阵仍待执行，但不属于 `0.2.0` 的阻塞门槛。
 >
-> v2 当前记录：[`VM_UBUNTU_24.04_ARM64_V2_2026-08-26.md`](acceptance/VM_UBUNTU_24.04_ARM64_V2_2026-08-26.md)，结果为 `PASS_WITH_LIMITATIONS`。
+> v2 完整 GUI/Provider 基线：[`VM_UBUNTU_24.04_ARM64_V2_2026-08-26.md`](acceptance/VM_UBUNTU_24.04_ARM64_V2_2026-08-26.md)；P1 增量实机复验：[`VM_UBUNTU_24.04_ARM64_V2_P1_2026-08-30.md`](acceptance/VM_UBUNTU_24.04_ARM64_V2_P1_2026-08-30.md)。综合结果为 `PASS_WITH_LIMITATIONS`。
 >
 > 已产生首个真实 Provider 发布评测结果：冻结的惰性 novel malicious 与独立 benign 场景七项门槛全部通过；详见 [`MODEL_EVAL_2026-08-26.md`](acceptance/MODEL_EVAL_2026-08-26.md)。该语料仍是自造安全夹具，不能外推为真实站点召回率或误报率。
 
@@ -37,7 +37,7 @@ Helper 启动时返回 v2 Capability，包含 Namespace 级别的实际 verb/fie
 
 > 本表是 v1 实机能力基线，不代表这些 v1 问题工具仍存在于生产工具面。五类 Docker 等价子集已经冻结在 [`tests/fixtures/v1-v2-equivalence.json`](../tests/fixtures/v1-v2-equivalence.json)，由 `v1-v2-equivalence.test.ts` 证明可通过 v2 通用原语到达；这不是尚未执行的真实 VM v2 复测。v2 确定性最低覆盖见 [`src/presets/registry.ts`](../src/presets/registry.ts)，调查面固定为八个只读原语。
 
-> v1 残留清理（2026-08-26）：v1 的 Finding/coverage 结构化结论平面、`findings` 表与 43 个不可达的 v1 collector 已从代码库删除。v1 历史任务只保留任务元数据、Evidence 与已生成的报告文件。随之明确的能力缺口：**v2 尚未采集 sudoers/doas/polkit 委派配置与 sshd 有效信任配置**（v1 的 `inspect_privilege_delegation`/`inspect_ssh_trust_configuration` 在 v2 切换时即已不可达，本次只是删除了残留代码）；后门账户维度当前依赖 account/ssh_key/auth_event 三个 namespace。
+> v1 残留清理（2026-08-26）：v1 的 Finding/coverage 结构化结论平面、`findings` 表与 43 个不可达的 v1 collector 已从代码库删除。v1 历史任务只保留任务元数据、Evidence 与已生成的报告文件。2026-08-29 起，v2 以通用 `delegation_rule` / `ssh_trust_config` 事实补回 sudoers/doas/polkit 与 `sshd -T` 默认上下文，不再恢复问题型 collector。
 
 > 日志源身份复验（2026-08-27）：Ubuntu 24.04.4 ARM64 真实 VM 已验证 `enumerate log_source` 返回 `kind=journald`，无害 marker 对应 `log_event.sourceId` 等于该源，重复查询事件 identity 稳定，追加 journal 会推进 generation，`relate log_source contains` 跨 500 条分页后可到达 marker 与 journald auth event。实测同时发现并修复 sudo 调用自身推进 generation 导致的永久 `STALE_REF`/第二页 Cursor 不可用；当前以 `SOURCE_CHANGED` + `CURSOR_BEST_EFFORT` 明示活跃源漂移。该 VM 的 audit EXECVE 仅落独立 audit 源，故 journald→exec 的代码路径仍由 Docker/契约测试覆盖，不宣称本次实机产生了 journald exec event。
 
@@ -45,9 +45,9 @@ Helper 启动时返回 v2 Capability，包含 Namespace 级别的实际 verb/fie
 | --- | --- | --- |
 | WebShell / Web 攻击链 | Nginx/Apache 配置发现、`root/alias/DocumentRoot`、近期脚本/模板/WAR/JAR、上传临时目录、`.user.ini/.htaccess`、批量 YARA（规则由 `install-helper.sh` 下发并校验 SHA-256）、Access Log（含轮转与 `.gz` 归档、多站点子目录，返回 `scannedLogs`）、Web 进程与打开文件关联；脚本片段在超预算时返回文件头与文件尾两段 | Apache/PHP-FPM 复杂 Include、发布基线和时间戳回改仍需真实语料验收；`rules/yara/webshell.yar` 仅 5 条有效行为规则，误报率未度量。Access Log 路径仍是固定 glob，尚未从 `nginx -T` 的 `access_log` 指令推导。 |
 | Java 内存马 | Tomcat 9/JDK 17 Filter/Servlet/Listener/Valve/WebSocket、Spring MVC 映射/Interceptor、ClassLoader/CodeSource、JVM/线程/Connector 诊断、Class Dump SFTP Evidence | 自动化仅验证 Tomcat 9/JDK 17；Tomcat 8.5/10 和 JDK 8/11/21 尚未列为已验证。 |
-| 后门账户 | UID 0、sudo/wheel、NSS 来源标识、账户状态、Key 指纹、登录历史 | **v2 尚未采集 sudoers/doas/polkit 委派配置与有效 sshd 信任配置**；SSSD/LDAP 真实目录、云登录日志亦待 VM 验收。 |
+| 后门账户 | UID 0、sudo/wheel、账户状态、Key 指纹、sudoers/doas/polkit 委派语句、`sshd -T` 默认上下文有效信任配置、登录历史 | `sshd Match` 的逐用户/逐来源地址上下文、SSSD/LDAP 真实目录、云登录日志仍待扩展与 VM 验收。 |
 | Linux 持久化 | Cron、systemd service/timer/drop-in/generated/transient、SSH、Shell、at/anacron、SysV/rc.local、XDG、PAM、udev、modprobe、cloud-init、包管理 Hook、user linger | initramfs 内容解析和 transient unit 的 D-Bus 运行态详情尚未实现。 |
-| Linux 入侵分诊 | 稳定进程身份、进程树/FD/maps/socket、删除后运行、近期/特权文件、dpkg/rpm、动态加载（`ld.so.preload`/`ld.so.conf` 的条目路径始终报告，落在固定采集根之外时给出显式 warning 并置 `PARTIAL`）、按主机时区解析的认证/audit 时间线；journald 与 `auth.log`/`secure` 轮转及 `.gz` 归档多源去重合并 | 尚未采集 wtmp/btmp 与独立 sudo 日志；journal cursor 增量采集未实现。固定采集根不含 `/etc`、`/usr/lib`、`/var`、`/srv`，落在其中的可执行文件与预加载库只有路径没有文件事实；进程环境只回变量名不回取值，audit 不回 EXECVE 参数。 |
+| Linux 入侵分诊 | 稳定进程身份、进程树/FD/maps/socket、删除后运行、Preset 固定绑定 `/usr/bin` 与 `/tmp` file Scope、dpkg/rpm inventory、`package → owns_file → verify(package_db)` 抽样基线、动态加载、按主机时区解析的认证/audit 时间线；journald 与轮转日志多源去重合并 | Scope 枚举与包校验是有界抽样，达到节点上限会明确 `PARTIAL`，不能解释为全盘完整性证明；尚未采集 wtmp/btmp 与独立 sudo 日志，journal cursor 增量采集未实现。 |
 | 安恒威胁情报富化 | 当前任务 v2 Socket `OBJ-*` 公网外联引用、分析师预置 IP/域名/文件哈希、批量查询、本地缓存、Evidence、审计与 GUI 情报视图；2026-08-10 使用真实 Key 完成人工在线验收 | 外部命中不能单独形成 `CONFIRMED_MALICIOUS`；情报数据质量仍需持续观察。 |
 
 ## 数据与处置边界

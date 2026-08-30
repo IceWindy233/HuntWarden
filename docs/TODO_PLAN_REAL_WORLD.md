@@ -2,7 +2,7 @@
 
 > 文档用途：记录 HuntWarden 从 Docker Lab MVP 演进为真实主机专项检测与受控查杀 Agent 的长期功能路线；它不是 Tool Protocol v2 的完成定义或当前门禁记录。
 >
-> 最近更新：2026-08-29
+> 最近更新：2026-08-30
 >
 > **权威性声明**：本文只负责**检测能力、语料质量与平台覆盖**的长期路线。协议与完成定义以 [`TOOL_PROTOCOL_V2_DESIGN.md`](TOOL_PROTOCOL_V2_DESIGN.md) 为准，当前门禁以 [`V2_INVARIANT_VERIFICATION.md`](V2_INVARIANT_VERIFICATION.md) 为准，平台声明以 [`SUPPORT_MATRIX.md`](SUPPORT_MATRIX.md) 为准。旧的 Finding、HostOperation、52 操作和历史测试数量仅作为演进背景，不得解释为当前 v2 状态。
 
@@ -25,7 +25,7 @@
 
 工作队列按优先级冻结为：
 
-1. **补齐 v2 首批最低覆盖**：Web effective root、委派配置、有效 SSH trust，以及分诊 file scope/package verify。
+1. **扩大 v2 首批最低覆盖的跨发行版验收**：Web effective root、委派配置、有效 SSH trust，以及分诊 file scope/package verify 已实现；下一步补齐 `sshd Match` 上下文与更多发行版 fixture。
 2. **处置 fail-close 与可逆性**：完整账户信任面、动作后定向复扫、`restore_quarantined_file` / `restore_account_state`。
 3. **扩展 golden fixture 与 Helper 测试**：固化八个原语、维护动词和跨发行版 collector 输出。
 4. **真实语料与误报基线**：真实 WebShell/内存马语料、真实 CMS 良性对照，产出可复算的召回率/精确率报告。
@@ -320,10 +320,10 @@ interface TargetTransport {
 
 ### 7.3 后门账户与认证
 
-- [ ] 在 v2 通用 Namespace/Fact 中采集 `/etc/sudoers`、`sudoers.d`、doas 和 polkit 委派配置；v1 collector 已删除。
+- [x] 在 v2 通用 `delegation_rule` Namespace/Fact 中采集 `/etc/sudoers`、`sudoers.d`、doas 和 polkit 委派配置；可选设施不存在不形成缺口。
 - [x] 使用 NSS `id/getent` 结果并标识 local/nss_directory 来源；真实 SSSD/LDAP 嵌套组待 VM 验收。
-- [ ] 在 v2 中解析 sshd `Include`、`Match` 和有效 `AuthorizedKeysFile`。
-- [ ] 在 v2 中检查 `AuthorizedKeysCommand`、SSH CA 和 authorized principals。
+- [x] 通过 `sshd -T` 采集默认连接上下文的有效 `Include` 结果、`AuthorizedKeysFile`、`AuthorizedKeysCommand`、SSH CA 与 authorized principals 配置。
+- [ ] 对 `Match` 条件使用显式 `sshd -T -C` 上下文做逐用户/来源地址展开；当前默认上下文结果不得外推。
 - [ ] 关联 journal/auditd、失败登录、sudo/su 和云登录记录。
 - [x] 将 `checkAuthorizedKeys`、`checkLoginHistory` 配置真正接入执行图。
 

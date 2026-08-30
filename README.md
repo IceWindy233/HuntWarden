@@ -80,9 +80,9 @@ sequenceDiagram
 | --- | --- |
 | WebShell / Web 攻击链 | Nginx/Apache 技术栈与 Web Root、近期脚本/模板/WAR 候选、受控文本读取、literal/RE2 匹配与文件基线校验 |
 | Java 内存马 | Tomcat Filter/Servlet/Listener/Valve/WebSocket、Spring MVC 映射与 Interceptor、ClassLoader/CodeSource/ProtectionDomain、只读 Class Dump（不清除、不重定义、不重启 JVM） |
-| 后门账户 | UID 0、sudo/wheel、NSS 来源、账户状态、SSH Key 指纹与登录历史；sudoers/doas/polkit 委派配置及有效 sshd 信任配置尚未迁移到 v2 |
+| 后门账户 | UID 0、sudo/wheel、账户状态、SSH Key 指纹、sudoers/doas/polkit 委派配置、`sshd -T` 默认上下文有效信任配置与登录历史 |
 | Linux 持久化 | Cron、systemd service/timer/drop-in/generated/transient、at/anacron、SysV/rc.local、XDG、PAM、udev、modprobe、cloud-init、包管理 Hook |
-| Linux 入侵分诊 | 稳定进程身份、进程树/FD/maps/socket、删除后运行、近期与特权文件、dpkg/rpm 完整性、动态加载、按主机时区解析的认证与执行时间线 |
+| Linux 入侵分诊 | 稳定进程身份、进程树/FD/maps/socket、删除后运行、固定 file Scope、dpkg/rpm inventory 与 `package_db` 抽样验证、动态加载、按主机时区解析的认证与执行时间线 |
 | 外部情报 | 安恒威胁情报受控富化；只接受当前任务已建立的 socket/file/task IOC/Evidence 引用，私网地址本地过滤，命中不能单独形成 `CONFIRMED_MALICIOUS` |
 
 ## 五分钟本地验证

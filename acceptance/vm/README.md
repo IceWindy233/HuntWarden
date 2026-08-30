@@ -2,7 +2,7 @@
 
 该入口用于授权临时 Linux VM 的 v2 只读验收；当前发布门槛为 Ubuntu 24.04 ARM64，Rocky Linux 9 x86_64/SELinux 保留为后续非阻塞兼容性验证。它只调用以下固定 v2 只读/证据动词：
 
-最近一次已完成记录：[`Ubuntu 24.04.4 ARM64 GUI 只读验收`](../../docs/acceptance/VM_UBUNTU_24.04_ARM64_2026-08-20.md)，结果为 `PASS_WITH_LIMITATIONS`。该记录属于 v1 历史基线；v2 必须重新执行本页冒烟，不能沿用该记录关闭发布 Gate。
+最近一次 P1 增量记录：[`Ubuntu 24.04.4 ARM64 v2 P1 验收`](../../docs/acceptance/VM_UBUNTU_24.04_ARM64_V2_P1_2026-08-30.md)，结果为 `PASS_WITH_LIMITATIONS`。完整 GUI/Provider v2 基线见 [`2026-08-26 记录`](../../docs/acceptance/VM_UBUNTU_24.04_ARM64_V2_2026-08-26.md)；P1 记录只证明其列明的增量能力，不能代替尚未重跑的 Provider 模型评测。
 
 - `capabilities`
 - `enumerate`（host/process/file/account/cron_entry/unit/persistence/jvm）
@@ -31,7 +31,7 @@ Rocky/Alma/RHEL 在 SELinux Enforcing 下安装时，`install-helper.sh` 会在�
 # 最低依赖那一遍：记录缺少 yara/auditd/JDK 时的能力降级
 acceptance/vm/bootstrap-multipass.sh
 
-# 补齐完整依赖后复检（Ubuntu 发布 Gate 要求两遍都留档）
+# 补齐完整依赖后复检（YARA、auditd、JDK 与 nginx；Ubuntu 发布 Gate 要求两遍都留档）
 acceptance/vm/bootstrap-multipass.sh --full-deps
 
 # 验收完成后销毁

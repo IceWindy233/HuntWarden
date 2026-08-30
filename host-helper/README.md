@@ -76,7 +76,7 @@ sudo ./host-helper/self-check-helper.sh --executor-user <SSH用户>
 
 自检以执行用户身份经 sudo 调用 v2 `capabilities`，逐项输出：
 
-- 协议版本是否为 2、Manifest 是否精确为 `2.0.0`；
+- 协议版本是否为 2、Manifest 是否精确为 `2.1.0`；
 - 八个取证原语与核心 Namespace 是否齐备，且 Helper 没有错误声明 controller-local `task_ioc`；
 - 单次对象、输出、读取与 Evidence 采集硬上限；
 - literal/RE2/YARA matcher 与 JVM Probe 的当前可用子集；YARA 只有在内置版本化 RuleSet 与运行时同时可用时才声明。

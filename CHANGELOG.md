@@ -4,7 +4,16 @@
 
 ## [Unreleased]
 
-暂无。
+### Added
+
+- Tool Protocol v2 Manifest/Helper 升级为 `2.1.0`，新增通用 `delegation_rule` 与 `ssh_trust_config` Namespace；后门账户 Preset 现在采集 sudoers/doas/polkit 策略语句和 `sshd -T` 默认上下文有效信任配置。
+- Linux 分诊 Preset 通过固定策略绑定 `/usr/bin`、`/tmp` file Scope，并执行 `package → owns_file → verify(package_db)` 有界基线链路；新增软件包不一致确定性规则。
+- 新增 Ubuntu 24.04 ARM64 P1 增量实机验收记录；Helper `2.1.0` smoke 4/4 与 journald 回归 1/1 通过，限制与环境准备过程完整留档。
+
+### Changed
+
+- WebShell Preset 恢复请求 `web_root.effective`；只有运行时有效配置来源能完成该字段，静态或兜底 root 继续以 `FIELD_UNAVAILABLE` 明示不确定性。
+- 初始 Scope 的 `scope_resolve` 远程调用纳入 PRESET 持久预算，固定策略只存在于 `INITIAL_GRANT_POLICY`。
 
 ## [0.2.0] - 2026-08-29
 

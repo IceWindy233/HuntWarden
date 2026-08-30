@@ -2,17 +2,17 @@
 
 本表是 `TOOL_PROTOCOL_V2_DESIGN.md` 第 15 节的唯一验证归属清单。`PR` 为无外部环境的必跑门禁；`MERGE` 需要 Helper/Docker/GUI 环境；`RELEASE` 需要真实 VM 或平台矩阵。环境门禁未执行时只能标记“待验收”，不能据此宣称已验证。
 
-实现基线：HuntWarden `0.2.0` / `7318233e1327111de12895867e09bbee965df5e2`。文档收口提交只修改说明，不改变该实现基线。
+实现基线：Tool Protocol v2 Manifest/Helper `2.1.0` / `88d8198de6a30a079c245552208edaca3c606890`。`0.2.0` 发布标签仍对应 Manifest `2.0.0`；本表的当前门禁状态描述的是上述 P1 后续实现提交。
 
-## 当前门禁状态（2026-08-29）
+## 当前门禁状态（2026-08-30）
 
 | 层级 | 状态 | 本轮结果 |
 | --- | --- | --- |
-| PR | PASS | `npm test`：29 个文件通过、10 个环境项跳过，123 项通过、37 项跳过；核心/Renderer 类型检查、生产构建、零告警 lint、生产依赖审计、Java Probe、Helper Python 编译与 `git diff --check` 通过。P0 另有默认处置白名单回归，证明分发配置不再暴露 `disable_account`。 |
-| MERGE | PASS | 五套 Docker Lab 共 11/11 通过（包含 YARA 与 literal 的 `includeContext` 命中上下文、事件 `sourceId` 可在 `log_source` 解析、`contains` 覆盖 auth/log 事件、跨时间窗口的事件身份稳定性、Java Probe、日志脱敏、known hash 与五类 v1→v2 冻结能力等价）；GUI E2E 16/16：investigation 4/4、remediation 3/3、recovery 6/6、**grant 生命周期 3/3**；Debian 12 动态场景 5/5。 |
+| PR | PASS | `npm test`：30 个文件通过、10 个环境项跳过，124 项通过、37 项跳过；核心/Renderer 类型检查、生产构建、零告警 lint、生产依赖审计、Helper Python 编译、shell 语法与 `git diff --check` 通过。新增 P1 单测走通固定 Scope、真实 `package → owns_file → verify(package_db)` 链及 `MISMATCH` 规则裁定。 |
+| MERGE | PASS | 五套 Docker Lab 共 11/11 通过，并新增 sudoers/doas/polkit 与 `sshd -T` 默认上下文事实断言；GUI E2E 16/16：investigation 4/4、remediation 3/3、recovery 6/6、grant 生命周期 3/3；Debian 12 动态场景 5/5，包含 P1 新事实断言。REMEDIATE 默认关闭不完整账户处置的 fail-close 行为由 E2E 明确验证。 |
 | RELEASE / RE2 | PASS | macOS ARM64 与 Ubuntu 22.04 ARM64 均验证实际匹配及不支持反向引用时的 `INVALID_ARGUMENT`；见 `acceptance/RE2_MATRIX_2026-08-25.md`。 |
-| RELEASE / 真实 VM v2 | PASS_WITH_LIMITATIONS | Ubuntu 24.04.4 ARM64 的 v2 smoke 4/4、journald 专项 1/1、五类 QUICK、联合 STANDARD 与小上下文 DEEP 均完成；真实 VM 还验证了跨主机时钟漂移的 collect/SFTP/SHA-256，以及 journald generation、event/source join、稳定事件身份和跨页 `contains`。原始大上下文高推理 Profile 的长流式响应兼容性仍有限，现由单轮 600 秒超时 fail-close。详见 `acceptance/VM_UBUNTU_24.04_ARM64_V2_2026-08-26.md`。 |
-| RELEASE / 模型能力统计 | PASS | `siliconflow/deepseek-ai/DeepSeek-V4-Flash` 的冻结 novel malicious + benign 清单七项门槛全部通过：fact reachability 与 novel recall 100%，其余五项错误率 0%。结果见 `acceptance/MODEL_EVAL_2026-08-26.md`。 |
+| RELEASE / 真实 VM v2 | PASS_WITH_LIMITATIONS | Ubuntu 24.04.4 ARM64 上将 Helper 升级到 Manifest `2.1.0` 后，P1 smoke 4/4、journald 回归 1/1；新 Namespace、effective web root、固定 Scope 与 package verify 均通过。首次 smoke 因目标缺 nginx 与无害 Web fixture 失败，补齐发布依赖与安全夹具后按原断言重跑通过，夹具随后清理。此前五类 QUICK、联合 STANDARD 与小上下文 DEEP 仍由 2.0.0 基线记录承担，未冒充为 P1 重跑。详见 `acceptance/VM_UBUNTU_24.04_ARM64_V2_P1_2026-08-30.md`。 |
+| RELEASE / 模型能力统计 | PASS（沿用 2.0.0 语料） | `siliconflow/deepseek-ai/DeepSeek-V4-Flash` 的冻结 novel malicious + benign 清单七项门槛在 Manifest `2.0.0` 基线上全部通过。P1 没有新建已完成 Provider 任务语料，故未把该结果表述为 2.1.0 模型复验。结果见 `acceptance/MODEL_EVAL_2026-08-26.md`。 |
 
 | ID | 层级 | 自动化/验收归属 | 主要断言 |
 | --- | --- | --- | --- |
