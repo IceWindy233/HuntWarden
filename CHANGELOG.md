@@ -17,6 +17,10 @@
 - WebShell Preset 恢复请求 `web_root.effective`；只有运行时有效配置来源能完成该字段，静态或兜底 root 继续以 `FIELD_UNAVAILABLE` 明示不确定性。
 - 初始 Scope 的 `scope_resolve` 远程调用纳入 PRESET 持久预算，固定策略只存在于 `INITIAL_GRANT_POLICY`。
 
+### Fixed
+
+- Helper 在账户枚举前校验 Predicate，并只在显式请求 `groups`/`locked` 时读取扩展账户状态；无效参数不再被目标环境差异覆盖为 `INTERNAL_ERROR`，基础 `uid`/`username` 枚举也不再依赖 shadow/group 命令。
+
 ## [0.2.0] - 2026-08-29
 
 ### Changed
