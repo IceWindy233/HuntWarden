@@ -11,7 +11,7 @@
 | PR | PASS | `npm test`：30 个文件通过、10 个环境项跳过，124 项通过、37 项跳过；核心/Renderer 类型检查、生产构建、零告警 lint、生产依赖审计、Helper Python 编译、shell 语法与 `git diff --check` 通过。新增 P1 单测走通固定 Scope、真实 `package → owns_file → verify(package_db)` 链及 `MISMATCH` 规则裁定。 |
 | MERGE | PASS | 五套 Docker Lab 共 11/11 通过，并新增 sudoers/doas/polkit 与 `sshd -T` 默认上下文事实断言；GUI E2E 16/16：investigation 4/4、remediation 3/3、recovery 6/6、grant 生命周期 3/3；Debian 12 动态场景 5/5，包含 P1 新事实断言。REMEDIATE 默认关闭不完整账户处置的 fail-close 行为由 E2E 明确验证。 |
 | RELEASE / RE2 | PASS | macOS ARM64 与 Ubuntu 22.04 ARM64 均验证实际匹配及不支持反向引用时的 `INVALID_ARGUMENT`；见 `acceptance/RE2_MATRIX_2026-08-25.md`。 |
-| RELEASE / 真实 VM v2 | PASS_WITH_LIMITATIONS | Ubuntu 24.04.4 ARM64 上将 Helper 升级到 Manifest `2.1.0` 后，P1 smoke 4/4、journald 回归 1/1；新 Namespace、effective web root、固定 Scope 与 package verify 均通过。首次 smoke 因目标缺 nginx 与无害 Web fixture 失败，补齐发布依赖与安全夹具后按原断言重跑通过，夹具随后清理。此前五类 QUICK、联合 STANDARD 与小上下文 DEEP 仍由 2.0.0 基线记录承担，未冒充为 P1 重跑。详见 `acceptance/VM_UBUNTU_24.04_ARM64_V2_P1_2026-08-30.md`。 |
+| RELEASE / 真实 VM v2 | PASS_WITH_LIMITATIONS | Ubuntu 24.04.4 ARM64 / Manifest `2.1.0` 上，P1 smoke 4/4、journald 回归 1/1，新 Namespace、effective web root、固定 Scope 与 package verify 均通过；2026-09-01 又完成五类 × QUICK/STANDARD/DEEP 的 15 个正式 GUI/Provider 任务，152 次 ToolRun 0 失败、0 写入。另有一次 Provider 空响应和两次被 fail-close 的模型引用错误，均保留并同配置重跑通过，因此仍标限制。详见 `acceptance/VM_UBUNTU_24.04_ARM64_V2_P1_2026-08-30.md` 与 `acceptance/GUI_PROFILE_MATRIX_V2_P1_2026-09-01.md`。 |
 | RELEASE / 模型能力统计 | PASS | Manifest/Helper `2.1.0` 上重新创建并冻结 `siliconflow/deepseek-ai/DeepSeek-V4-Flash` 的 novel malicious + benign 已完成任务：事实可达率与 novel recall 均为 100%，截断损失、MODEL NOT_CONCLUDED、Preset partial、非法工具调用和良性误报均为 0%。七项门槛全部通过，结果见 `acceptance/MODEL_EVAL_P1_2026-08-30.md`。 |
 
 | ID | 层级 | 自动化/验收归属 | 主要断言 |

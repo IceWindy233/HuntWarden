@@ -8,7 +8,7 @@
 - 目标：Canonical Multipass Ubuntu 24.04 ARM64 临时 VM
 - Helper：协议 2，Manifest/Helper `2.1.0`
 
-本轮证明 P1 新增的委派配置、SSH 信任配置、Web effective root、固定 file Scope 与包数据库抽样校验能够在真实 Ubuntu 24.04 ARM64 目标上通过生产 Helper 路径运行，并重新创建 Manifest `2.1.0` 的真实 Provider 冻结语料、执行模型能力统计。它仍是对 2026-08-26 五类 QUICK/STANDARD/DEEP GUI 验收的增量复验，不声称重新执行了全部 Profile 矩阵。
+本轮证明 P1 新增的委派配置、SSH 信任配置、Web effective root、固定 file Scope 与包数据库抽样校验能够在真实 Ubuntu 24.04 ARM64 目标上通过生产 Helper 路径运行，并重新创建 Manifest `2.1.0` 的真实 Provider 冻结语料、执行模型能力统计。2026-09-01 又以当前高推理 Provider 配置完成五类 × QUICK/STANDARD/DEEP 的 15 个正式 GUI Profile；详见 [`GUI_PROFILE_MATRIX_V2_P1_2026-09-01.md`](GUI_PROFILE_MATRIX_V2_P1_2026-09-01.md)。
 
 ## 验收结果
 
@@ -23,6 +23,7 @@
 | 真实 VM | v2 smoke | 4/4 PASS |
 | 真实 VM | journald 身份/generation 回归 | 1/1 PASS |
 | 真实 Provider | Manifest `2.1.0` novel malicious + benign | 七项模型能力门槛 7/7 PASS |
+| 真实 GUI/Provider | 五类 × QUICK/STANDARD/DEEP | 15 个正式任务全部完成、152 次 ToolRun 0 失败；另保留 3 条首跑异常，结果 `PASS_WITH_LIMITATIONS` |
 
 VM smoke 具体验证：
 

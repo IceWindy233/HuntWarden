@@ -20,7 +20,7 @@
 
 - 虽已在 Manifest/Helper `2.1.0` 上重跑真实 Provider 的冻结 novel malicious + benign 发布评测并通过七项门槛，但尚未具备足量真实语料：当前仍是安全自造夹具，缺少真实 WebShell、内存马、发行版输出快照与良性站点，因此召回率与精确率不能代表真实站点。
 - v2 已有五类冻结能力等价语料、Helper 集成测试和 Docker Lab；仍需扩大 namespace collector 的跨发行版 golden fixture，特别是日志、NSS/SSSD、复杂 Web 配置与多版本 JVM。
-- Ubuntu 24.04 ARM64 已完成真实 GUI/Provider/SSH VM 只读验收（`PASS_WITH_LIMITATIONS`）；其余发行版、架构与受限能力组合未验收。
+- Ubuntu 24.04 ARM64 已在 Manifest `2.1.0` 上完成真实 GUI/Provider/SSH 的五类 × QUICK/STANDARD/DEEP 只读验收（`PASS_WITH_LIMITATIONS`）；其余发行版、架构与受限能力组合未验收，当前高推理 Provider 的空响应和引用幻觉仍需继续收敛。
 - 处置不可逆；`disable_account` 不处理密钥信任面，已从 `0.2.0` 默认白名单移除。
 
 工作队列按优先级冻结为：

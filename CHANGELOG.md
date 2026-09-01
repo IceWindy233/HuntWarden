@@ -10,6 +10,7 @@
 - Linux 分诊 Preset 通过固定策略绑定 `/usr/bin`、`/tmp` file Scope，并执行 `package → owns_file → verify(package_db)` 有界基线链路；新增软件包不一致确定性规则。
 - 新增 Ubuntu 24.04 ARM64 P1 增量实机验收记录；Helper `2.1.0` smoke 4/4 与 journald 回归 1/1 通过，限制与环境准备过程完整留档。
 - 新增 Manifest `2.1.0` 真实 Provider P1 发布评测：重新冻结 novel malicious + benign 已完成任务，七项门槛全部通过；模型评测脚本新增可独立安装、loopback-only 的 effective-root 专项夹具。
+- 新增 Ubuntu 24.04 ARM64 / Manifest `2.1.0` 的五类 × QUICK/STANDARD/DEEP 真实 GUI Profile 完整复验：15 个正式任务、152 次 ToolRun 零失败，报告引用校验通过；同时保留 Provider 空响应与两次被 fail-close 的引用错误首跑记录。
 
 ### Changed
 

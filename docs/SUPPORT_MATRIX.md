@@ -4,7 +4,7 @@
 >
 > 最近基线：Ubuntu 24.04.4 ARM64 已用真实 GUI、Provider、SSH 和 root Helper 完成 QUICK/STANDARD/DEEP 只读 VM 验收，并完成缺少 YARA、auditd、JDK Attach 的最低依赖降级补测，结果为 `PASS_WITH_LIMITATIONS`；详见 [`VM_UBUNTU_24.04_ARM64_2026-08-20.md`](acceptance/VM_UBUNTU_24.04_ARM64_2026-08-20.md)。Rocky Linux 9 x86_64/SELinux 及其余矩阵仍待执行，但不属于 `0.2.0` 的阻塞门槛。
 >
-> v2 完整 GUI/Provider 基线：[`VM_UBUNTU_24.04_ARM64_V2_2026-08-26.md`](acceptance/VM_UBUNTU_24.04_ARM64_V2_2026-08-26.md)；P1 增量实机复验：[`VM_UBUNTU_24.04_ARM64_V2_P1_2026-08-30.md`](acceptance/VM_UBUNTU_24.04_ARM64_V2_P1_2026-08-30.md)。综合结果为 `PASS_WITH_LIMITATIONS`。
+> v2 完整 GUI/Provider 基线：[`VM_UBUNTU_24.04_ARM64_V2_2026-08-26.md`](acceptance/VM_UBUNTU_24.04_ARM64_V2_2026-08-26.md)；P1 实机复验：[`VM_UBUNTU_24.04_ARM64_V2_P1_2026-08-30.md`](acceptance/VM_UBUNTU_24.04_ARM64_V2_P1_2026-08-30.md)；Manifest `2.1.0` 五类 × 三 Profile：[`GUI_PROFILE_MATRIX_V2_P1_2026-09-01.md`](acceptance/GUI_PROFILE_MATRIX_V2_P1_2026-09-01.md)。综合结果为 `PASS_WITH_LIMITATIONS`。
 >
 > Manifest/Helper `2.1.0` 已重新创建真实 Provider 发布评测语料：冻结的惰性 novel malicious 与独立 benign 场景七项门槛全部通过；详见 [`MODEL_EVAL_P1_2026-08-30.md`](acceptance/MODEL_EVAL_P1_2026-08-30.md)。另有 loopback-only effective-root 专项任务验证 P1 Web 根识别，但因该任务 Coverage 为 `PARTIAL/UNKNOWN`，未混入七项统计门槛。语料仍是自造安全夹具，不能外推为真实站点召回率或误报率。
 
@@ -23,7 +23,7 @@
 | 平台 | 状态 | 当前说明 |
 | --- | --- | --- |
 | Ubuntu 22.04 arm64/x86_64 | Docker 已验证 | 五套 Lab 使用 Ubuntu 22.04；真实 VM 仍需验收。 |
-| Ubuntu 24.04 ARM64 | v1 已验证（有限制）；v2 PASS_WITH_LIMITATIONS | v2 在 24.04.4 / kernel 6.8 / systemd / AppArmor 上完成真实 GUI + SiliconFlow DeepSeek V4 Flash + SSH、5 QUICK、1 STANDARD、小上下文 DEEP、smoke 4/4 与 novel/benign 模型评测。最低依赖降级、完整依赖 Helper v2 自检和跨时钟 Artifact 传输均通过；原始高推理大上下文 Profile 的 Provider 长流兼容性仍有限。 |
+| Ubuntu 24.04 ARM64 | v1 已验证（有限制）；v2 PASS_WITH_LIMITATIONS | v2 在 24.04.4 / kernel 6.8 / systemd / AppArmor 上完成真实 GUI + SiliconFlow DeepSeek V4 Flash + SSH、Manifest `2.1.0` 五类 × QUICK/STANDARD/DEEP、smoke 4/4 与 novel/benign 模型评测。15 个正式 Profile 任务均完成且 152 次 ToolRun 0 失败；首跑仍出现 1 次空响应和 2 次被 fail-close 的引用错误，高推理长流兼容性因此继续标限制。 |
 | Ubuntu 24.04 x86_64 | 待实机验收 | ARM64 结果不能外推为 x86_64。 |
 | Debian 12 ARM64 | 动态容器场景已验证，待实机验收 | 非固定 Debian 12 场景 5/5 通过，覆盖发行版识别与行为样本；不等同于标准 systemd VM。 |
 | Rocky / AlmaLinux 9 | 待实机验收（非 0.2.0 阻塞） | rpm、`secure` 日志和 SELinux 能力识别已实现；当前主要使用场景以 Ubuntu 为主。 |

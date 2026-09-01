@@ -2,7 +2,7 @@
 
 该入口用于授权临时 Linux VM 的 v2 只读验收；当前发布门槛为 Ubuntu 24.04 ARM64，Rocky Linux 9 x86_64/SELinux 保留为后续非阻塞兼容性验证。它只调用以下固定 v2 只读/证据动词：
 
-最近一次 P1 增量记录：[`Ubuntu 24.04.4 ARM64 v2 P1 验收`](../../docs/acceptance/VM_UBUNTU_24.04_ARM64_V2_P1_2026-08-30.md)，结果为 `PASS_WITH_LIMITATIONS`。完整 GUI/Provider v2 基线见 [`2026-08-26 记录`](../../docs/acceptance/VM_UBUNTU_24.04_ARM64_V2_2026-08-26.md)；P1 已重新执行冻结 Provider 模型评测，但未重跑五类 QUICK/STANDARD/DEEP 的全部 GUI Profile 矩阵。
+最近一次 P1 实机记录：[`Ubuntu 24.04.4 ARM64 v2 P1 验收`](../../docs/acceptance/VM_UBUNTU_24.04_ARM64_V2_P1_2026-08-30.md)，结果为 `PASS_WITH_LIMITATIONS`。Manifest `2.1.0` 五类 × QUICK/STANDARD/DEEP 已于 2026-09-01 完整重跑，见 [`GUI Profile 矩阵`](../../docs/acceptance/GUI_PROFILE_MATRIX_V2_P1_2026-09-01.md)；首跑空响应与模型引用错误仍按限制保留。
 
 - `capabilities`
 - `enumerate`（host/process/file/account/cron_entry/unit/persistence/jvm）
