@@ -117,8 +117,8 @@ npm run test:docker
 
 诚实优于好看，以下均为当前真实状态：
 
-- **真实模型发布结果仍只覆盖安全自造语料。** 2026-08-26 的冻结 novel malicious + benign 评测七项门槛全部通过，但不能外推为真实站点召回率或误报率。报告里的 `NO_OBSERVED_FINDING` 不应被当作「已排查干净」。
-- **真实发行版 VM 矩阵尚未完整。** Ubuntu 24.04 ARM64 的 v2 重跑已通过真实 GUI/Provider/SSH/root Helper、五类 QUICK、联合 STANDARD、小上下文 DEEP、smoke 4/4 与模型评测，结果为 `PASS_WITH_LIMITATIONS`；原始高推理大上下文 Provider 长流兼容性仍有限。Ubuntu 22.04 仅经 Docker 验证，Debian 12 仅经动态容器场景验证，其余平台仍待实机验收。各平台状态见 [`docs/SUPPORT_MATRIX.md`](docs/SUPPORT_MATRIX.md)。
+- **真实模型发布结果仍只覆盖安全自造语料。** Manifest `2.1.0` 的冻结 novel malicious + benign 评测七项门槛全部通过，但不能外推为真实站点召回率或误报率。报告里的 `NO_OBSERVED_FINDING` 不应被当作「已排查干净」。
+- **真实发行版 VM 矩阵尚未完整。** Ubuntu 24.04 ARM64 已通过真实 GUI/Provider/SSH/root Helper、五类 × QUICK/STANDARD/DEEP、smoke 4/4、journald 1/1 与模型评测，结果为 `PASS_WITH_LIMITATIONS`；高推理 Provider 首跑仍出现过空响应和非法引用。Ubuntu 22.04 仅经 Docker 验证，Debian 12 仅经动态容器场景验证，其余平台仍待实机验收。各平台状态见 [`docs/SUPPORT_MATRIX.md`](docs/SUPPORT_MATRIX.md)。
 - **Java 检测只在 Tomcat 9 / JDK 17 上验证过。**
 - **事实可达不等于未采集数据可见。** `query_facts` 能到达当前任务已采集的 Model Fact，但每个原语仍受 scope、Capability、cursor 和持久化 Budget 约束；上限、权限或依赖造成的缺口会显式写入 Coverage。
 - **YARA 与哈希基线都只开放版本化引用。** Helper 在 YARA 依赖和内置规则文件均可用时声明 `yara`，模型只能选择静态注册的 `RuleSetRef`，不能提交源码或路径；RE2 同样只在依赖实际存在时声明。`known_hash_set` 由分析师在控制端导入，名称与版本不可变；模型只见 `DATASET-*` 引用，集合内容不发送目标机。`package_db` 基线校验也已可用。
@@ -137,12 +137,11 @@ npm run test:docker
 | [`docs/TOOL_PROTOCOL_V2_DESIGN.md`](docs/TOOL_PROTOCOL_V2_DESIGN.md) | v2 类型化取证能力协议与运行时设计（协议、数据模型、安全边界、验收口径） |
 | [`docs/TODO_PLAN_REAL_WORLD.md`](docs/TODO_PLAN_REAL_WORLD.md) | 检测能力与平台覆盖的长期路线 |
 | [`docs/adr/`](docs/adr/) | 架构决策记录 |
-| [`docs/acceptance/`](docs/acceptance/) | 真实 VM 验收模板与已完成的验收记录（含 Ubuntu 24.04 ARM64 完整依赖与最低依赖结果） |
+| [`docs/acceptance/`](docs/acceptance/) | 当前 V2 验收模板、Ubuntu 24.04 ARM64 P1 实机记录、完整 GUI Profile 矩阵与模型评测 |
 | [`acceptance/vm/README.md`](acceptance/vm/README.md) | 授权临时 VM 的只读冒烟入口与无害夹具 |
 | [`acceptance/model-eval/README.md`](acceptance/model-eval/README.md) | 真实模型统计评测清单、阈值、指标与可复现命令 |
 | [`docs/releases/`](docs/releases/) | 各版本发布说明、下载校验与安全提示 |
 | [`CHANGELOG.md`](CHANGELOG.md) | 版本变化 |
-| [`docs/history/`](docs/history/) | 已完成计划的历史归档，不作为待办依据 |
 
 ## 目录
 

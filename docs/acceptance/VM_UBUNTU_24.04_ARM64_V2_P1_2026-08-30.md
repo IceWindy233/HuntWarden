@@ -1,4 +1,4 @@
-# Ubuntu 24.04 ARM64 Tool Protocol v2 P1 增量验收
+# Ubuntu 24.04 ARM64 Tool Protocol v2 P1 验收记录
 
 ## 结论
 
@@ -8,7 +8,7 @@
 - 目标：Canonical Multipass Ubuntu 24.04 ARM64 临时 VM
 - Helper：协议 2，Manifest/Helper `2.1.0`
 
-本轮证明 P1 新增的委派配置、SSH 信任配置、Web effective root、固定 file Scope 与包数据库抽样校验能够在真实 Ubuntu 24.04 ARM64 目标上通过生产 Helper 路径运行，并重新创建 Manifest `2.1.0` 的真实 Provider 冻结语料、执行模型能力统计。2026-09-01 又以当前高推理 Provider 配置完成五类 × QUICK/STANDARD/DEEP 的 15 个正式 GUI Profile；详见 [`GUI_PROFILE_MATRIX_V2_P1_2026-09-01.md`](GUI_PROFILE_MATRIX_V2_P1_2026-09-01.md)。
+本记录是当前 Ubuntu 24.04 ARM64 的 V2 实机基线。它证明委派配置、SSH 信任配置、Web effective root、固定 file Scope、包数据库抽样校验、collect/SFTP/SHA-256 与日志源身份能够通过生产 Helper 路径运行，并重新创建 Manifest `2.1.0` 的真实 Provider 冻结语料、执行模型能力统计。2026-09-01 又以当前高推理 Provider 配置完成五类 × QUICK/STANDARD/DEEP 的 15 个正式 GUI Profile；详见 [`GUI_PROFILE_MATRIX_V2_P1_2026-09-01.md`](GUI_PROFILE_MATRIX_V2_P1_2026-09-01.md)。
 
 ## 验收结果
 
@@ -31,7 +31,7 @@ VM smoke 具体验证：
 - 后门账户路径可以枚举 sudoers/doas/polkit 委派事实和 `sshd -T` 默认上下文有效配置。
 - Web 路径可得到运行时有效 `web_root.effective`。
 - Linux 分诊固定绑定 `/usr/bin`、`/tmp` Scope，并可执行 `package → owns_file → verify(package_db)` 有界链路。
-- 原有 collect/SFTP/SHA-256 与 journald source/event 身份回归继续通过。
+- collect/SFTP/SHA-256 与 journald source/event 身份回归通过。
 
 ## 环境准备与清理
 

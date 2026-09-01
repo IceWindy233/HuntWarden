@@ -41,7 +41,7 @@
 - 后门账户三个 Profile 均仅因 `login-history/PARTIAL_SOURCE` 为 `PARTIAL/UNKNOWN`，MODEL 均以 `INCONCLUSIVE` 收尾；P1 的 delegation 与有效 SSH trust 事实仍正常落库。
 - 持久化三个 Profile 的 systemd、SSH、shell/loader、extended 来源均明示 `PARTIAL_SOURCE`；没有把不完整覆盖解释为安全。
 - 分诊三个 Profile 均执行固定 `/usr/bin`、`/tmp` Scope 和 `package → owns_file → verify(package_db)` 路径；volatile、file scope、event、package inventory/verify 的有界缺口继续以 `PARTIAL_SOURCE` 呈现。
-- 15 个正式任务全部为 `SCAN`，成功写工具 0、Action Receipt 0。为隔离 Profile/Provider 行为，本轮提示禁止 Sensitive-read Grant、`read/match/collect` 与处置；因此本轮不重复声称 Evidence 内容链，Evidence 路径仍由 2026-08-26 记录承担。
+- 15 个正式任务全部为 `SCAN`，成功写工具 0、Action Receipt 0。为隔离 Profile/Provider 行为，本轮提示禁止 Sensitive-read Grant、`read/match/collect` 与处置；因此本轮不重复声称 Evidence 内容链，该链路由当前 P1 实机记录中的 smoke 4/4 承担。
 
 ## 首跑异常与 fail-close
 

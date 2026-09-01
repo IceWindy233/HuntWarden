@@ -1,8 +1,8 @@
 # HuntWarden v2 类型化取证能力协议与运行时设计
 
-> 状态：Accepted / v2.1 P1 实施基线（2026-08-30）
+> 状态：Accepted / v2.1 P1 验证基线（2026-09-01）
 >
-> 发布基线：HuntWarden `0.2.0` / Manifest `2.0.0`，实现提交 `7318233e1327111de12895867e09bbee965df5e2`。当前 P1 实施基线：Manifest/Helper `2.1.0`，实现提交 `88d8198de6a30a079c245552208edaca3c606890`。
+> 当前实现：Manifest/Helper `2.1.0`。代码与门禁基线为 `331d395e8f00b020490a32ebecf39e297815e36b`；最新实机和 GUI Profile 结果由 [`V2_INVARIANT_VERIFICATION.md`](V2_INVARIANT_VERIFICATION.md) 统一索引。
 >
 > 决策：v2 直接替换 v1，不提供运行时双协议兼容；旧任务只保证可读，不保证恢复执行。
 >
@@ -866,22 +866,9 @@ v1 → v2 必须使用显式、可测试的结构迁移，而不是简单补默�
 
 ---
 
-## 16. 实施顺序与完成定义
+## 16. 完成状态
 
-推荐顺序：
-
-1. 冻结 v1 Lab fixture、规则输出和性能基线。
-2. 定义 Manifest / Wire / Fact / Ref / Epoch / Assessment 类型。
-3. 建立 RuntimeStore v2 schema 和 Query AST。
-4. 实现 Helper 框架、预算、predicate、cursor，以及 file/process 两个 namespace。
-5. 打通 `enumerate/project/read/match/collect → Fact Store → query_facts` 垂直链。
-6. 迁移其余 namespace、relation、verify、probe。
-7. 把 v1 检测工具重写为 Preset，规则迁移为 RULE Assessment。
-8. 切换 Agent 生命周期、系统提示词和模型工具表。
-9. 切换报告、GUI、恢复和处置引用。
-10. 删除 v1 operation map、旧工具定义和 Helper v1 运行时代码。
-
-v2 完成必须同时满足：
+V2 实现已经满足以下完成条件：
 
 - 模型远程工具不再按检测问题枚举；
 - 五类现有检测都在 v2 Fact + Preset + RULE Assessment 上运行；
@@ -891,11 +878,13 @@ v2 完成必须同时满足：
 - INV-01 ~ INV-28 均有自动化或 release 层验证归属；
 - 仓库不存在运行时 Helper v1 协议分支。
 
+2026-09-01 的发布层状态为 `PASS_WITH_LIMITATIONS`：Ubuntu 24.04 ARM64 已完成真实 VM smoke、journald、模型评测和五类 × 三 Profile 验收，但 Provider 首跑空响应、非法引用与其他发行版尚未覆盖仍需保留为限制。后续工作只记录在 [`TODO_PLAN_REAL_WORLD.md`](TODO_PLAN_REAL_WORLD.md)，不再在设计正文保留已执行的迁移步骤。
+
 ---
 
-## 17. 编码前必须冻结的协议常量
+## 17. 冻结的协议常量
 
-实现开始前通过 ADR 或本文件修订冻结：
+以下常量必须通过本文件或明确 ADR 修订，不能在实现中隐式漂移：
 
 - Manifest v2.1 完整 namespace/field/relation 表；
 - 字段 sensitivity/modelExposure；

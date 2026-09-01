@@ -2,9 +2,9 @@
 
 本表是 `TOOL_PROTOCOL_V2_DESIGN.md` 第 15 节的唯一验证归属清单。`PR` 为无外部环境的必跑门禁；`MERGE` 需要 Helper/Docker/GUI 环境；`RELEASE` 需要真实 VM 或平台矩阵。环境门禁未执行时只能标记“待验收”，不能据此宣称已验证。
 
-实现基线：Tool Protocol v2 Manifest/Helper `2.1.0` / `88d8198de6a30a079c245552208edaca3c606890`。`0.2.0` 发布标签仍对应 Manifest `2.0.0`；本表的当前门禁状态描述的是上述 P1 后续实现提交。
+实现与门禁基线：Tool Protocol v2 Manifest/Helper `2.1.0` / `331d395e8f00b020490a32ebecf39e297815e36b`。
 
-## 当前门禁状态（2026-08-30）
+## 当前门禁状态（2026-09-01）
 
 | 层级 | 状态 | 本轮结果 |
 | --- | --- | --- |

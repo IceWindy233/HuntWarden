@@ -40,7 +40,7 @@
 - 新增五类 `v1→v2` 冻结能力等价语料与 Docker 门禁，证明旧版能力子集可由 v2 通用 Namespace、Relation、Matcher、Verify 与 Probe 到达。
 - 新增 macOS ARM64 + Ubuntu 22.04 ARM64 RE2 语义矩阵，验证实际匹配及不支持语法必须返回 `INVALID_ARGUMENT`，禁止回退 Python `re`。
 - 新增真实模型能力统计评测入口与严格标签清单，基于 QuerySnapshot provenance 统计事实可达率、截断、模型结论、Preset 覆盖、新颖召回、良性误报、无效工具调用及 Token/延迟/远程成本。
-- 新增 Ubuntu 24.04.4 ARM64 的 v2 真实 VM 只读验收记录与首个真实 Provider 模型能力统计结果（冻结 novel malicious + benign 清单，七项门槛全部通过）：见 `docs/acceptance/VM_UBUNTU_24.04_ARM64_V2_2026-08-26.md` 与 `docs/acceptance/MODEL_EVAL_2026-08-26.md`。
+- 完成 Ubuntu 24.04.4 ARM64 的首轮 V2 真实 VM 只读验收与 Provider 模型能力统计；现行 Manifest `2.1.0` 结果已合并到 `docs/acceptance/VM_UBUNTU_24.04_ARM64_V2_P1_2026-08-30.md` 与 `docs/acceptance/MODEL_EVAL_P1_2026-08-30.md`。
 - 新增配置键 `agent.providerTimeoutSeconds`（默认 600 秒）：单轮 Provider 流式请求硬超时，覆盖首 token 与流中停滞，旧 Profile 迁移时自动注入。
 - 新增 GUI Sensitive-read Grant 生命周期 E2E（`tests/e2e/gui-grant.test.ts`，门控 `HUNTWARDEN_GUI_GRANT_TESTS`）：批准后 Grant 绑定申请对象并 ACTIVE、拒绝后落 `InvestigationGap(GRANT_DENIED)` 且无 Grant、撤销后立即失效且理由进审计。INV-16/INV-17 的 GUI 层覆盖由此补齐。
 
