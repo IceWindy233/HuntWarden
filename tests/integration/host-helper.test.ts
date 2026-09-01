@@ -80,6 +80,29 @@ except ns["HelperError"] as exc:
     rejected = exc.code
 print(json.dumps({"accepted": accepted, "rejected": rejected}))
 `;
+const accountEnumerationHarness = `
+import json, runpy, sys, types
+ns = runpy.run_path(sys.argv[1])
+enumerate_fn = ns["v2_enumerate"]
+globals_dict = enumerate_fn.__globals__
+account = types.SimpleNamespace(pw_uid=1000, pw_name="fixture", pw_gid=1000, pw_dir="/home/fixture", pw_shell="/bin/bash")
+globals_dict["pwd"] = types.SimpleNamespace(getpwall=lambda: [account])
+inspections = {"count": 0}
+def forbidden_inspection(_request):
+    inspections["count"] += 1
+    raise RuntimeError("basic account enumeration must not inspect shadow/group data")
+globals_dict["inspect_account"] = forbidden_inspection
+objects, _edges, _cursor, _gaps = enumerate_fn({"namespace": "account", "fields": ["uid", "username"], "limit": 1}, "EPOCH-ACCOUNT")
+def exploding_accounts():
+    raise RuntimeError("collector must not run before predicate validation")
+globals_dict["pwd"] = types.SimpleNamespace(getpwall=exploding_accounts)
+try:
+    enumerate_fn({"namespace": "account", "fields": ["uid"], "predicate": {"op": "eq", "field": "invented", "value": 0}, "limit": 1}, "EPOCH-PREDICATE")
+    invalid_code = None
+except ns["HelperError"] as exc:
+    invalid_code = exc.code
+print(json.dumps({"fields": sorted(objects[0]["fields"]), "inspections": inspections["count"], "invalidCode": invalid_code}))
+`;
 const advancingJournalRelationHarness = `
 import json, runpy, sys
 ns = runpy.run_path(sys.argv[1])
@@ -251,6 +274,12 @@ describe("目标辅助程序边界", () => {
     expect(result.envelope).toMatchObject({ protocolVersion: 2, requestId: "REQ-ACCOUNT", objects: [{ namespace: "account" }] });
     const fields = (result.envelope.objects as Array<{ fields: Record<string, unknown> }>)[0]!.fields;
     expect(Object.keys(fields).sort()).toEqual(["uid", "username"]);
+  });
+
+  it("账户基础枚举不读取扩展账户状态，Predicate 在采集前完成校验", () => {
+    const result = spawnSync("python3", ["-c", accountEnumerationHarness, helper], { encoding: "utf8" });
+    expect(result.status, result.stderr).toBe(0);
+    expect(JSON.parse(result.stdout)).toEqual({ fields: ["uid", "username"], inspections: 0, invalidCode: "INVALID_ARGUMENT" });
   });
 
   it("v2 Envelope、Predicate 与错误码在 Helper 边界 fail-close", () => {

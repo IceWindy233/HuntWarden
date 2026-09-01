@@ -2500,7 +2500,8 @@ def v2_content_class(path: pathlib.Path) -> str:
     return "SAFE_TEXT" if text in safe else "SENSITIVE_TEXT"
 
 
-def v2_predicate(namespace: str, node: Any, fields: dict[str, Any], depth: int = 1, count: list[int] | None = None) -> bool:
+def v2_validate_predicate(namespace: str, node: Any, depth: int = 1,
+                          count: list[int] | None = None) -> None:
     count = count if count is not None else [0]
     count[0] += 1
     if depth > 4 or count[0] > 32 or not isinstance(node, dict):
@@ -2510,39 +2511,62 @@ def v2_predicate(namespace: str, node: Any, fields: dict[str, Any], depth: int =
         args = node.get("args")
         if not isinstance(args, list) or not args:
             raise HelperError("INVALID_ARGUMENT", "invalid predicate group")
-        values = [v2_predicate(namespace, child, fields, depth + 1, count) for child in args]
-        return all(values) if op == "and" else any(values)
+        for child in args:
+            v2_validate_predicate(namespace, child, depth + 1, count)
+        return
     if op == "not":
-        return not v2_predicate(namespace, node.get("arg"), fields, depth + 1, count)
+        v2_validate_predicate(namespace, node.get("arg"), depth + 1, count)
+        return
     field = node.get("field")
     if (not isinstance(field, str) or field not in V2_NAMESPACE_FIELDS.get(namespace, ())
             or field in {"passwordHash", "content"}):
         raise HelperError("INVALID_ARGUMENT", "predicate field is not allowed by the v2 manifest")
-    actual, expected = fields.get(field), node.get("value")
     if op == "exists":
         if not isinstance(node.get("value", True), bool):
             raise HelperError("INVALID_ARGUMENT", "exists predicate requires a boolean value")
-        return (actual is not None) == node.get("value", True)
-    if op == "eq": return actual == expected
-    if op == "neq": return actual != expected
+        return
+    expected = node.get("value")
+    if op in {"eq", "neq"}:
+        return
     if op == "in":
         if not isinstance(expected, list) or not 1 <= len(expected) <= 64:
             raise HelperError("INVALID_ARGUMENT", "in predicate requires 1..64 values")
-        return actual in expected
+        return
     if op in {"contains", "starts_with"}:
         if not isinstance(expected, str) or len(expected.encode("utf-8")) > 256:
             raise HelperError("INVALID_ARGUMENT", "string predicate value is invalid")
+        return
+    if op in {"lt", "lte", "gt", "gte"}:
+        if isinstance(expected, bool) or not isinstance(expected, (int, float, str)):
+            raise HelperError("INVALID_ARGUMENT", "ordered predicate value is invalid")
+        return
+    raise HelperError("INVALID_ARGUMENT", "unsupported predicate operator")
+
+
+def v2_predicate(namespace: str, node: Any, fields: dict[str, Any]) -> bool:
+    v2_validate_predicate(namespace, node)
+    op = node.get("op")
+    if op in {"and", "or"}:
+        values = [v2_predicate(namespace, child, fields) for child in node["args"]]
+        return all(values) if op == "and" else any(values)
+    if op == "not":
+        return not v2_predicate(namespace, node["arg"], fields)
+    actual, expected = fields.get(node["field"]), node.get("value")
+    if op == "exists":
+        return (actual is not None) == node.get("value", True)
+    if op == "eq": return actual == expected
+    if op == "neq": return actual != expected
+    if op == "in": return actual in expected
+    if op in {"contains", "starts_with"}:
         if actual is not None and not isinstance(actual, str):
             raise HelperError("INVALID_ARGUMENT", "string predicate used with a non-string field")
         return isinstance(actual, str) and (expected in actual if op == "contains" else actual.startswith(expected))
     if op in {"lt", "lte", "gt", "gte"}:
-        if isinstance(expected, bool) or not isinstance(expected, (int, float, str)):
-            raise HelperError("INVALID_ARGUMENT", "ordered predicate value is invalid")
         try:
             return {"lt": actual < expected, "lte": actual <= expected, "gt": actual > expected, "gte": actual >= expected}[op]
         except TypeError:
             return False
-    raise HelperError("INVALID_ARGUMENT", "unsupported predicate operator")
+    raise AssertionError("validated predicate operator is unreachable")
 
 
 def v2_requested_fields(namespace: str, params: dict[str, Any]) -> tuple[str, ...]:
@@ -2993,6 +3017,12 @@ def v2_enumerate(params: dict[str, Any], epoch_id: str) -> tuple[list[dict[str, 
         raise HelperError("UNSUPPORTED_ENVIRONMENT", "namespace unavailable")
     requested_fields = v2_requested_fields(str(namespace), params)
     limit = safe_int(params.get("limit"), 1, 500, "limit")
+    predicate = params.get("predicate")
+    if predicate is not None:
+        # Validate controller input before reading any target data. Otherwise an environment
+        # collector failure can mask an invalid Predicate as INTERNAL_ERROR, and an empty data
+        # source can accidentally accept malformed input without evaluating it at all.
+        v2_validate_predicate(str(namespace), predicate)
     tolerate_cursor_drift = namespace in {"log_source", "log_event", "auth_event", "exec_event"}
     offset, cursor_binding, source_generation, cursor_source_changed = v2_cursor_start(
         str(namespace), params, epoch_id, tolerate_cursor_drift)
@@ -3011,15 +3041,20 @@ def v2_enumerate(params: dict[str, Any], epoch_id: str) -> tuple[list[dict[str, 
         values, warnings, partial = read_global_connections(min(20000, offset + limit + 1))
         rows = [v2_socket_row(value) for value in values]
     elif namespace == "account":
+        needs_account_details = bool({"groups", "locked"}.intersection(requested_fields))
         for value in pwd.getpwall():
             row = {"uid": value.pw_uid, "username": value.pw_name, "gid": value.pw_gid, "home": value.pw_dir,
                    "shell": value.pw_shell}
-            try:
-                inspected = inspect_account({"username": value.pw_name})
-                row.update({"groups": inspected.get("groups", []), "locked": bool(inspected.get("passwordLocked"))})
-            except (HelperError, OSError) as exc:
-                warnings.append(f"账户 {value.pw_name}: {str(exc)}")
-                partial = True
+            if needs_account_details:
+                try:
+                    inspected = inspect_account({"username": value.pw_name})
+                    if "groups" in requested_fields:
+                        row["groups"] = inspected.get("groups", [])
+                    if "locked" in requested_fields:
+                        row["locked"] = bool(inspected.get("passwordLocked"))
+                except (HelperError, OSError) as exc:
+                    warnings.append(f"账户 {value.pw_name}: {str(exc)}")
+                    partial = True
             rows.append(row)
     elif namespace == "ssh_key":
         rows, warnings, partial = v2_ssh_key_rows(min(5000, offset + limit + 1))
@@ -3066,7 +3101,6 @@ def v2_enumerate(params: dict[str, Any], epoch_id: str) -> tuple[list[dict[str, 
         partial, warnings = bool(output.get("partial")), list(output.get("warnings", []))
     else:
         raise HelperError("UNSUPPORTED_ENVIRONMENT", f"collector not available for namespace {namespace}")
-    predicate = params.get("predicate")
     if predicate is not None:
         rows = [row for row in rows if v2_predicate(str(namespace), predicate, row)]
     # 稳定身份是隐式末位排序键（设计 §5.4）：先按身份排序，再用稳定排序施加调用方排序键，

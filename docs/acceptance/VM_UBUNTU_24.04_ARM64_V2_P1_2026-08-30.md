@@ -14,7 +14,7 @@
 
 | 层级 | 命令/范围 | 结果 |
 | --- | --- | --- |
-| PR | `npm test` | 30 个文件通过、10 个环境项跳过；124 项通过、37 项跳过 |
+| PR | `npm test` | 30 个文件通过、10 个环境项跳过；125 项通过、37 项跳过 |
 | 静态门禁 | core/Renderer typecheck、build、lint、生产依赖审计、Helper Python 编译、shell 语法 | PASS |
 | Docker | 五套 Lab | 11/11 PASS；账户 Lab 覆盖 sudoers、doas、polkit 和 `sshd -T` 默认上下文 |
 | 动态发行版 | Debian 12 acceptance | 5/5 PASS；包含 P1 新事实断言 |

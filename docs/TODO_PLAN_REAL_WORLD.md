@@ -8,7 +8,7 @@
 
 - 生产调查链路已完整切换到 Tool Protocol v2；新任务只创建 v2 Epoch，V1 历史任务只读。
 - Manifest/Helper 当前版本为 `2.1.0`，五类检测均运行在 Fact、Preset、Coverage 与 RULE/MODEL/HUMAN Assessment 平面上。
-- PR 门禁为 124 项通过、37 项环境跳过；五套 Docker Lab 11/11、四套 GUI E2E 16/16、真实 VM smoke 4/4、journald 回归 1/1。
+- PR 门禁为 125 项通过、37 项环境跳过；五套 Docker Lab 11/11、四套 GUI E2E 16/16、真实 VM smoke 4/4、journald 回归 1/1。
 - Ubuntu 24.04 ARM64 已完成五类 × QUICK/STANDARD/DEEP 的 15 个正式 GUI/Provider 任务，152 次正式 ToolRun 无失败，结论为 `PASS_WITH_LIMITATIONS`。
 - Manifest `2.1.0` 的 novel malicious + benign 冻结模型评测七项门槛全部通过；语料仍为安全自造夹具。
 
