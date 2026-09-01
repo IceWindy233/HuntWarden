@@ -20,6 +20,7 @@
 ### Fixed
 
 - Helper 在账户枚举前校验 Predicate，并只在显式请求 `groups`/`locked` 时读取扩展账户状态；无效参数不再被目标环境差异覆盖为 `INTERNAL_ERROR`，基础 `uid`/`username` 枚举也不再依赖 shadow/group 命令。
+- Docker Lab 启动脚本现在会创建运行时公钥目录，干净 checkout 不再因 `labs/common` 尚不存在而在镜像构建前退出。
 
 ## [0.2.0] - 2026-08-29
 
