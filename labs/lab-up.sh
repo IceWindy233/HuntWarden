@@ -3,7 +3,8 @@ set -euo pipefail
 
 project_dir=$(cd "$(dirname "$0")/.." && pwd)
 state_dir="$project_dir/labs/.lab-state"
-mkdir -p "$state_dir"
+common_dir="$project_dir/labs/common"
+mkdir -p "$state_dir" "$common_dir"
 chmod 700 "$state_dir"
 
 if [[ ! -f "$state_dir/id_ed25519" ]]; then
@@ -12,8 +13,8 @@ fi
 if [[ ! -f "$state_dir/unknown_ed25519" ]]; then
   ssh-keygen -q -t ed25519 -N '' -f "$state_dir/unknown_ed25519"
 fi
-cp "$state_dir/id_ed25519.pub" "$project_dir/labs/common/lab_authorized_key.pub"
-cp "$state_dir/unknown_ed25519.pub" "$project_dir/labs/common/unknown_authorized_key.pub"
+cp "$state_dir/id_ed25519.pub" "$common_dir/lab_authorized_key.pub"
+cp "$state_dir/unknown_ed25519.pub" "$common_dir/unknown_authorized_key.pub"
 
 "$project_dir/java/build-probe.sh" jar
 docker compose -f "$project_dir/labs/docker-compose.yml" up -d --build
