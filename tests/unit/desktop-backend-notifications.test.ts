@@ -22,7 +22,7 @@ const directories: string[] = [];
 afterEach(async () => { await Promise.all(directories.splice(0).map((path) => rm(path, { recursive: true, force: true }))); });
 
 describe("DesktopBackend 通知去重", () => {
-  it("归档历史任务时不把已有 Finding 和 Evidence 重新通知为新增", async () => {
+  it("归档历史任务时不把已有 Evidence 与审计重新通知为新增", async () => {
     const directory = await mkdtemp(join(tmpdir(), "huntwarden-notification-baseline-"));
     directories.push(directory);
     const runtimeDir = join(directory, "runtime");
@@ -35,12 +35,6 @@ describe("DesktopBackend 通知去重", () => {
     const store = await RuntimeStore.open(runtimeDir, "runtime.db");
     const task = { ...testTask(), status: "COMPLETED" as const };
     store.createTask(task);
-    store.putFinding({
-      findingId: "FIND-HISTORICAL", taskId: task.taskId, host: task.target.host,
-      category: "webshell", severity: "INFO", confidence: 1, status: "NO_FINDING",
-      title: "历史 Finding", summary: "已经在上一次进程中通知", evidenceRefs: [],
-      createdAt: new Date().toISOString(), toolCallId: "call-historical",
-    });
     store.putEvidence({
       evidenceId: "EV-HISTORICAL", taskId: task.taskId, host: task.target.host,
       type: "json", source: "history", collectedAt: new Date().toISOString(), tool: "historical_tool",
@@ -67,7 +61,6 @@ describe("DesktopBackend 通知去重", () => {
     try {
       backend.archiveTask(task.taskId);
       backend.restoreTask(task.taskId);
-      expect(events.filter((event) => event.type === "finding_recorded")).toHaveLength(0);
       expect(events.filter((event) => event.type === "evidence_recorded")).toHaveLength(0);
       expect(events.filter((event) => event.type === "audit_recorded").map((event) => event.event.event)).toEqual([
         "task_archived", "task_restored_from_archive",

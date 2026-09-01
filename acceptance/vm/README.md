@@ -1,21 +1,17 @@
 # HuntWarden 真实 VM 只读冒烟
 
-该入口用于授权临时 Linux VM 的只读验收；`v0.1.0` 的发布门槛为 Ubuntu 24.04 ARM64，Rocky Linux 9 x86_64/SELinux 保留为后续非阻塞兼容性验证。它只调用以下固定 READ 操作：
+该入口用于授权临时 Linux VM 的 v2 只读验收；当前发布门槛为 Ubuntu 24.04 ARM64，Rocky Linux 9 x86_64/SELinux 保留为后续非阻塞兼容性验证。它只调用以下固定 v2 只读/证据动词：
 
-最近一次已完成记录：[`Ubuntu 24.04.4 ARM64 GUI 只读验收`](../../docs/acceptance/VM_UBUNTU_24.04_ARM64_2026-08-20.md)，结果为 `PASS_WITH_LIMITATIONS`。该记录同时覆盖完整依赖下的真实 GUI/Provider/SSH 调查，以及最低依赖下缺少 YARA、auditd、JDK Attach 时的显式降级；Ubuntu 发布 Gate 已关闭。
+最近一次 P1 实机记录：[`Ubuntu 24.04.4 ARM64 v2 P1 验收`](../../docs/acceptance/VM_UBUNTU_24.04_ARM64_V2_P1_2026-08-30.md)，结果为 `PASS_WITH_LIMITATIONS`。Manifest `2.1.0` 五类 × QUICK/STANDARD/DEEP 已于 2026-09-01 完整重跑，见 [`GUI Profile 矩阵`](../../docs/acceptance/GUI_PROFILE_MATRIX_V2_P1_2026-09-01.md)；首跑空响应与模型引用错误仍按限制保留。
 
-- `get_capabilities`
-- `get_host_info`
-- `capture_volatile_snapshot`
-- `discover_web_roots`
-- `list_java_processes`
-- `list_privileged_accounts`
-- `list_cron_entries`
-- `list_systemd_units`
-- `list_ssh_persistence`
-- `list_shell_startup_files`
+- `capabilities`
+- `enumerate`（host/process/file/account/cron_entry/unit/persistence/jvm）
+- `project`
+- `read`
+- `verify`
+- `collect`（仅固定良性夹具；SFTP 校验后立即释放远端 Artifact）
 
-它不会运行写操作，也不能替代 GUI 中五类检测包的 QUICK/STANDARD/DEEP 完整验收。
+它不会运行 `probe` 或任何处置写操作，也不能替代 GUI 中五类检测包的 QUICK/STANDARD/DEEP 完整验收。`collect` 会在 Helper 固定 spool 中短暂创建只读 Artifact，不修改源对象。
 
 ## 前置条件
 
@@ -32,10 +28,10 @@ Rocky/Alma/RHEL 在 SELinux Enforcing 下安装时，`install-helper.sh` 会在�
 `bootstrap-multipass.sh` 把「起 VM → 注入公钥 → 带外核验 Host Key → 传仓库 → 安装 Helper 并自检 → 生成验收环境变量」串成一条命令。它不执行只读冒烟与 GUI 验收。
 
 ```bash
-# 最低依赖那一遍：记录缺少 yara/auditd/JDK 时的能力降级
+# 最低依赖：记录缺少 yara/auditd/JDK 时的能力降级
 acceptance/vm/bootstrap-multipass.sh
 
-# 补齐完整依赖后复检（Ubuntu 发布 Gate 要求两遍都留档）
+# 补齐完整依赖后复检（YARA、auditd、JDK 与 nginx；发布验收应保留两种能力快照）
 acceptance/vm/bootstrap-multipass.sh --full-deps
 
 # 验收完成后销毁
@@ -44,7 +40,7 @@ acceptance/vm/bootstrap-multipass.sh --destroy
 
 指纹只经 `multipass exec` 的 hypervisor 通道读取，脚本内不使用 `ssh-keyscan`。私钥、`known_hosts` 与含真实地址的环境变量文件全部写入 `~/.huntwarden-vm`（`0700`，文件 `0600`），不进仓库。完整参数见 `--help`。
 
-Rocky Linux 9 x86_64 不在本脚本范围内：在 arm64 主机上它需要模拟；后续如要扩展兼容性矩阵，应改用云上或 x86 主机，按下节的手动步骤执行。该项不阻塞 `v0.1.0`。
+Rocky Linux 9 x86_64 不在本脚本范围内：在 arm64 主机上它需要模拟；后续如要扩展兼容性矩阵，应改用云上或 x86 主机，按下节的手动步骤执行。该平台当前仍是待实机验收项。
 
 ## 手动执行只读冒烟
 
@@ -62,6 +58,14 @@ export HUNTWARDEN_VM_EXPECT_DISTRO=ubuntu
 export HUNTWARDEN_VM_EXPECT_VERSION=24.04
 export HUNTWARDEN_VM_EXPECT_ARCH=aarch64
 npm run test:acceptance:vm
+```
+
+Multipass VM 还应执行 journald 身份与源代次专项验收。该测试会通过 Multipass 带外通道写入一条固定标签的无害 journal 记录，用于证明追加已有 journal 文件会推进 generation、事件 `sourceId` 可解析到 `log_source`，且 `relate log_source contains` 可到达该事件：
+
+```bash
+export HUNTWARDEN_VM_CONFIRM_JOURNAL_FIXTURE=I_HAVE_AUTHORIZATION
+export HUNTWARDEN_VM_MULTIPASS_NAME=hw-vm
+npm run test:acceptance:vm:journald
 ```
 
 Rocky Linux 9 x86_64 使用：
@@ -92,3 +96,5 @@ sudo ./install-safe-fixtures.sh --remove
 ```
 
 验收要求：阳性文件形成引用自身 Evidence 的 WebShell Finding；良性文件不得仅因 `system`/`base64` 等单一关键词被判为 HIGH/CRITICAL。真实主机禁止安装该夹具，只能用于可销毁或可恢复快照的授权临时 VM。
+
+正式模型评测另使用 `install-model-eval-fixtures.sh`：`--install` 创建一个现有 YARA 不命中的、永久禁用分支内动态回调链，并启动普通 Java Sleeper；`--install-effective-root` 单独创建只监听 `127.0.0.1`、根目录位于 `/tmp` 的 P1 Web effective-root 专项夹具。`--remove` 在删除前核对文件 sentinel 与 Java PID 命令行，并统一清理两类夹具。正式任务完成后必须确认 `.phtml` 与 nginx 专项配置/Web 根均为 `ABSENT`、Sleeper 为 `STOPPED`；冻结清单和阈值见 [`acceptance/model-eval/README.md`](../model-eval/README.md)。

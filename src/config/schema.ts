@@ -8,14 +8,14 @@ const ThinkingLevelSchema = Type.Union([
 const ProviderIdSchema = Type.String({ minLength: 1, maxLength: 64, pattern: "^[a-z0-9][a-z0-9._-]*$" });
 const EnvNameSchema = Type.String({ minLength: 2, maxLength: 128, pattern: "^[A-Z][A-Z0-9_]*$" });
 
-const BuiltinModelSchema = Type.Object({
+export const BuiltinModelSchema = Type.Object({
   source: Type.Optional(Type.Literal("builtin")),
   provider: ProviderIdSchema,
   model: Type.String({ minLength: 1, maxLength: 256 }),
   thinkingLevel: ThinkingLevelSchema,
 });
 
-const CustomModelSchema = Type.Object({
+export const CustomModelSchema = Type.Object({
   source: Type.Literal("custom"),
   provider: ProviderIdSchema,
   model: Type.String({ minLength: 1, maxLength: 256 }),
@@ -44,9 +44,30 @@ const CustomModelSchema = Type.Object({
 });
 
 export const ConfigSchema = Type.Object({
+  schemaVersion: Type.Literal(2),
+  protocolV2: Type.Object({
+    remoteBudget: Type.Object({
+      preset: Type.Object({ remoteCalls: Type.Integer({ minimum: 1 }), nodes: Type.Integer({ minimum: 1 }), bytes: Type.Integer({ minimum: 1024 }), wallTimeMs: Type.Integer({ minimum: 1000 }), probeCalls: Type.Integer({ minimum: 0 }) }),
+      model: Type.Object({ remoteCalls: Type.Integer({ minimum: 1 }), nodes: Type.Integer({ minimum: 1 }), bytes: Type.Integer({ minimum: 1024 }), wallTimeMs: Type.Integer({ minimum: 1000 }), probeCalls: Type.Integer({ minimum: 0 }) }),
+    }),
+    localQueryBudget: Type.Object({ calls: Type.Integer({ minimum: 1 }), rows: Type.Integer({ minimum: 1 }), wallTimeMs: Type.Integer({ minimum: 1000 }) }),
+    externalIntelBudget: Type.Object({ calls: Type.Integer({ minimum: 1 }), iocs: Type.Integer({ minimum: 1 }), wallTimeMs: Type.Integer({ minimum: 1000 }) }),
+    dataPolicy: Type.Object({ modelContentBytes: Type.Integer({ minimum: 1024 }), evidenceBytes: Type.Integer({ minimum: 1024 }), defaultTextClass: Type.Literal("SENSITIVE_TEXT") }),
+    grants: Type.Object({ maxRequests: Type.Integer({ minimum: 1, maximum: 100 }), pendingExpiresOnInterruption: Type.Literal(true) }),
+  }),
   agent: Type.Object({
     maxTurns: Type.Integer({ minimum: 1, maximum: 100 }),
-    maxToolCalls: Type.Integer({ minimum: 1, maximum: 1000 }),
+    /**
+     * 发给 Provider 的上下文保留最近多少个 assistant 回合的完整工具结果。
+     *
+     * 更旧的成功工具结果换成存根；v2 模型用 `query_facts` 按 sourceRunId 回取。本运行时用的是低层 Agent，
+     * 没有 compaction，历史消息全量回放，上下文只增不减；不淘汰则长调查必然撞上下文窗口。
+     */
+    contextRetainTurns: Type.Integer({ minimum: 1, maximum: 20 }),
+    /** 调查循环的 Provider 有界重试次数：一次 429 不应作废整场调查。 */
+    providerMaxRetries: Type.Integer({ minimum: 0, maximum: 10 }),
+    /** 单次 Provider 流式请求的硬超时；覆盖首 token 与流中停滞，避免任务无限占用。 */
+    providerTimeoutSeconds: Type.Integer({ minimum: 30, maximum: 3600 }),
     defaultMode: Type.Union([Type.Literal("SCAN"), Type.Literal("REMEDIATE")]),
     promptVersion: Type.String({ minLength: 1 }),
   }),
@@ -64,10 +85,18 @@ export const ConfigSchema = Type.Object({
     modifiedWithinHours: Type.Integer({ minimum: 1 }),
     maxCandidateFiles: Type.Integer({ minimum: 1, maximum: 5000 }),
     maxFileSizeBytes: Type.Integer({ minimum: 1024 }),
-    /** 控制端本地的 YARA 规则源目录：安装脚本从此目录取规则下发到目标端 remoteRulePath。 */
+    /**
+     * `inspect_script_file` 交给模型的脚本片段字节预算。
+     *
+     * 与 `llmData.maxTextBytes` 解耦：后者是每条工具结果的整体预算，schema 上限 262144，而
+     * Helper 对本操作硬夹 [1024, 65536] 且越界抛错不夹取。共用一个旋钮时，把 `maxTextBytes`
+     * 调大就会让本工具恒定 INVALID_ARGUMENT，WebShell 内容特征分析整条路径静默不可用。
+     */
+    maxScriptExcerptBytes: Type.Integer({ minimum: 1024, maximum: 65_536 }),
+    /** `search_web_access_log` 返回的最大行数；上限对齐 Helper 的 safe_int 区间。 */
+    maxAccessLogLines: Type.Integer({ minimum: 1, maximum: 5000 }),
+    /** 控制端本地的内置 YARA RuleSet 资产目录；目标端路径是协议常量，不可配置。 */
     yaraRuleDir: Type.String(),
-    /** 目标端规则文件的绝对路径，由 host-helper/install-helper.sh 下发；不做本地路径解析。 */
-    remoteRulePath: Type.String({ minLength: 1, maxLength: 4096 }),
   }),
   java: Type.Object({
     supportedContainers: Type.Array(Type.Literal("tomcat")),
@@ -75,7 +104,12 @@ export const ConfigSchema = Type.Object({
     allowRuntimeModification: Type.Literal(false),
     probeJar: Type.String(),
   }),
-  account: Type.Object({ checkAuthorizedKeys: Type.Boolean(), checkLoginHistory: Type.Boolean() }),
+  account: Type.Object({
+    checkAuthorizedKeys: Type.Boolean(),
+    checkLoginHistory: Type.Boolean(),
+    /** `get_login_history` 返回的最大条数；上限对齐 Helper 的 safe_int 区间。 */
+    maxLoginHistoryEntries: Type.Integer({ minimum: 1, maximum: 500 }),
+  }),
   persistence: Type.Object({
     maxItemsPerSource: Type.Integer({ minimum: 1, maximum: 5000 }),
     includeUserScope: Type.Boolean(),
@@ -93,6 +127,8 @@ export const ConfigSchema = Type.Object({
     maxFiles: Type.Integer({ minimum: 1, maximum: 5000 }),
     maxTimelineEvents: Type.Integer({ minimum: 1, maximum: 5000 }),
     maxArtifactBytes: Type.Integer({ minimum: 1024, maximum: 104_857_600 }),
+    /** `inspect_process_tree` 的最大深度；上限对齐 Helper 的 safe_int 区间。 */
+    maxProcessTreeDepth: Type.Integer({ minimum: 1, maximum: 32 }),
   }),
   threatIntel: Type.Object({
     enabled: Type.Boolean(),

@@ -25,11 +25,25 @@ export function boolean(value: unknown, label: string): boolean {
   return value;
 }
 
-export function appConfig(value: unknown): AppConfig {
-  const issues = getConfigIssues(value);
-  if (issues.length > 0) throw new Error(issues.map((item) => `${item.path}: ${item.message}`).join("；"));
+/**
+ * 校验通道的前置守卫：只做「必须是对象」与「不得包含明文凭据」两项安全检查。
+ *
+ * schema 违规**不在这里抛错**：否则 GUI 的配置校验面板永远收不到结构化 issues，
+ * 分析师只会看到一条 `Error invoking remote method 'huntwarden:config:validate'`，
+ * 既不知道是哪个字段，也拿不到 anyOf 分支之外的真实原因。
+ */
+export function candidateConfig(value: unknown): AppConfig {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("配置必须是对象");
   scanForSecrets(value);
   return structuredClone(value) as AppConfig;
+}
+
+/** 写入通道的守卫：候选检查之外，schema 违规必须 fail closed。 */
+export function appConfig(value: unknown): AppConfig {
+  const candidate = candidateConfig(value);
+  const issues = getConfigIssues(candidate);
+  if (issues.length > 0) throw new Error(issues.map((item) => `${item.path}: ${item.message}`).join("；"));
+  return candidate;
 }
 
 export function newTaskInput(value: unknown): NewTaskInput {

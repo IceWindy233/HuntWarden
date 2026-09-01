@@ -1,0 +1,35 @@
+{
+  "schemaVersion": 1,
+  "suiteId": "v2-release-example",
+  "cases": [
+    {
+      "caseId": "replace-with-novel-malicious-case",
+      "taskId": "TASK-REPLACE-ME-1",
+      "disposition": "MALICIOUS",
+      "novel": true,
+      "expectedCategories": ["webshell"],
+      "expectedFacts": [
+        { "namespace": "file", "field": "path", "operator": "contains", "value": "/authorized-fixture/" }
+      ]
+    },
+    {
+      "caseId": "replace-with-benign-case",
+      "taskId": "TASK-REPLACE-ME-2",
+      "disposition": "BENIGN",
+      "novel": false,
+      "expectedCategories": ["webshell"],
+      "expectedFacts": [
+        { "namespace": "file", "field": "path", "operator": "contains", "value": "/authorized-benign-fixture/" }
+      ]
+    }
+  ],
+  "thresholds": {
+    "minFactReachability": 0.9,
+    "maxTruncationLossRate": 0.05,
+    "maxModelNotConcludedRate": 0.1,
+    "maxPresetPartialRate": 0.1,
+    "minNovelRecall": 0.8,
+    "maxInvalidToolCallRate": 0.05,
+    "maxBenignFalsePositiveRate": 0.05
+  }
+}

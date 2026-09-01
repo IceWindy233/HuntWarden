@@ -6,21 +6,21 @@ import { afterEach, describe, expect, it } from "vitest";
 import { loadConfig, normalizeConfig } from "../../src/config/load-config.js";
 import { ConfigSchema } from "../../src/config/schema.js";
 import { validateTargetConfig } from "../../src/domain/validation.js";
-import { RuntimeStore } from "../../src/storage/runtime-store.js";
 import { createModelBundle } from "../../src/agent/model.js";
-import { createReference, requireReference } from "../../src/tools/reference-utils.js";
 import { testConfig, testTask } from "../helpers.js";
 import YAML from "yaml";
 
 const directories: string[] = [];
 afterEach(async () => { await Promise.all(directories.splice(0).map((path) => rm(path, { recursive: true, force: true }))); });
 
-describe("配置与不透明引用", () => {
+describe("配置与目标约束", () => {
   it("加载并校验默认 YAML，保留 OpenAI 默认模型与安全处置开关", async () => {
     const config = await loadConfig(resolve("config/default.yaml"));
     expect(Value.Check(ConfigSchema, config)).toBe(true);
     expect(config.model).toMatchObject({ source: "builtin", provider: "openai", model: "gpt-5.6-terra", thinkingLevel: "medium" });
     expect(config.remediation.requireApproval).toBe(true);
+    expect(config.remediation.allowedTools).toEqual(["quarantine_file"]);
+    expect(config.remediation.allowedTools).not.toContain("disable_account");
     expect(config.java.allowRuntimeModification).toBe(false);
     expect(config.storage.baseDir).toBe(resolve("data"));
   });
@@ -30,6 +30,7 @@ describe("配置与不透明引用", () => {
     expect(config.model).toMatchObject({
       source: "builtin", provider: "deepseek", model: "deepseek-v4-flash", thinkingLevel: "high",
     });
+    expect(config.remediation.allowedTools).toEqual(["quarantine_file"]);
     const { model } = createModelBundle(config);
     expect(model).toMatchObject({ api: "openai-completions", baseUrl: "https://api.deepseek.com", reasoning: true });
   });
@@ -40,8 +41,9 @@ describe("配置与不透明引用", () => {
     delete legacy.triage;
     delete legacy.threatIntel;
     const migrated = normalizeConfig(legacy, "/tmp/huntwarden-config-migration/profile.yaml");
+    expect(migrated.agent.providerTimeoutSeconds).toBe(600);
     expect(migrated.persistence).toEqual({ maxItemsPerSource: 500, includeUserScope: true });
-    expect(migrated.triage).toEqual({ maxProcesses: 2_000, maxConnections: 5_000, maxFiles: 5_000, maxTimelineEvents: 5_000, maxArtifactBytes: 10_485_760 });
+    expect(migrated.triage).toEqual({ maxProcesses: 2_000, maxConnections: 5_000, maxFiles: 5_000, maxTimelineEvents: 5_000, maxArtifactBytes: 10_485_760, maxProcessTreeDepth: 12 });
     expect(migrated.threatIntel).toEqual({
       enabled: false, provider: "dbapp-ti", baseUrl: "https://ti.dbappsecurity.com.cn/oapi/v1/", apiKeyEnv: "DBAPP_TI_API_KEY",
       timeoutSeconds: 15, maxBatchSize: 100, cacheTtlSeconds: 3_600, autoEnrichConnections: true, includePrivateAddresses: false,
@@ -95,22 +97,6 @@ describe("配置与不透明引用", () => {
     await expect(loadConfig(path)).rejects.toThrow(/禁止包含凭据/);
     await writeFile(path, YAML.stringify({ ...config, model: { ...custom, baseUrl: "https://llm.example.test/v1", authentication: { type: "none" } } }));
     await expect(loadConfig(path)).rejects.toThrow(/无认证.*本机/);
-  });
-
-  it("引用严格绑定任务与类型", async () => {
-    const directory = await mkdtemp(join(tmpdir(), "huntwarden-ref-"));
-    directories.push(directory);
-    const store = await RuntimeStore.open(directory, "runtime.db");
-    const task = testTask();
-    store.createTask(task);
-    const reference = createReference(store, task.taskId, "account", "account", { username: "labroot" });
-    expect(requireReference(store, task.taskId, reference.ref, "account").value).toEqual({ username: "labroot" });
-    expect(() => requireReference(store, "TASK-other", reference.ref, "account")).toThrow(/跨任务/);
-    expect(() => requireReference(store, task.taskId, reference.ref, "candidate")).toThrow(/跨任务/);
-    const persistence = createReference(store, task.taskId, "persistence", "persistence", { kind: "cron", path: "/etc/crontab" });
-    expect(requireReference(store, task.taskId, persistence.ref, "persistence").value).toMatchObject({ kind: "cron" });
-    expect(() => requireReference(store, "TASK-other", persistence.ref, "persistence")).toThrow(/跨任务/);
-    store.close();
   });
 
   it("校验目标、用户名、指纹与本地路径", () => {

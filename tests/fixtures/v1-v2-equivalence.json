@@ -1,0 +1,37 @@
+{
+  "schemaVersion": 1,
+  "baseline": "v1 Docker Lab capability baseline frozen before protocol replacement",
+  "semantics": "Capability and evidence-path equivalence; verdict labels are intentionally not copied because v2 separates Coverage from Assessment.",
+  "cases": [
+    {
+      "id": "webshell",
+      "port": 2222,
+      "v1Capabilities": ["web stack discovery", "effective web root", "script candidate", "content match", "access-log association"],
+      "expected": { "webRoot": "/var/www/html", "file": "/var/www/html/lab-webshell.php", "literal": "shell_exec" }
+    },
+    {
+      "id": "java_memory_shell",
+      "port": 2223,
+      "v1Capabilities": ["JVM discovery", "Tomcat component inventory", "class inspection"],
+      "expected": { "className": "lab.DynamicMarkerFilter" }
+    },
+    {
+      "id": "backdoor_account",
+      "port": 2224,
+      "v1Capabilities": ["UID 0 account", "authorized key fingerprint", "key owner relation"],
+      "expected": { "username": "labroot", "uid": 0 }
+    },
+    {
+      "id": "linux_persistence",
+      "port": 2225,
+      "v1Capabilities": ["Cron", "systemd unit", "extended persistence", "executed file relation"],
+      "expected": { "cronContains": "listener.py", "unit": "huntwarden-lab.service" }
+    },
+    {
+      "id": "linux_intrusion_triage",
+      "port": 2226,
+      "v1Capabilities": ["stable process identity", "process socket", "package integrity", "authentication timeline", "system log"],
+      "expected": { "processCommandContains": "/tmp/.update", "remotePort": 46666, "tamperedFile": "/usr/bin/yes", "sourceAddress": "192.0.2.45", "logProgram": "system-health" }
+    }
+  ]
+}

@@ -7,4 +7,5 @@ COPY labs/common/unknown_authorized_key.pub /home/labroot/.ssh/authorized_keys
 COPY host-helper/huntwarden_helper.py /usr/local/libexec/huntwarden-helper
 COPY rules/yara/webshell.yar /opt/huntwarden/rules/webshell.yar
 RUN chown -R secagent:secagent /home/secagent/.ssh && chown -R labroot:root /home/labroot/.ssh && chmod 600 /home/secagent/.ssh/authorized_keys /home/labroot/.ssh/authorized_keys && chmod 755 /usr/local/libexec/huntwarden-helper && chown root:root /usr/local/libexec/huntwarden-helper && printf 'secagent ALL=(root) NOPASSWD: /usr/local/libexec/huntwarden-helper *\n' > /etc/sudoers.d/huntwarden && chmod 440 /etc/sudoers.d/huntwarden
+RUN mkdir -p /etc/polkit-1/rules.d && printf 'permit nopass labroot as root cmd /usr/bin/id\n' > /etc/doas.conf && printf 'polkit.addRule(function(action, subject) { return polkit.Result.NOT_HANDLED; });\n' > /etc/polkit-1/rules.d/49-huntwarden-lab.rules
 CMD ["/bin/bash", "-lc", "ssh-keygen -A && exec /usr/sbin/sshd -D -e"]

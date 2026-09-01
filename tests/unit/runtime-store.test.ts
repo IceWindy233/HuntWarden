@@ -2,7 +2,6 @@ import { mkdtemp, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import type { Finding } from "../../src/domain/types.js";
 import { ApprovalService } from "../../src/agent/approval-service.js";
 import { EvidenceStore } from "../../src/evidence/evidence-store.js";
 import { RuntimeStore } from "../../src/storage/runtime-store.js";
@@ -12,66 +11,12 @@ const directories: string[] = [];
 afterEach(async () => { await Promise.all(directories.splice(0).map((path) => rm(path, { recursive: true, force: true }))); });
 
 describe("RuntimeStore", () => {
-  it("启用安全文件权限并按 toolCallId 幂等保存 Finding", async () => {
+  it("数据库以 0600 权限创建", async () => {
     const directory = await mkdtemp(join(tmpdir(), "huntwarden-store-"));
     directories.push(directory);
     const store = await RuntimeStore.open(directory, "runtime.db");
-    const task = testTask();
-    store.createTask(task);
-    const finding: Finding = {
-      findingId: "FIND-00000000-0000-4000-8000-000000000001", taskId: task.taskId,
-      host: task.target.host, category: "webshell", severity: "INFO", confidence: 1,
-      status: "NO_FINDING", title: "未发现", summary: "已完成检测", evidenceRefs: [],
-      createdAt: new Date().toISOString(), toolCallId: "call-fixed",
-    };
-    const first = store.putFinding(finding);
-    const second = store.putFinding({ ...finding, findingId: "FIND-00000000-0000-4000-8000-000000000002", title: "重复" });
-    expect(second.findingId).toBe(first.findingId);
-    expect(store.listFindings(task.taskId)).toHaveLength(1);
-    expect(store.getTask(task.taskId)?.coverage.webshell).toBe("NO_FINDING");
+    store.createTask(testTask());
     expect((await stat(store.databasePath)).mode & 0o777).toBe(0o600);
-    store.close();
-  });
-
-  it("同类别 Finding 按风险聚合，后写 NO_FINDING 不会覆盖风险或失败状态", async () => {
-    const directory = await mkdtemp(join(tmpdir(), "huntwarden-finding-aggregate-"));
-    directories.push(directory);
-    const store = await RuntimeStore.open(directory, "runtime.db");
-    const task = testTask();
-    task.checks = ["webshell"];
-    store.createTask(task);
-    const base: Finding = {
-      findingId: "FIND-00000000-0000-4000-8000-000000000011",
-      taskId: task.taskId,
-      host: task.target.host,
-      category: "webshell",
-      severity: "HIGH",
-      confidence: 0.9,
-      status: "SUSPICIOUS",
-      title: "可疑脚本",
-      summary: "存在风险事实",
-      evidenceRefs: [],
-      createdAt: new Date().toISOString(),
-      toolCallId: "call-risk",
-    };
-    store.putFinding(base);
-    store.putFinding({
-      ...base,
-      findingId: "FIND-00000000-0000-4000-8000-000000000012",
-      status: "NO_FINDING",
-      severity: "INFO",
-      title: "另一路径未发现",
-      toolCallId: "call-no-finding",
-    });
-    expect(store.getTask(task.taskId)?.coverage.webshell).toBe("SUSPICIOUS");
-
-    const secondTask = testTask();
-    secondTask.taskId = "TASK-00000000-0000-4000-8000-000000000002";
-    secondTask.checks = ["webshell"];
-    store.createTask(secondTask);
-    store.putFinding({ ...base, taskId: secondTask.taskId, findingId: "FIND-00000000-0000-4000-8000-000000000013", status: "ERROR", toolCallId: "call-error" });
-    store.putFinding({ ...base, taskId: secondTask.taskId, findingId: "FIND-00000000-0000-4000-8000-000000000014", status: "NO_FINDING", toolCallId: "call-late-safe" });
-    expect(store.getTask(secondTask.taskId)?.coverage.webshell).toBe("ERROR");
     store.close();
   });
 

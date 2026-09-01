@@ -1,7 +1,8 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { CHECK_CATEGORY_SHORT_LABELS, type TaskContext } from "../domain/types.js";
 import type { ConfigProfileSummary, DesktopEvent, TaskSnapshot } from "../gui/contracts.js";
 import { ApprovalDialog } from "./components/ApprovalDialog.js";
+import { GrantRequestDialog } from "./components/GrantRequestDialog.js";
 import { NewTaskDialog } from "./components/NewTaskDialog.js";
 import { SettingsView } from "./components/SettingsView.js";
 import { TaskWorkspace, type LiveAgentStream } from "./components/TaskWorkspace.js";
@@ -108,7 +109,6 @@ export function App() {
       }
       if (event.type === "runtime_error") notify(event.message, "error");
       if (event.type === "approval_requested") notify("Agent 正在等待高风险写操作审批", "info");
-      if (event.type === "finding_recorded") notify(`新增 Finding：${event.finding.title}`, event.finding.severity === "CRITICAL" ? "error" : "info");
       if (event.type === "task_updated") {
         setTasks((current) => {
           const next = current.some((item) => item.taskId === event.task.taskId)
@@ -120,7 +120,6 @@ export function App() {
       if ("taskId" in event && event.taskId === selectedTaskId) void refreshSnapshot();
       else if (event.type === "task_updated" && event.task.taskId === selectedTaskId) void refreshSnapshot();
       else if (event.type === "approval_requested" && event.ticket.taskId === selectedTaskId) void refreshSnapshot();
-      else if (event.type === "finding_recorded" && event.finding.taskId === selectedTaskId) void refreshSnapshot();
       else if (event.type === "evidence_recorded" && event.evidence.taskId === selectedTaskId) void refreshSnapshot();
       else if (event.type === "audit_recorded" && event.event.taskId === selectedTaskId) void refreshSnapshot();
     });
@@ -135,6 +134,7 @@ export function App() {
 
   const activeProfile = profiles.find((profile) => profile.profileId === activeProfileId);
   const pendingApproval = snapshot?.approvals.find((ticket) => ticket.status === "PENDING");
+  const pendingGrantRequest = snapshot?.grantRequests.find((request) => request.status === "PENDING");
 
   async function openNewTask(): Promise<void> {
     if (!activeProfileId) { setView("settings"); notify("请先激活一个配置 Profile", "info"); return; }
@@ -182,12 +182,13 @@ export function App() {
         : snapshot
           ? <TaskWorkspace snapshot={snapshot} refresh={refreshSnapshot} notify={notify} {...(liveStream?.taskId === snapshot.task.taskId ? { liveStream } : {})} />
           : showArchived
-            ? <div className="dashboard"><EmptyState icon="▣" title="没有已归档任务" description="完成或终止的调查可以从任务详情归档；Finding、Evidence、报告与审计记录都会保留。" action={<Button onClick={() => setShowArchived(false)}>返回当前任务</Button>} /></div>
+            ? <div className="dashboard"><EmptyState icon="▣" title="没有已归档任务" description="完成或终止的调查可以从任务详情归档；Coverage、Assessment、Evidence、报告与审计记录都会保留。" action={<Button onClick={() => setShowArchived(false)}>返回当前任务</Button>} /></div>
             : <Dashboard tasks={visibleTasks} activeProfile={activeProfile} onNewTask={() => void openNewTask()} onOpenSettings={() => setView("settings")} onSelectTask={(taskId) => setSelectedTaskId(taskId)} />}
     </section>
 
     {newTaskOpen && activeProfileId ? <NewTaskLoader profileId={activeProfileId} onClose={() => setNewTaskOpen(false)} onCreated={onTaskCreated} notify={notify} /> : null}
     {pendingApproval ? <ApprovalDialog ticket={pendingApproval} onDone={() => void refreshSnapshot()} notify={notify} /> : null}
+    {!pendingApproval && pendingGrantRequest ? <GrantRequestDialog request={pendingGrantRequest} onDone={() => void refreshSnapshot()} notify={notify} /> : null}
     <div className="toast-stack" aria-live="polite">{toasts.map((toast) => <div key={toast.id} className={`toast toast-${toast.tone}`}><span>{toast.tone === "success" ? "✓" : toast.tone === "error" ? "!" : "i"}</span><p>{toast.message}</p><button onClick={() => setToasts((current) => current.filter((item) => item.id !== toast.id))}>×</button></div>)}</div>
   </div>;
 }

@@ -1,4 +1,5 @@
 import { EventEmitter } from "node:events";
+import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import type { Models, Model, Api } from "@earendil-works/pi-ai";
 import { ApprovalService } from "../agent/approval-service.js";
@@ -11,9 +12,11 @@ import { EvidenceStore } from "../evidence/evidence-store.js";
 import { SSHExecutor } from "../executor/ssh-executor.js";
 import { ReportService } from "../report/report-service.js";
 import type { RuntimeStore } from "../storage/runtime-store.js";
-import { createSecurityTools } from "../tools/index.js";
 import type { ThreatIntelClient } from "../threat-intel/types.js";
 import { SecurityAgentRuntime } from "./security-agent-runtime.js";
+import { bootstrapProtocolV2, restoreProtocolV2 } from "./v2-bootstrap.js";
+import type { Assessment, AssessmentVerdict, TaskGrant, WireRequest } from "../protocol-v2/types.js";
+import { createKnownHashDataSet, parseKnownHashSetImport, summarizeKnownHashDataSet, type KnownHashDataSetSummary } from "../datasets/known-hash-registry.js";
 
 export class Application extends EventEmitter {
   readonly approvals: ApprovalService;
@@ -22,6 +25,7 @@ export class Application extends EventEmitter {
   private runtimeTaskId?: string;
   private executor?: SSHExecutor;
   private closePromise: Promise<void> | undefined;
+  private presetContext = "";
 
   constructor(
     readonly config: AppConfig,
@@ -52,8 +56,7 @@ export class Application extends EventEmitter {
       ...(input.profile ? { profile: input.profile } : {}),
       ...(input.timeWindowHours !== undefined ? { timeWindowHours: input.timeWindowHours } : {}),
       ...(input.iocs && Object.keys(input.iocs).length > 0 ? { iocs: structuredClone(input.iocs) } : {}),
-      coverage: {},
-      createdAt: now, updatedAt: now, turnCount: 0, toolCallCount: 0,
+      createdAt: now, updatedAt: now, turnCount: 0, toolCallCount: 0, protocolVersion: 2,
     };
     this.store.createTask(task);
     this.store.appendAudit({
@@ -73,7 +76,23 @@ export class Application extends EventEmitter {
     return task;
   }
 
+  importKnownHashDataSet(value: unknown): KnownHashDataSetSummary {
+    const prepared = createKnownHashDataSet(parseKnownHashSetImport(value));
+    const stored = this.store.putKnownHashDataSet(prepared);
+    this.store.appendAudit({ event: "protocol_v2_known_hash_dataset_imported", level: "info", data: {
+      dataSetRef: stored.dataSetRef, name: stored.name, version: stored.version, digest: stored.digest, entryCount: stored.sha256.length,
+    } });
+    return summarizeKnownHashDataSet(stored);
+  }
+
+  listKnownHashDataSets(): KnownHashDataSetSummary[] { return this.store.listKnownHashDataSets(); }
+
   runtimeFor(task: TaskContext): SecurityAgentRuntime {
+    if (this.runtime && this.runtimeTaskId === task.taskId) return this.runtime;
+    throw new InvalidArgumentError("任务运行时尚未完成 v2 capability/epoch 初始化；请使用 startTask、recoverTask 或 steerTask");
+  }
+
+  private async ensureRuntimeFor(task: TaskContext, restore = false): Promise<SecurityAgentRuntime> {
     if (this.runtime && this.runtimeTaskId === task.taskId) return this.runtime;
     if (this.runtime) {
       this.runtime.abort();
@@ -81,13 +100,12 @@ export class Application extends EventEmitter {
     }
     this.executor = new SSHExecutor(task.target, this.config.executor.helperPath, this.config.executor.timeoutSeconds * 1000);
     const evidence = new EvidenceStore(this.config.storage.baseDir, this.store, this.checkpoint);
-    const deps = {
-      task, config: this.config, store: this.store, evidence, executor: this.executor, approvals: this.approvals,
-      ...(this.checkpoint ? { checkpoint: this.checkpoint } : {}),
-      ...(this.threatIntel ? { threatIntel: this.threatIntel } : {}),
-    };
-    const tools = createSecurityTools(deps);
-    this.runtime = new SecurityAgentRuntime({ task, config: this.config, store: this.store, executor: this.executor, approvals: this.approvals, tools, models: this.models, model: this.model, ...(this.checkpoint ? { checkpoint: this.checkpoint } : {}) });
+    if (task.protocolVersion !== 2) throw new InvalidArgumentError("v1 历史任务只读，不允许恢复执行或重新调查");
+    const session = restore
+      ? await restoreProtocolV2({ task, config: this.config, store: this.store, executor: this.executor, evidence, approvals: this.approvals, ...(this.checkpoint ? { checkpoint: this.checkpoint } : {}), ...(this.threatIntel ? { threatIntel: this.threatIntel } : {}) })
+      : await bootstrapProtocolV2({ task, config: this.config, store: this.store, executor: this.executor, evidence, approvals: this.approvals, ...(this.checkpoint ? { checkpoint: this.checkpoint } : {}), ...(this.threatIntel ? { threatIntel: this.threatIntel } : {}) });
+    this.presetContext = session.presetContext;
+    this.runtime = new SecurityAgentRuntime({ task, config: this.config, store: this.store, executor: this.executor, approvals: this.approvals, tools: session.tools, models: this.models, model: this.model, protocolV2: { epochId: session.epoch.epochId }, ...(this.checkpoint ? { checkpoint: this.checkpoint } : {}) });
     this.runtime.on("event", (event: { type: string }) => {
       if (event.type !== "message_update") this.emit("changed", task.taskId);
     });
@@ -111,8 +129,9 @@ export class Application extends EventEmitter {
   async startTask(taskId: string): Promise<void> {
     const task = this.requireTask(taskId);
     this.assertNotArchived(task);
-    const runtime = this.runtimeFor(task);
-    await runtime.prompt(task.request);
+    const runtime = await this.ensureRuntimeFor(task);
+    await runtime.prompt(`${task.request}\n\n<preset-v2>\n${this.presetContext}\n</preset-v2>`);
+    this.finishActiveEpoch(task.taskId);
     this.emit("changed", taskId);
   }
 
@@ -120,9 +139,10 @@ export class Application extends EventEmitter {
     const task = this.requireTask(taskId);
     this.assertNotArchived(task);
     if (!task.interruption?.recoveryRequired) throw new InvalidArgumentError("任务没有需要处理的中断状态");
-    const runtime = this.runtimeFor(task);
+    const runtime = await this.ensureRuntimeFor(task, true);
     if (task.interruption.previousStatus === "REPORTING") await this.reports.generate(this.requireTask(taskId), runtime);
     else await runtime.recover();
+    this.finishActiveEpoch(task.taskId);
     this.emit("changed", taskId);
   }
 
@@ -131,7 +151,7 @@ export class Application extends EventEmitter {
     if (!normalized || normalized.length > 20_000) throw new InvalidArgumentError("Steering 输入不能为空且不能超过 20000 字符");
     const task = this.requireTask(taskId);
     this.assertNotArchived(task);
-    await this.runtimeFor(task).steer(normalized);
+    await (await this.ensureRuntimeFor(task, true)).steer(normalized);
     this.emit("changed", taskId);
   }
 
@@ -140,6 +160,7 @@ export class Application extends EventEmitter {
     this.assertNotArchived(task);
     if (this.runtimeTaskId === taskId) this.runtime?.abort();
     task.status = "ABORTED";
+    if (task.protocolVersion === 2 && task.activeEpochId) this.store.finishScanEpoch(task.taskId, task.activeEpochId, "ABORTED");
     this.store.saveTask(task);
     this.store.appendAudit({ taskId, event: "task_aborted_by_analyst", level: "warn", data: {} });
     this.emit("changed", taskId);
@@ -175,6 +196,68 @@ export class Application extends EventEmitter {
     this.emit("changed", ticket.taskId);
   }
 
+  async decideGrantRequest(requestId: string, approved: boolean): Promise<void> {
+    const request = this.store.getGrantRequest(requestId);
+    if (request?.status !== "PENDING") throw new InvalidArgumentError("Grant Request 不存在或已结束");
+    const task = this.requireTask(request.taskId);
+    if (request.targetFingerprint !== task.target.hostFingerprint || task.protocolVersion !== 2 || !task.activeEpochId) throw new InvalidArgumentError("Grant Request 与当前 task/target/epoch 不匹配");
+    if (!approved) {
+      this.store.updateGrantRequest(requestId, "DENIED");
+      this.store.putInvestigationGap({ gapId: `IGAP-${randomUUID()}`, taskId: task.taskId, epochId: task.activeEpochId, code: "GRANT_DENIED", reasonCode: request.kind, createdAt: new Date().toISOString() });
+      this.store.appendAudit({ taskId: task.taskId, event: "protocol_v2_grant_denied", level: "info", data: { requestId, kind: request.kind, bindingDigest: request.bindingDigest } });
+      this.emit("changed", task.taskId);
+      return;
+    }
+    let binding = structuredClone(request.binding);
+    if (request.kind === "SCOPE") {
+      if (request.binding.namespace !== "file" || typeof request.binding.requestedRoot !== "string") throw new InvalidArgumentError("Scope Request binding 不完整");
+      if (!this.executor) throw new InvalidArgumentError("Scope 批准需要当前任务的 v2 目标连接");
+      const wire: WireRequest = {
+        protocolVersion: 2, requestId: `${requestId}:RESOLVE`, epochId: task.activeEpochId, deadlineMs: 10_000,
+        reservation: { reservationId: `${requestId}:RESOLVE`, estimate: { remoteCalls: 1, nodes: 1, bytes: 65_536, wallTimeMs: 10_000, probeCalls: 0 } },
+        params: { namespace: "file", requestedRoot: request.binding.requestedRoot, expectedCanonicalRoot: request.binding.requestedRoot },
+      };
+      binding = await this.executor.invokeMaintenanceV2("scope_resolve", wire);
+    }
+    const grant: TaskGrant = {
+      grantId: `GRANT-${randomUUID()}`, taskId: task.taskId, targetFingerprint: task.target.hostFingerprint,
+      kind: request.kind, status: "ACTIVE", binding, createdAt: new Date().toISOString(),
+    };
+    this.store.putTaskGrant(grant);
+    this.store.updateGrantRequest(requestId, "APPROVED");
+    this.store.appendAudit({ taskId: task.taskId, event: "protocol_v2_grant_activated", level: "warn", data: { requestId, grantId: grant.grantId, kind: grant.kind, bindingDigest: request.bindingDigest } });
+    this.emit("changed", task.taskId);
+  }
+
+  recordHumanAssessment(input: { taskId: string; targetAssessmentId: string; verdict: AssessmentVerdict; rationale: string }): Assessment {
+    const task = this.requireTask(input.taskId);
+    if (task.protocolVersion !== 2 || !task.activeEpochId) throw new InvalidArgumentError("只有活动的 v2 epoch 可以记录 HUMAN Assessment");
+    const target = this.store.listAssessments(task.taskId, task.activeEpochId).find((item) => item.assessmentId === input.targetAssessmentId);
+    if (!target) throw new InvalidArgumentError("目标 Assessment 不存在或不属于当前 epoch");
+    const assessment: Assessment = {
+      assessmentId: `ASM-${randomUUID()}`, taskId: task.taskId, epochId: task.activeEpochId, authorType: "HUMAN",
+      category: target.category, ...(target.subjectRef ? { subjectRef: target.subjectRef } : {}), scope: target.scope,
+      verdict: input.verdict, severity: severityForHumanVerdict(input.verdict, target.severity), confidence: 1,
+      rationale: input.rationale, evidenceRefs: [...target.evidenceRefs], factRefs: [...target.factRefs], queryRefs: [...target.queryRefs], createdAt: new Date().toISOString(),
+    };
+    this.store.putAssessment(assessment);
+    this.store.putAssessmentRelation({ relationId: `AREL-${randomUUID()}`, taskId: task.taskId, epochId: task.activeEpochId, kind: "ADJUDICATES", fromAssessmentId: assessment.assessmentId, toAssessmentId: target.assessmentId, createdAt: new Date().toISOString() });
+    this.store.appendAudit({ taskId: task.taskId, event: "protocol_v2_human_assessment_recorded", level: "warn", data: { assessmentId: assessment.assessmentId, targetAssessmentId: target.assessmentId, verdict: assessment.verdict } });
+    this.emit("changed", task.taskId);
+    return assessment;
+  }
+
+  revokeTaskGrant(taskId: string, grantId: string, reason: string): TaskGrant {
+    const task = this.requireTask(taskId);
+    if (task.protocolVersion !== 2) throw new InvalidArgumentError("只有 v2 任务具有可撤销 Grant");
+    const grant = this.store.listTaskGrants(taskId).find((item) => item.grantId === grantId);
+    if (!grant || grant.targetFingerprint !== task.target.hostFingerprint) throw new InvalidArgumentError("Task Grant 不存在或目标不匹配");
+    const revoked = this.store.revokeTaskGrant(taskId, grantId, reason);
+    this.store.appendAudit({ taskId, event: "protocol_v2_grant_revoked", level: "warn", data: { grantId, kind: revoked.kind, reason: revoked.revocationReason } });
+    this.emit("changed", taskId);
+    return revoked;
+  }
+
   async generateReport(taskId: string): Promise<ReportRecord> {
     const task = this.requireTask(taskId);
     this.assertNotArchived(task);
@@ -183,7 +266,8 @@ export class Application extends EventEmitter {
     }
     if (task.interruption?.recoveryRequired) throw new InvalidArgumentError("任务需要先完成恢复，才能生成报告");
     this.store.appendAudit({ taskId, event: "report_generation_requested_by_analyst", level: "info", data: { existingVersions: this.store.listReports(taskId).length } });
-    const report = await this.reports.generate(task, this.runtimeFor(task));
+    if (task.protocolVersion !== 2) throw new InvalidArgumentError("v1 历史任务只读，仅可查看已生成报告");
+    const report = await this.reports.generate(task, await this.ensureRuntimeFor(task, true));
     this.emit("changed", taskId);
     return report;
   }
@@ -206,4 +290,21 @@ export class Application extends EventEmitter {
   private assertNotArchived(task: TaskContext): void {
     if (task.archivedAt) throw new InvalidArgumentError("已归档任务为只读，请先恢复归档");
   }
+
+  private finishActiveEpoch(taskId: string): void {
+    const task = this.requireTask(taskId);
+    if (task.protocolVersion !== 2 || !task.activeEpochId) return;
+    const epoch = this.store.getScanEpoch(taskId, task.activeEpochId);
+    if (epoch?.status !== "RUNNING") return;
+    const coverage = this.store.listCoverageRuns(taskId, task.activeEpochId);
+    const partial = coverage.length !== task.checks.length || coverage.some((run) => run.status !== "COMPLETE" || run.applicability === "UNKNOWN");
+    this.store.finishScanEpoch(taskId, task.activeEpochId, partial ? "PARTIAL" : "COMPLETED");
+  }
+}
+
+function severityForHumanVerdict(verdict: AssessmentVerdict, fallback: Assessment["severity"]): Assessment["severity"] {
+  if (verdict === "CONFIRMED_MALICIOUS") return fallback === "CRITICAL" ? "CRITICAL" : "HIGH";
+  if (verdict === "HIGHLY_SUSPICIOUS") return fallback === "CRITICAL" || fallback === "HIGH" ? fallback : "HIGH";
+  if (verdict === "SUSPICIOUS") return fallback === "INFO" || fallback === "LOW" ? "MEDIUM" : fallback;
+  return "INFO";
 }

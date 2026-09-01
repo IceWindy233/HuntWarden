@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { SSHExecutor, sshFingerprint } from "../../src/executor/ssh-executor.js";
+import { SSHExecutor, sshFingerprint, validateRemoteArtifactMetadata } from "../../src/executor/ssh-executor.js";
 import { testTask } from "../helpers.js";
 
 describe("SSHExecutor", () => {
@@ -13,8 +13,19 @@ describe("SSHExecutor", () => {
     expect(() => new SSHExecutor(target, "/usr/local/../bin/helper")).toThrow();
   });
 
-  it("运行时也拒绝伪造的 HostOperation", async () => {
+  it("控制端执行器只暴露 v2 Capability、Wire 与制品接口", () => {
     const executor = new SSHExecutor(testTask().target, "/usr/local/libexec/huntwarden-helper");
-    await expect(executor.invoke({ operation: "get_host_info;id", params: {} } as never)).rejects.toMatchObject({ code: "INVALID_ARGUMENT" });
+    expect("invoke" in executor).toBe(false);
+    expect(typeof executor.invokeV2).toBe("function");
+    expect(typeof executor.invokeMaintenanceV2).toBe("function");
+  });
+
+  it("Artifact 元数据不使用控制端墙钟拒绝时钟漂移的目标", () => {
+    const artifact = {
+      artifactToken: "a".repeat(64), sha256: "b".repeat(64), size: 123,
+      expiresAt: "2020-01-01T00:00:00.000Z",
+    };
+    expect(() => validateRemoteArtifactMetadata(artifact)).not.toThrow();
+    expect(() => validateRemoteArtifactMetadata({ ...artifact, expiresAt: "not-a-time" })).toThrow(/expiresAt/);
   });
 });

@@ -7,6 +7,7 @@ import { _electron as electron, type ElectronApplication, type Page } from "@pla
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { HuntWardenDesktopApi, NewTaskInput, TaskSnapshot } from "../../src/gui/contracts.js";
 import { SSHExecutor } from "../../src/executor/ssh-executor.js";
+import { DockerV2Remote } from "../docker/v2-remote.js";
 
 const enabled = process.env.HUNTWARDEN_GUI_REMEDIATION_TESTS === "1";
 const projectRoot = resolve(".");
@@ -25,7 +26,7 @@ afterEach(async () => {
   await Promise.all(temporaryDirectories.splice(0).map((path) => rm(path, { recursive: true, force: true })));
 });
 
-async function launchScenario(scenario: "web-quarantine" | "account-disable", port: number): Promise<{
+async function launchScenario(scenario: "web-quarantine" | "account-disable" | "account-scan", port: number): Promise<{
   app: ElectronApplication;
   page: Page;
   target: NewTaskInput["target"];
@@ -102,8 +103,9 @@ describe.skipIf(!enabled)("GUI REMEDIATE 真实审批闭环", () => {
 
     const remote = new SSHExecutor(target, "/usr/local/libexec/huntwarden-helper", 30_000);
     try {
-      const file = await remote.invoke({ operation: "inspect_script_file", params: { path: "/var/www/html/lab-webshell.php", maxBytes: 65_536 } });
-      expect(file.path).toBe("/var/www/html/lab-webshell.php");
+      const client = new DockerV2Remote(remote);
+      const files = await client.enumerate("file", ["path"], { scope: { namespace: "file", canonicalRoot: "/var/www/html" }, predicate: { op: "eq", field: "path", value: "/var/www/html/lab-webshell.php" } });
+      expect(files[0]?.fields.path).toBe("/var/www/html/lab-webshell.php");
     } finally { await remote.close(); }
     await page.getByRole("button", { name: "审计" }).click();
     expect(await page.locator(".audit-log").innerText()).toContain("write_tool_denied");
@@ -119,43 +121,32 @@ describe.skipIf(!enabled)("GUI REMEDIATE 真实审批闭环", () => {
     const completed = await waitCompleted(page, taskId);
     expect(completed.approvals).toMatchObject([{ tool: "quarantine_file", status: "CONSUMED" }]);
     expect(completed.actionReceipts).toMatchObject([{ tool: "quarantine_file", status: "SUCCEEDED" }]);
-    expect(completed.findings).toEqual(expect.arrayContaining([
-      expect.objectContaining({ category: "webshell", status: "CONFIRMED" }),
-    ]));
+    expect(completed.protocolV2?.assessments).toEqual(expect.arrayContaining([expect.objectContaining({ category: "webshell", authorType: "MODEL", verdict: "SUSPICIOUS" })]));
 
     const remote = new SSHExecutor(target, "/usr/local/libexec/huntwarden-helper", 30_000);
     try {
-      const files = await remote.invoke({ operation: "find_recent_web_files", params: {
-        roots: ["/var/www/html"], modifiedWithinHours: 168, maxFiles: 500, maxFileSizeBytes: 10 * 1024 * 1024,
-      } });
-      expect(files.some((item) => item.path === "/var/www/html/lab-webshell.php")).toBe(false);
+      const client = new DockerV2Remote(remote);
+      const files = await client.enumerate("file", ["path"], { scope: { namespace: "file", canonicalRoot: "/var/www/html" }, predicate: { op: "eq", field: "path", value: "/var/www/html/lab-webshell.php" } });
+      expect(files).toHaveLength(0);
     } finally { await remote.close(); }
     await page.getByRole("button", { name: "审计" }).click();
     expect(await page.locator(".receipt-section").innerText()).toContain("quarantine_file");
     expect(await page.locator(".receipt-section").innerText()).toContain("SUCCEEDED");
   }, 120_000);
 
-  it("双击确认后禁用 labroot 并在 GUI 展示一次性回执", async () => {
-    const { page, target } = await launchScenario("account-disable", 2224);
-    const taskId = await createAndStart(page, { request: "E2E：批准禁用 Lab UID 0 账户", mode: "REMEDIATE", checks: ["backdoor_account"], target });
-    expect(await page.locator(".approval-details").innerText()).toContain("labroot");
-    await page.getByRole("button", { name: "批准一次" }).click();
-    await page.getByRole("button", { name: "确认执行" }).click();
+  it("默认配置在 REMEDIATE 任务中也不暴露不完整的账户禁用动作", async () => {
+    const { page, target } = await launchScenario("account-scan", 2224);
+    const input: NewTaskInput = { request: "E2E：账户处置默认 fail-close", mode: "REMEDIATE", checks: ["backdoor_account"], target };
+    const task = await page.evaluate((value) => window.huntwarden.createTask(value), input);
+    const taskButton = page.locator(".sidebar-tasks button", { hasText: input.request });
+    await taskButton.waitFor({ state: "visible", timeout: 10_000 });
+    await taskButton.click();
+    await page.getByRole("button", { name: "开始调查" }).click();
+    const taskId = task.taskId;
     const completed = await waitCompleted(page, taskId);
-    expect(completed.approvals).toMatchObject([{ tool: "disable_account", status: "CONSUMED" }]);
-    expect(completed.actionReceipts).toMatchObject([{ tool: "disable_account", status: "SUCCEEDED" }]);
-    expect(completed.findings).toEqual(expect.arrayContaining([
-      expect.objectContaining({ category: "backdoor_account", status: "CONFIRMED" }),
-    ]));
-
-    const remote = new SSHExecutor(target, "/usr/local/libexec/huntwarden-helper", 30_000);
-    try {
-      const account = await remote.invoke({ operation: "inspect_account", params: { username: "labroot" } });
-      expect(account.passwordLocked).toBe(true);
-      expect(String(account.accountExpireDays)).not.toBe("-1");
-    } finally { await remote.close(); }
-    await page.getByRole("button", { name: "审计" }).click();
-    expect(await page.locator(".receipt-section").innerText()).toContain("disable_account");
-    expect(await page.locator(".receipt-section").innerText()).toContain("SUCCEEDED");
+    expect(completed.approvals).toHaveLength(0);
+    expect(completed.actionReceipts).toHaveLength(0);
+    expect(completed.toolRuns.some((item) => item.toolName === "disable_account")).toBe(false);
+    expect(completed.protocolV2?.assessments).toEqual(expect.arrayContaining([expect.objectContaining({ category: "backdoor_account", authorType: "MODEL", verdict: "SUSPICIOUS" })]));
   }, 120_000);
 });

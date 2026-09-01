@@ -1,8 +1,21 @@
+schemaVersion: 2
+
+protocolV2:
+  remoteBudget:
+    preset: { remoteCalls: 80, nodes: 20000, bytes: 67108864, wallTimeMs: 900000, probeCalls: 10 }
+    model: { remoteCalls: 80, nodes: 20000, bytes: 67108864, wallTimeMs: 900000, probeCalls: 10 }
+  localQueryBudget: { calls: 200, rows: 50000, wallTimeMs: 300000 }
+  externalIntelBudget: { calls: 100, iocs: 1000, wallTimeMs: 300000 }
+  dataPolicy: { modelContentBytes: 4194304, evidenceBytes: 268435456, defaultTextClass: SENSITIVE_TEXT }
+  grants: { maxRequests: 20, pendingExpiresOnInterruption: true }
+
 agent:
   maxTurns: 30
-  maxToolCalls: 100
+  contextRetainTurns: 3
+  providerMaxRetries: 2
+  providerTimeoutSeconds: 600
   defaultMode: SCAN
-  promptVersion: huntwarden-agent-v1
+  promptVersion: huntwarden-agent-v2
 
 model:
   source: builtin
@@ -28,8 +41,9 @@ webshell:
   modifiedWithinHours: 168
   maxCandidateFiles: 500
   maxFileSizeBytes: 10485760
+  maxScriptExcerptBytes: 65536
+  maxAccessLogLines: 500
   yaraRuleDir: ./rules/yara
-  remoteRulePath: /opt/huntwarden/rules/webshell.yar
 
 java:
   supportedContainers: [tomcat]
@@ -40,6 +54,7 @@ java:
 account:
   checkAuthorizedKeys: true
   checkLoginHistory: true
+  maxLoginHistoryEntries: 100
 
 persistence:
   maxItemsPerSource: 500
@@ -51,6 +66,7 @@ triage:
   maxFiles: 5000
   maxTimelineEvents: 5000
   maxArtifactBytes: 10485760
+  maxProcessTreeDepth: 12
 
 threatIntel:
   enabled: false
@@ -65,5 +81,7 @@ threatIntel:
 
 remediation:
   requireApproval: true
-  allowedTools: [quarantine_file, disable_account]
+  # disable_account 目前只锁定密码认证，无法保证活动会话与 SSH Key/CA 信任失效；
+  # 在恢复动作和密钥面验证闭环完成前不得作为默认可用处置。
+  allowedTools: [quarantine_file]
   quarantineRoot: /var/lib/huntwarden/quarantine

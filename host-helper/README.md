@@ -1,6 +1,6 @@
 # HuntWarden 目标端 Helper
 
-Helper 是 root 所有的固定操作入口，只接受白名单操作名和 stdin JSON，不接受 Shell 字符串。
+Helper 是 root 所有的 v2 类型化取证入口，只接受 `capabilities` 与八个静态白名单原语（`enumerate/project/read/match/relate/verify/collect/probe`）及单个 JSON Envelope，不接受 Shell 字符串。v1 检测问题操作名已不再由运行时分发。
 
 ## 前置依赖与缺失影响
 
@@ -8,7 +8,8 @@ Helper 是 root 所有的固定操作入口，只接受白名单操作名和 std
 | --- | --- | --- |
 | `python3` >= 3.8 | Helper 无法运行（安装期直接拒绝，不会留下半装状态） | 安装期拦截 |
 | `sudo` / `visudo` | 控制端无法以 root 调用 Helper，所有特权采集被拒 | `sudo` |
-| `yara` | WebShell 规则扫描不可用，只剩启发式特征，已知家族漏报、误报率上升 | `yara` |
+| `re2` Python 模块 | RE2 matcher 不会出现在 v2 Capability；绝不回退到 Python `re` | `capabilities.matchers` |
+| `yara` | 仅在二进制与内置版本化 RuleSet 同时存在时声明 `yara` matcher；不接受模型源码或路径 | `capabilities.matchers` |
 | `journalctl` + journal 存储 | journald 主导发行版（Rocky/RHEL/Alma）的认证与执行事件缺失，后门账户维度与事件时间线不完整 | `journal` |
 | `auditd`（`auditctl`/`ausearch` + `/var/log/audit/audit.log`） | execve 执行事件缺失，事件时间线只剩文件落地与认证两个维度 | `auditd` |
 | JDK（`jcmd`/`java`）与探针 JAR | 无法 attach 到 Tomcat JVM，Java 内存马运行时枚举与 Class Dump 不可用 | `javaAttach`、`tomcatProbe` |
@@ -35,7 +36,7 @@ sudo ./host-helper/install-helper.sh --executor-user <SSH用户> --self-check
 
 ## 规则与探针下发
 
-- **YARA 规则**：安装脚本把仓库 `rules/yara/webshell.yar` 下发到 `/opt/huntwarden/rules/webshell.yar`（`root:root 0644`），落地后校验 SHA-256 与源文件一致，不一致即安装失败。该路径由控制端 `webshell.remoteRulePath` 配置决定，两边必须一致。规则源缺失时脚本拒绝安装——没有规则的安装会让 `yara_scan_files` 在真机上直接报错。
+- **YARA 规则**：安装脚本将内置规则 `rules/yara/webshell.yar` 下发到协议固定位置并校验 SHA-256。Helper 仅在 `yara` 二进制和该内置 RuleSet 同时存在时声明能力；v2 `match` 只接受固定 `RULESET-WEBSHELL-BUILTIN-2`，拒绝规则源码与任意路径。
 - **Tomcat 探针**：默认取 `java/tomcat-probe/build/libs/huntwarden-tomcat-probe.jar`，下发到 `/opt/huntwarden/huntwarden-tomcat-probe.jar` 并同样校验 SHA-256。探针未构建时脚本**打印警告并跳过**（不静默），Java 内存马检测降级；补装方式：
 
 ```bash
@@ -73,11 +74,14 @@ sudo ./host-helper/install-helper.sh --executor-user <SSH用户> --self-check
 sudo ./host-helper/self-check-helper.sh --executor-user <SSH用户>
 ```
 
-自检以执行用户身份经 sudo 调用 `get_capabilities`，逐项输出：
+自检以执行用户身份经 sudo 调用 v2 `capabilities`，逐项输出：
 
-- **组件就位检查**：协议版本是否为 1、固定操作集合是否齐备、规则文件与探针 JAR 是否就位且权限未漂移。
-- **目标端检测能力**：`SUPPORTED / PARTIAL / UNSUPPORTED / PERMISSION_DENIED`，每个非 `SUPPORTED` 项都会打印「哪些检测能力因此降级」。
-- **环境事实**：SELinux / AppArmor 状态，仅供参考，不参与判定。
+- 协议版本是否为 2、Manifest 是否精确为 `2.1.0`；
+- 八个取证原语与核心 Namespace 是否齐备，且 Helper 没有错误声明 controller-local `task_ioc`；
+- 单次对象、输出、读取与 Evidence 采集硬上限；
+- literal/RE2/YARA matcher 与 JVM Probe 的当前可用子集；YARA 只有在内置版本化 RuleSet 与运行时同时可用时才声明。
+
+`known_hash_set` 数据集仅存放在控制端。Helper 的 `verify` 只接受已由控制端校验过的 `DATASET-*` 引用并重观测绑定文件 SHA-256，不接收哈希数组，也不自行作恶意判断。
 
 退出码：
 

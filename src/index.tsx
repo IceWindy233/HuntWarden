@@ -1,4 +1,3 @@
-import React from "react";
 import { render } from "ink";
 import { createModelBundle } from "./agent/model.js";
 import { loadConfig } from "./config/load-config.js";

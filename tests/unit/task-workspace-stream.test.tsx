@@ -1,5 +1,4 @@
 // @vitest-environment jsdom
-import React from "react";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { TaskWorkspace } from "../../src/renderer/components/TaskWorkspace.js";
@@ -35,6 +34,36 @@ describe("TaskWorkspace Agent 流式预览", () => {
     expect(screen.getByText("正在核验 WebShell 候选文件…")).toBeTruthy();
     expect(screen.getByText(/实时预览已达 512K 字符/)).toBeTruthy();
     expect(document.querySelector(".stream-cursor")).toBeTruthy();
+  });
+
+  it("INV-14：Coverage PARTIAL/UNKNOWN 在界面上呈现 INCOMPLETE，模型无结论时显式显示 MODEL: NOT_CONCLUDED", () => {
+    const task = { ...testTask(), status: "COMPLETED" as const, protocolVersion: 2 as const, activeEpochId: "EPOCH-INV14", checks: ["webshell" as const] };
+    const createdAt = new Date().toISOString();
+    const snapshot: TaskSnapshot = {
+      task,
+      findings: [], evidence: [], approvals: [], actionReceipts: [], reports: [], audit: [],
+      conversation: [], toolRuns: [],
+      protocolV2: {
+        epoch: {
+          epochId: "EPOCH-INV14", taskId: task.taskId, targetFingerprint: task.target.hostFingerprint,
+          protocolVersion: 2, manifestVersion: "2.1.0", helperVersion: "2.1.0",
+          reason: "INITIAL", status: "PARTIAL", startedAt: createdAt,
+        },
+        coverage: [{
+          coverageId: "COV-INV14", taskId: task.taskId, epochId: "EPOCH-INV14", category: "webshell",
+          presetId: "webshell-baseline", presetVersion: "2.1.0", status: "PARTIAL", applicability: "UNKNOWN",
+          completedCriteria: [], missingCriteria: [{ criterion: "candidate-files", reasonCode: "PARTIAL_SOURCE" }], createdAt,
+        }],
+        assessments: [], investigationGaps: [], modelState: [{ category: "webshell", state: "NOT_CONCLUDED" }],
+      },
+    };
+
+    render(<TaskWorkspace snapshot={snapshot} refresh={vi.fn(async () => undefined)} notify={vi.fn()} />);
+
+    expect(screen.getByText(/^INCOMPLETE：/)).toBeTruthy();
+    expect(screen.getByText(/^MODEL: NOT_CONCLUDED：/)).toBeTruthy();
+    expect(document.querySelector(".coverage-tag.pending")).toBeTruthy();
+    expect(document.querySelector(".coverage-tag.done")).toBeNull();
   });
 
   it("只对 Agent 消息应用 Markdown，分析师与工具输出保持纯文本", () => {

@@ -1,51 +1,51 @@
 {
-  "$schema": "https://biomejs.dev/schemas/2.5.9/schema.json",
-  "vcs": { "enabled": false, "clientKind": "git", "useIgnoreFile": false },
-  "files": {
-    "includes": [
-      "src/**/*.ts",
-      "src/**/*.tsx",
-      "tests/**/*.ts",
-      "tests/**/*.tsx",
-      "vitest.config.ts",
-      "vite.config.ts",
-      "forge.config.cjs"
-    ]
-  },
-  "formatter": { "enabled": false },
-  "assist": { "enabled": false },
-  "javascript": { "globals": ["HuntWardenDesktopApi"] },
-  "linter": {
-    "enabled": true,
-    "rules": {
-      "recommended": true,
-      "correctness": {
-        "noUnusedVariables": "error",
-        "noUnusedPrivateClassMembers": "error",
-        "noUnreachable": "error",
-        "noPrecisionLoss": "error",
-        "useExhaustiveDependencies": "off"
-      },
-      "suspicious": {
-        "noExplicitAny": "error",
-        "noDoubleEquals": "error",
-        "noDebugger": "error",
-        "noVar": "error",
-        "noFallthroughSwitchClause": "error",
-        "noArrayIndexKey": "off",
-        "useIterableCallbackReturn": "off"
-      },
-      "security": {
-        "noGlobalEval": "error",
-        "noDangerouslySetInnerHtml": "error"
-      },
-      "style": {
-        "noNonNullAssertion": "off"
-      },
-      "a11y": {
-        "useButtonType": "off",
-        "noLabelWithoutControl": "off"
-      }
-    }
-  }
+	"$schema": "https://biomejs.dev/schemas/2.5.9/schema.json",
+	"vcs": { "enabled": false, "clientKind": "git", "useIgnoreFile": false },
+	"files": {
+		"includes": [
+			"src/**/*.ts",
+			"src/**/*.tsx",
+			"tests/**/*.ts",
+			"tests/**/*.tsx",
+			"vitest.config.ts",
+			"vite.config.ts",
+			"forge.config.cjs"
+		]
+	},
+	"formatter": { "enabled": false },
+	"assist": { "enabled": false },
+	"javascript": { "globals": ["HuntWardenDesktopApi"] },
+	"linter": {
+		"enabled": true,
+		"rules": {
+			"preset": "recommended",
+			"correctness": {
+				"noUnusedVariables": "error",
+				"noUnusedPrivateClassMembers": "error",
+				"noUnreachable": "error",
+				"noPrecisionLoss": "error",
+				"useExhaustiveDependencies": "off"
+			},
+			"suspicious": {
+				"noExplicitAny": "error",
+				"noDoubleEquals": "error",
+				"noDebugger": "error",
+				"noVar": "error",
+				"noFallthroughSwitchClause": "error",
+				"noArrayIndexKey": "off",
+				"useIterableCallbackReturn": "off"
+			},
+			"security": {
+				"noGlobalEval": "error",
+				"noDangerouslySetInnerHtml": "error"
+			},
+			"style": {
+				"noNonNullAssertion": "off"
+			},
+			"a11y": {
+				"useButtonType": "off",
+				"noLabelWithoutControl": "off"
+			}
+		}
+	}
 }

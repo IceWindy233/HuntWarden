@@ -1,33 +1,31 @@
 import { createHash } from "node:crypto";
-import type { ArtifactTransferResult, HostExecutor, HostOperation, HostOperationOutput, HostOperationRequest, RemoteArtifact } from "./operations.js";
-import { effectiveHostOperationTimeout } from "./timeout-context.js";
+import type { ArtifactTransferResult, RemoteArtifact } from "./artifacts.js";
+import type { ForensicVerb, MaintenanceVerb, ProtocolV2Executor } from "./protocol-v2-executor.js";
+import type { HelperCapabilitiesV2, WireRequest, WireResponse } from "../protocol-v2/types.js";
 
-export type FakeHandler = (params: unknown) => unknown | Promise<unknown>;
-
-export class FakeExecutor implements HostExecutor {
-  readonly calls: { operation: HostOperation; params: unknown }[] = [];
-  readonly effectiveTimeouts: number[] = [];
+export class FakeProtocolV2Executor implements ProtocolV2Executor {
+  readonly calls: Array<{ verb: ForensicVerb; request: WireRequest }> = [];
+  readonly maintenanceCalls: Array<{ verb: MaintenanceVerb; request: WireRequest }> = [];
   constructor(
-    private readonly handlers: Partial<Record<HostOperation, FakeHandler>> = {},
+    readonly capabilities: HelperCapabilitiesV2,
+    private readonly handler: (verb: ForensicVerb, request: WireRequest) => WireResponse | Promise<WireResponse>,
     private readonly artifacts: Record<string, Buffer> = {},
+    private readonly maintenanceHandler?: (verb: MaintenanceVerb, request: WireRequest) => Record<string, unknown> | Promise<Record<string, unknown>>,
   ) {}
-
-  async invoke<T extends HostOperation>(request: HostOperationRequest<T>, signal?: AbortSignal): Promise<HostOperationOutput<T>> {
-    if (signal?.aborted) throw signal.reason;
-    this.calls.push({ operation: request.operation, params: request.params });
-    this.effectiveTimeouts.push(effectiveHostOperationTimeout(request.timeoutMs, 30_000));
-    const handler = this.handlers[request.operation];
-    if (!handler) throw new Error(`No fake handler for ${request.operation}`);
-    return await handler(request.params) as HostOperationOutput<T>;
+  async getCapabilitiesV2(): Promise<HelperCapabilitiesV2> { return structuredClone(this.capabilities); }
+  async invokeV2(verb: ForensicVerb, request: WireRequest, signal?: AbortSignal): Promise<WireResponse> {
+    signal?.throwIfAborted(); this.calls.push({ verb, request: structuredClone(request) }); return await this.handler(verb, request);
   }
-
-  async downloadArtifact(artifact: RemoteArtifact, onChunk: (chunk: Buffer) => void | Promise<void>, signal?: AbortSignal): Promise<ArtifactTransferResult> {
-    signal?.throwIfAborted();
+  async invokeMaintenanceV2(verb: MaintenanceVerb, request: WireRequest, signal?: AbortSignal): Promise<Record<string, unknown>> {
+    signal?.throwIfAborted(); this.maintenanceCalls.push({ verb, request: structuredClone(request) });
+    if (!this.maintenanceHandler) throw new Error(`No fake maintenance handler for ${verb}`);
+    return await this.maintenanceHandler(verb, request);
+  }
+  async downloadArtifact(artifact: RemoteArtifact, onChunk: (chunk: Buffer) => void | Promise<void>): Promise<ArtifactTransferResult> {
     const value = this.artifacts[artifact.artifactToken];
     if (!value) throw new Error(`No fake artifact payload for ${artifact.artifactToken}`);
     await onChunk(value);
     return { sha256: createHash("sha256").update(value).digest("hex"), size: value.length };
   }
-
   async close(): Promise<void> {}
 }

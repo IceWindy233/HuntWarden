@@ -1,6 +1,7 @@
-import React, { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { CHECK_CATEGORY_SHORT_LABELS, type ReportRecord } from "../../domain/types.js";
 import type { TaskSnapshot } from "../../gui/contracts.js";
+import type { AssessmentVerdict } from "../../protocol-v2/types.js";
 import { Button, EmptyState, formatTime, shortId, StatusPill, Textarea } from "./ui.js";
 import { MarkdownContent } from "./MarkdownContent.js";
 
@@ -59,8 +60,8 @@ export function TaskWorkspace({ snapshot, refresh, notify, liveStream }: { snaps
   async function generateReport(): Promise<void> {
     if (!hasReports) {
       const description = task.status === "COMPLETED"
-        ? "确认基于当前 Finding、Evidence、处置与检测覆盖生成正式报告？生成后仍可创建新版本。"
-        : "当前任务未正常完成。确认生成阶段性报告？报告会保留 ERROR、NOT_CHECKED 和未完成原因。";
+        ? "确认基于当前 Coverage、Assessment、Evidence 与处置回执生成正式报告？生成后仍可创建新版本。"
+        : "当前任务未正常完成。确认生成阶段性报告？报告会保留 ERROR、NOT_RUN/UNKNOWN 与未完成原因。";
       if (!window.confirm(description)) return;
     }
     let generated: ReportRecord | undefined;
@@ -74,7 +75,7 @@ export function TaskWorkspace({ snapshot, refresh, notify, liveStream }: { snaps
   }
 
   async function archiveTask(): Promise<void> {
-    if (!window.confirm("归档后任务会从当前列表隐藏，但 Finding、Evidence、报告与审计记录都会保留。确认归档？")) return;
+    if (!window.confirm("归档后任务会从当前列表隐藏，但 Coverage、Assessment、Evidence、报告与审计记录都会保留。确认归档？")) return;
     await action("archive", () => window.huntwarden.archiveTask(task.taskId), "任务已归档");
   }
 
@@ -88,7 +89,27 @@ export function TaskWorkspace({ snapshot, refresh, notify, liveStream }: { snaps
     setReport(value?.markdown);
   }
 
-  const counts = useMemo(() => ({ critical: snapshot.findings.filter((item) => item.severity === "CRITICAL").length, suspicious: snapshot.findings.filter((item) => ["CONFIRMED", "HIGHLY_SUSPICIOUS", "SUSPICIOUS"].includes(item.status)).length }), [snapshot.findings]);
+  const counts = useMemo(() => ({
+    critical: snapshot.protocolV2?.assessments.filter((item) => item.severity === "CRITICAL").length ?? 0,
+    suspicious: snapshot.protocolV2?.assessments.filter((item) => ["CONFIRMED_MALICIOUS", "HIGHLY_SUSPICIOUS", "SUSPICIOUS"].includes(item.verdict)).length ?? 0,
+  }), [snapshot.protocolV2]);
+
+  /**
+   * 设计 §9.2：PARTIAL / ERROR / NOT_RUN / UNKNOWN 必须整体呈现为 INCOMPLETE，模型没有结论时
+   * 必须显式显示 MODEL: NOT_CONCLUDED。此前这两条只存在于覆盖标签的悬浮 title 里，界面上看不见。
+   */
+  const coverageSafety = useMemo(() => {
+    const projection = snapshot.protocolV2;
+    if (!projection) return undefined;
+    const incomplete = task.checks.filter((check) => {
+      const coverage = projection.coverage.filter((item) => item.category === check).at(-1);
+      return coverage?.status !== "COMPLETE" || coverage.applicability === "UNKNOWN";
+    }).map((check) => CHECK_CATEGORY_SHORT_LABELS[check]);
+    const notConcluded = task.checks
+      .filter((check) => (projection.modelState.find((item) => item.category === check)?.state ?? "NOT_CONCLUDED") === "NOT_CONCLUDED")
+      .map((check) => CHECK_CATEGORY_SHORT_LABELS[check]);
+    return { incomplete, notConcluded };
+  }, [snapshot.protocolV2, task.checks]);
 
   return <div className="workspace">
     <header className="workspace-header">
@@ -109,7 +130,7 @@ export function TaskWorkspace({ snapshot, refresh, notify, liveStream }: { snaps
     <div className="workspace-notices">
       {task.archivedAt ? <div className="archive-banner"><strong>任务已归档</strong><span>{formatTime(task.archivedAt)} · 当前为只读查看，所有取证与审计数据均保留。</span></div> : null}
       {task.interruption?.recoveryRequired ? <div className="interruption-banner"><strong>检测到任务中断</strong><span>原状态 {task.interruption.previousStatus} · {formatTime(task.interruption.detectedAt)}。旧审批已失效，恢复后会先核对远程回执。</span></div> : null}
-      {!archived && !active && task.status !== "CREATED" && !task.interruption?.recoveryRequired && !hasReports ? <div className="report-pending-banner"><strong>{task.status === "COMPLETED" ? "调查已完成，报告待确认" : "任务未正常完成，可生成阶段性报告"}</strong><span>{task.status === "COMPLETED" ? "请先复核 Finding、Evidence 与检测覆盖，再手动确认生成报告。" : "报告将明确保留未检查项、错误状态和未完成原因。"}</span></div> : null}
+      {!archived && !active && task.status !== "CREATED" && !task.interruption?.recoveryRequired && !hasReports ? <div className="report-pending-banner"><strong>{task.status === "COMPLETED" ? "调查已完成，报告待确认" : "任务未正常完成，可生成阶段性报告"}</strong><span>{task.status === "COMPLETED" ? "请先复核 Coverage、Assessment 与 Evidence，再手动确认生成报告。" : "报告将明确保留 INCOMPLETE、错误状态和未完成原因。"}</span></div> : null}
     </div>
 
     <div className="metrics-row">
@@ -117,15 +138,22 @@ export function TaskWorkspace({ snapshot, refresh, notify, liveStream }: { snaps
       <Metric label="工具调用" value={`${task.toolCallCount}`} tone="blue" />
       <Metric label="高风险发现" value={`${counts.suspicious}`} tone={counts.suspicious ? "amber" : "green"} />
       <Metric label="Evidence" value={`${snapshot.evidence.length}`} tone="violet" />
-      <div className="coverage-metric"><span>检测覆盖</span><div className="coverage-tags">{task.checks.map((check) => <span key={check} className={`coverage-tag ${task.coverage[check] ? "done" : "pending"}`} title={task.coverage[check]}>{CHECK_CATEGORY_SHORT_LABELS[check]}</span>)}</div></div>
+      <div className="coverage-metric"><span>检测覆盖</span><div className="coverage-tags">{task.checks.map((check) => { const coverage = snapshot.protocolV2?.coverage.filter((item) => item.category === check).at(-1); const model = snapshot.protocolV2?.modelState.find((item) => item.category === check); const complete = coverage?.status === "COMPLETE" && coverage.applicability !== "UNKNOWN"; const title = coverage ? `${coverage.status}/${coverage.applicability}; MODEL: ${model?.state ?? "NOT_CONCLUDED"}` : "无 CoverageRun"; return <span key={check} className={`coverage-tag ${complete ? "done" : "pending"}`} title={title}>{CHECK_CATEGORY_SHORT_LABELS[check]}</span>; })}</div>
+        {coverageSafety && (coverageSafety.incomplete.length > 0 || coverageSafety.notConcluded.length > 0)
+          ? <div className="coverage-notes">
+            {coverageSafety.incomplete.length > 0 ? <span className="coverage-note incomplete">INCOMPLETE：{coverageSafety.incomplete.join("、")}</span> : null}
+            {coverageSafety.notConcluded.length > 0 ? <span className="coverage-note">MODEL: NOT_CONCLUDED：{coverageSafety.notConcluded.join("、")}</span> : null}
+          </div>
+          : null}
+      </div>
     </div>
 
-    <nav className="task-tabs">{TABS.map((item) => <button key={item} className={tab === item ? "active" : ""} onClick={() => setTab(item)}>{item}{item === "发现" && snapshot.findings.length ? <span>{snapshot.findings.length}</span> : item === "证据" && snapshot.evidence.length ? <span>{snapshot.evidence.length}</span> : null}</button>)}</nav>
+    <nav className="task-tabs">{TABS.map((item) => <button key={item} className={tab === item ? "active" : ""} onClick={() => setTab(item)}>{item}{item === "发现" && snapshot.protocolV2?.assessments.length ? <span>{snapshot.protocolV2.assessments.length}</span> : item === "证据" && snapshot.evidence.length ? <span>{snapshot.evidence.length}</span> : null}</button>)}</nav>
 
     <main className="task-content" aria-label={`${tab}内容`}>
       {tab === "调查" ? <Investigation snapshot={snapshot} {...(liveStream ? { liveStream } : {})} /> : null}
       {tab === "工具" ? <ToolTimeline snapshot={snapshot} /> : null}
-      {tab === "发现" ? <Findings snapshot={snapshot} /> : null}
+      {tab === "发现" ? <Findings snapshot={snapshot} refresh={refresh} notify={notify} readOnly={archived} /> : null}
       {tab === "证据" ? <EvidenceList snapshot={snapshot} notify={notify} /> : null}
       {tab === "情报" ? <ThreatIntelView snapshot={snapshot} /> : null}
       {tab === "审计" ? <AuditLog snapshot={snapshot} /> : null}
@@ -156,9 +184,33 @@ function ToolTimeline({ snapshot }: { snapshot: TaskSnapshot }) {
   return <div className="tool-table"><div className="table-head"><span>工具</span><span>风险</span><span>状态</span><span>开始时间</span><span>耗时</span></div>{[...snapshot.toolRuns].reverse().map((run) => { const duration = run.finishedAt ? `${Math.max(0, new Date(run.finishedAt).valueOf() - new Date(run.startedAt).valueOf())} ms` : "运行中"; return <div className="table-row" key={run.toolCallId}><div><strong>{run.toolName}</strong><small className="mono">{shortId(run.toolCallId)}</small>{run.error ? <small className="error-text">{run.error}</small> : null}</div><span><StatusPill value={run.risk} /></span><span><StatusPill value={run.status} /></span><span>{formatTime(run.startedAt)}</span><span>{duration}</span></div>; })}</div>;
 }
 
-function Findings({ snapshot }: { snapshot: TaskSnapshot }) {
-  if (snapshot.findings.length === 0) return <EmptyState icon="△" title="暂无 Finding" description="Agent 固化的结构化结论会在这里展示；没有 Finding 不代表目标安全。" />;
-  return <div className="card-list">{snapshot.findings.map((finding) => <article className="finding-card" key={finding.findingId}><header><div><span className="mono muted">{finding.findingId}</span><h3>{finding.title}</h3></div><div><StatusPill value={finding.severity} /><StatusPill value={finding.status} /></div></header><p>{finding.summary}</p><footer><span>置信度 <strong>{Math.round(finding.confidence * 100)}%</strong></span><span>类别 <strong>{finding.category}</strong></span><span>证据 <strong>{finding.evidenceRefs.length}</strong></span></footer>{finding.recommendation ? <div className="recommendation"><strong>建议</strong>{finding.recommendation}</div> : null}</article>)}</div>;
+function Findings({ snapshot, refresh, notify, readOnly }: { snapshot: TaskSnapshot; refresh: () => Promise<void>; notify: (message: string, tone?: "success" | "error" | "info") => void; readOnly: boolean }) {
+  // v1 结构化结论平面已随协议切换删除：历史任务只剩任务元数据、Evidence 与既有报告文件。
+  if (!snapshot.protocolV2) return <EmptyState icon="△" title="历史 v1 任务" description="该任务在 Tool Protocol v2 之前创建，结构化结论平面已移除；可查看 Evidence 与已生成的报告。" />;
+  {
+    const activeGrants = snapshot.grants.filter((grant) => grant.status === "ACTIVE");
+    const adjudicate = async (assessmentId: string, subjectRef: string | undefined) => {
+      const choices = subjectRef ? "CONFIRMED_MALICIOUS / HIGHLY_SUSPICIOUS / SUSPICIOUS / BENIGN / INCONCLUSIVE" : "NO_OBSERVED_FINDING / INCONCLUSIVE";
+      const verdict = window.prompt(`请输入人工 verdict：\n${choices}`, "INCONCLUSIVE")?.trim();
+      if (!verdict) return;
+      const allowed = subjectRef ? ["CONFIRMED_MALICIOUS", "HIGHLY_SUSPICIOUS", "SUSPICIOUS", "BENIGN", "INCONCLUSIVE"] : ["NO_OBSERVED_FINDING", "INCONCLUSIVE"];
+      if (!allowed.includes(verdict)) { notify("人工 verdict 不适用于该 Assessment scope", "error"); return; }
+      const rationale = window.prompt("请输入人工裁定理由（将进入不可变审计账本）")?.trim();
+      if (!rationale) return;
+      try { await window.huntwarden.recordHumanAssessment({ taskId: snapshot.task.taskId, targetAssessmentId: assessmentId, verdict: verdict as AssessmentVerdict, rationale }); notify("HUMAN Assessment 已追加", "success"); await refresh(); }
+      catch (error) { notify(error instanceof Error ? error.message : String(error), "error"); }
+    };
+    const revoke = async (grantId: string) => {
+      const reason = window.prompt("请输入撤销 Grant 的理由")?.trim();
+      if (!reason) return;
+      try { await window.huntwarden.revokeTaskGrant({ taskId: snapshot.task.taskId, grantId, reason }); notify("Grant 已撤销", "success"); await refresh(); }
+      catch (error) { notify(error instanceof Error ? error.message : String(error), "error"); }
+    };
+    return <div className="audit-sections">
+      <section className="receipt-section"><div className="receipt-heading"><strong>活动 Task Grants</strong><span>{activeGrants.length}</span></div>{activeGrants.length ? <div className="receipt-grid">{activeGrants.map((grant) => <article className="receipt-card" key={grant.grantId}><header><div><strong>{grant.kind}</strong><span className="mono">{grant.grantId}</span></div><StatusPill value={grant.status} /></header><code>{JSON.stringify(grant.binding)}</code>{readOnly ? null : <Button variant="danger" onClick={() => void revoke(grant.grantId)}>撤销</Button>}</article>)}</div> : <span className="muted">当前没有活动 Grant。</span>}</section>
+      {snapshot.protocolV2.assessments.length === 0 ? <EmptyState icon="△" title="暂无 Assessment" description="RULE、MODEL、HUMAN 将并列显示；MODEL: NOT_CONCLUDED 不代表目标安全。" /> : <div className="card-list">{snapshot.protocolV2.assessments.map((item) => <article className="finding-card" key={item.assessmentId}><header><div><span className="mono muted">{item.assessmentId}</span><h3>{item.authorType} · {item.category}</h3></div><div><StatusPill value={item.severity} /><StatusPill value={item.verdict} /></div></header><p>{item.rationale}</p><footer><span>置信度 <strong>{Math.round(item.confidence * 100)}%</strong></span><span>主体 <strong>{item.subjectRef ? shortId(item.subjectRef) : "OBSERVED_CATEGORY"}</strong></span><span>Fact / Evidence <strong>{item.factRefs.length} / {item.evidenceRefs.length}</strong></span>{readOnly || item.authorType === "HUMAN" ? null : <Button variant="ghost" onClick={() => void adjudicate(item.assessmentId, item.subjectRef)}>人工裁定</Button>}</footer></article>)}</div>}
+    </div>;
+  }
 }
 
 function EvidenceList({ snapshot, notify }: { snapshot: TaskSnapshot; notify: (message: string, tone?: "success" | "error" | "info") => void }) {
@@ -196,7 +248,7 @@ function AuditLog({ snapshot }: { snapshot: TaskSnapshot }) {
 }
 
 function ReportView({ taskId, reports, selectedReportId, report, onSelect, onGenerate, busy, notify, readOnly, firstReportLabel }: { taskId: string; reports: ReportRecord[]; selectedReportId: string | undefined; report: string | undefined; onSelect: (reportId: string) => Promise<void>; onGenerate: () => Promise<void>; busy: boolean; notify: (message: string, tone?: "success" | "error" | "info") => void; readOnly: boolean; firstReportLabel: string }) {
-  if (!report) return <EmptyState icon="▤" title="尚未生成报告" description="请先复核调查结果。确认后，报告会校验所有 Finding/Evidence 引用，失败时自动修复一次并回退确定性模板。" action={readOnly ? undefined : <Button variant="primary" onClick={onGenerate} busy={busy}>{firstReportLabel}</Button>} />;
+  if (!report) return <EmptyState icon="▤" title="尚未生成报告" description="请先复核调查结果。确认后，报告会校验所有 Coverage/Assessment/Evidence/Action 引用，失败时自动修复一次并回退确定性模板。" action={readOnly ? undefined : <Button variant="primary" onClick={onGenerate} busy={busy}>{firstReportLabel}</Button>} />;
   const selected = reports.find((item) => item.reportId === selectedReportId) ?? reports.at(-1);
   return <div className="report-view"><div className="report-toolbar"><span>Markdown · {taskId}</span><div className="report-version-controls"><select aria-label="报告版本" value={selected?.reportId ?? ""} onChange={(event) => void onSelect(event.target.value)}>{reports.map((item) => <option value={item.reportId} key={item.reportId}>v{item.version} · {item.generationMode}</option>)}</select>{readOnly ? null : <Button variant="ghost" onClick={onGenerate} busy={busy}>重新生成</Button>}<Button variant="ghost" onClick={async () => { try { await window.huntwarden.revealReport({ taskId, ...(selected ? { reportId: selected.reportId } : {}) }); } catch (error) { notify(error instanceof Error ? error.message : String(error), "error"); } }}>在 Finder 显示</Button></div></div>{selected ? <div className="report-meta"><span>SHA-256 {shortId(selected.sha256)}</span><span>{formatTime(selected.createdAt)}</span>{selected.validationErrors.length ? <span>自动修复记录 {selected.validationErrors.length}</span> : null}</div> : null}<MarkdownContent text={report} className="report-markdown" /></div>;
 }

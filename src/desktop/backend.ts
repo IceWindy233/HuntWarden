@@ -1,5 +1,5 @@
 import { EventEmitter } from "node:events";
-import { access } from "node:fs/promises";
+import { access, readFile, stat } from "node:fs/promises";
 import { join, resolve, sep } from "node:path";
 import { builtinModels } from "@earendil-works/pi-ai/providers/all";
 import { getSupportedThinkingLevels } from "@earendil-works/pi-ai";
@@ -11,7 +11,7 @@ import { isInvalidPackagedLabCredentialPath } from "../config/profile-path-repai
 import type { AppConfig } from "../config/schema.js";
 import type { DesktopCredentialStore } from "../credentials/credential-store.js";
 import { validateTargetConfig } from "../domain/validation.js";
-import type { AgentStreamUpdate, ApprovalTicket, AuditEvent, Evidence, Finding, ReportRecord, TaskContext } from "../domain/types.js";
+import type { AgentStreamUpdate, ApprovalTicket, Evidence, ReportRecord, TaskContext } from "../domain/types.js";
 import { SSHExecutor } from "../executor/ssh-executor.js";
 import { SshHostKeyService, type SshHostKeyDiscovery } from "../executor/ssh-host-key-service.js";
 import type {
@@ -30,6 +30,7 @@ import { DESKTOP_API_VERSION } from "../gui/contracts.js";
 import { Application } from "../runtime/application.js";
 import { RuntimeStore } from "../storage/runtime-store.js";
 import { DbappThreatIntelClient } from "../threat-intel/dbapp-client.js";
+import type { KnownHashDataSetSummary } from "../datasets/known-hash-registry.js";
 
 export interface DesktopBackendOptions {
   userDataDir: string;
@@ -49,7 +50,7 @@ export class DesktopBackend extends EventEmitter {
   private application: Application | undefined;
   private activeProfile: ConfigProfile | undefined;
   private closePromise: Promise<void> | undefined;
-  private readonly emitted = new Map<string, { findingIds: Set<string>; evidenceIds: Set<string>; auditIds: Set<string> }>();
+  private readonly emitted = new Map<string, { evidenceIds: Set<string>; auditIds: Set<string> }>();
   private readonly streamBuffers = new Map<string, { update: AgentStreamUpdate; delta: string; timer: ReturnType<typeof setTimeout> }>();
 
   constructor(private readonly options: DesktopBackendOptions) {
@@ -100,7 +101,7 @@ export class DesktopBackend extends EventEmitter {
       createModelBundle(normalized, this.options.credentials);
       const warnings: string[] = [];
       if (normalized.model.source === "custom") warnings.push("自定义端点的 Tool Call 兼容性必须通过在线冒烟测试确认");
-      if (normalized.agent.maxTurns > 50 || normalized.agent.maxToolCalls > 200) warnings.push("当前 Agent 预算较高，请关注模型费用和调查时长");
+      if (normalized.agent.maxTurns > 50) warnings.push("当前 Agent 最大轮次较高，请关注模型费用和调查时长");
       return { valid: true, issues: [], warnings };
     } catch (error) {
       return { valid: false, issues: [{ path: "/", message: error instanceof Error ? error.message : String(error) }], warnings: [] };
@@ -127,6 +128,16 @@ export class DesktopBackend extends EventEmitter {
   async deleteConfigProfile(profileId: string): Promise<void> { await this.profiles.delete(profileId); }
   async importConfigProfile(path: string): Promise<ConfigProfile> { return await this.profiles.import(path); }
   async exportConfigProfile(profileId: string, path: string): Promise<void> { await this.profiles.export(profileId, path); }
+
+  listKnownHashDataSets(): KnownHashDataSetSummary[] { return this.requireApplication().listKnownHashDataSets(); }
+  async importKnownHashDataSet(path: string): Promise<KnownHashDataSetSummary> {
+    const info = await stat(path);
+    if (!info.isFile() || info.size > 16 * 1024 * 1024) throw new Error("known_hash_set 必须是小于 16 MiB 的 JSON 文件");
+    let value: unknown;
+    try { value = JSON.parse(await readFile(path, "utf8")); }
+    catch (error) { throw new Error(`known_hash_set JSON 无法解析: ${error instanceof Error ? error.message : String(error)}`); }
+    return this.requireApplication().importKnownHashDataSet(value);
+  }
 
   listModelProviders(): ModelProviderSummary[] {
     const models = builtinModels();
@@ -203,8 +214,8 @@ export class DesktopBackend extends EventEmitter {
     const config = this.requireApplication().config;
     const executor = new SSHExecutor(target, config.executor.helperPath, config.executor.timeoutSeconds * 1000);
     try {
-      const info = await executor.invoke({ operation: "get_host_info", params: {} });
-      return { ok: true, fingerprint: target.hostFingerprint, message: `SSH 与 Helper 验证通过：${String(info.hostname ?? target.host)}` };
+      const capabilities = await executor.getCapabilitiesV2();
+      return { ok: true, fingerprint: target.hostFingerprint, message: `SSH 与 Helper v2 验证通过：${capabilities.helper.name} ${capabilities.helper.version}` };
     } finally {
       await executor.close();
     }
@@ -224,11 +235,14 @@ export class DesktopBackend extends EventEmitter {
     const application = this.requireApplication();
     const task = application.store.getTask(taskId);
     if (!task) throw new Error(`任务不存在: ${taskId}`);
+    const epoch = task.protocolVersion === 2 && task.activeEpochId ? application.store.getScanEpoch(taskId, task.activeEpochId) : undefined;
+    const assessments = epoch ? application.store.listAssessments(taskId, epoch.epochId) : [];
     return {
       task,
-      findings: application.store.listFindings(taskId),
       evidence: application.store.listEvidence(taskId),
       approvals: application.store.listApprovals(taskId),
+      grantRequests: application.store.listGrantRequests(taskId),
+      grants: application.store.listTaskGrants(taskId),
       actionReceipts: application.store.listActionReceipts(taskId),
       reports: application.store.listReports(taskId),
       audit: application.store.listAudit(taskId, 500),
@@ -270,6 +284,13 @@ export class DesktopBackend extends EventEmitter {
         ...(run.finishedAt ? { finishedAt: run.finishedAt } : {}),
         ...(run.error ? { error: run.error } : {}),
       })),
+      ...(epoch ? { protocolV2: {
+        epoch,
+        coverage: application.store.listCoverageRuns(taskId, epoch.epochId),
+        assessments,
+        investigationGaps: application.store.listInvestigationGaps(taskId, epoch.epochId),
+        modelState: task.checks.map((category) => ({ category, state: assessments.some((item) => item.authorType === "MODEL" && item.category === category && item.scope === "OBSERVED_CATEGORY") ? "CONCLUDED" as const : "NOT_CONCLUDED" as const })),
+      } } : {}),
     };
   }
 
@@ -285,6 +306,9 @@ export class DesktopBackend extends EventEmitter {
   archiveTask(taskId: string): TaskContext { return this.requireApplication().archiveTask(taskId); }
   restoreTask(taskId: string): TaskContext { return this.requireApplication().restoreTask(taskId); }
   decideApproval(approvalId: string, approved: boolean): void { this.requireApplication().decideApproval(approvalId, approved); }
+  async decideGrantRequest(requestId: string, approved: boolean): Promise<void> { await this.requireApplication().decideGrantRequest(requestId, approved); }
+  recordHumanAssessment(input: Parameters<Application["recordHumanAssessment"]>[0]) { return this.requireApplication().recordHumanAssessment(input); }
+  revokeTaskGrant(taskId: string, grantId: string, reason: string) { return this.requireApplication().revokeTaskGrant(taskId, grantId, reason); }
   async generateReport(taskId: string): Promise<ReportRecord> { return await this.runAndNotify(taskId, () => this.requireApplication().generateReport(taskId)); }
 
   getEvidence(evidenceId: string): Evidence {
@@ -382,10 +406,7 @@ export class DesktopBackend extends EventEmitter {
     const task = this.application.store.getTask(taskId);
     if (!task) return;
     this.emitDesktop({ type: "task_updated", task });
-    const state = this.emitted.get(taskId) ?? { findingIds: new Set<string>(), evidenceIds: new Set<string>(), auditIds: new Set<string>() };
-    for (const finding of this.application.store.listFindings(taskId)) if (!state.findingIds.has(finding.findingId)) {
-      state.findingIds.add(finding.findingId); this.emitDesktop({ type: "finding_recorded", finding });
-    }
+    const state = this.emitted.get(taskId) ?? { evidenceIds: new Set<string>(), auditIds: new Set<string>() };
     for (const evidence of this.application.store.listEvidence(taskId)) if (!state.evidenceIds.has(evidence.evidenceId)) {
       state.evidenceIds.add(evidence.evidenceId); this.emitDesktop({ type: "evidence_recorded", evidence });
     }
@@ -399,7 +420,6 @@ export class DesktopBackend extends EventEmitter {
     this.emitted.clear();
     for (const task of application.store.listTasks()) {
       this.emitted.set(task.taskId, {
-        findingIds: new Set(application.store.listFindings(task.taskId).map((finding) => finding.findingId)),
         evidenceIds: new Set(application.store.listEvidence(task.taskId).map((evidence) => evidence.evidenceId)),
         auditIds: new Set(application.store.listAudit(task.taskId, 50).map((event) => event.eventId)),
       });

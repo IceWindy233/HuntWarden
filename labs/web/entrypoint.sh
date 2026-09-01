@@ -6,7 +6,7 @@ set -euo pipefail
 find /var/www/html /srv/alternate-app -xdev -type f -exec touch -- {} +
 touch -- /tmp/lab-upload.php
 log_time=$(LC_ALL=C date -u '+%d/%b/%Y:%H:%M:%S +0000')
-printf '192.0.2.44 - - [%s] "POST /uploads/lab-upload.php HTTP/1.1" 200 42 "-" "HuntWarden-Lab"\n192.0.2.44 - - [%s] "GET /uploads/lab-upload.php?cmd=id HTTP/1.1" 200 42 "-" "HuntWarden-Lab"\n' \
+printf '192.0.2.44 - - [%s] "POST /uploads/lab-upload.php HTTP/1.1" 200 42 "-" "HuntWarden-Lab"\n192.0.2.44 - - [%s] "GET /lab-webshell.php?cmd=id HTTP/1.1" 200 42 "-" "HuntWarden-Lab"\n' \
   "${log_time}" "${log_time}" > /var/log/nginx/access.log
 
 ssh-keygen -A

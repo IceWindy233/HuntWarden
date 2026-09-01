@@ -20,9 +20,12 @@ npm run build
 npm test
 npm run probe:build
 docker compose -f labs/docker-compose.yml config --quiet
+npm run test:acceptance:re2
 ```
 
 `npm test` 不需要 OpenAI Key，也不连接真实主机；测试使用 Pi Faux Provider 和 FakeExecutor。
+
+真实模型发布评测不属于 `npm test`。先在授权 Lab/VM 用待发布模型完成冻结的恶意、良性和新颖场景任务，再按 [`acceptance/model-eval/README.md`](../acceptance/model-eval/README.md) 执行 `npm run eval:model`；评测命令本身只读取本地 RuntimeStore，不发起模型请求。
 
 ## 配置
 
@@ -34,6 +37,41 @@ HUNTWARDEN_CONFIG=./config/local.yaml npm run dev
 ```
 
 敏感值只通过环境或受权限保护的本地文件提供。不要把私钥、Token 或运行时 `data/` 提交到版本库。
+
+### v2 预算、数据与上下文配置
+
+| 键 | 默认值 | 说明 |
+| --- | --- | --- |
+| `protocolV2.remoteBudget.preset` | 见默认配置 | Preset 的远程调用、节点、字节、墙钟和 Probe 独立预算。 |
+| `protocolV2.remoteBudget.model` | 见默认配置 | 模型自由调查的独立远程预算；Preset 不能占用它。 |
+| `protocolV2.localQueryBudget` | `200 / 50000 / 300000ms` | `query_facts` 的调用数、返回行数与墙钟预算。 |
+| `protocolV2.dataPolicy` | `4MiB / 256MiB` | 任务级模型内容与 Evidence 字节预算；文本默认按 `SENSITIVE_TEXT` 处理。 |
+| `protocolV2.grants.maxRequests` | `20` | Scope/Sensitive-read Grant 申请上限；应用中断时未决请求必须过期。 |
+| `agent.contextRetainTurns` | `3` | Provider 上下文保留的近期完整回合数。旧上下文可被淘汰，但 Model Fact 仍可用 `query_facts` 按 `runId/sourceRunId` 在不可变快照上回取。 |
+| `agent.providerMaxRetries` | `2` | 调查循环的 Provider 有界重试次数。设为 `0` 恢复旧行为：一次 429 即让整场调查 `FAILED`。 |
+| `agent.providerTimeoutSeconds` | `600` | 每次 Provider 流式请求的硬超时（包括首 token 与流中停滞）；超时后任务 fail-close，不会无限占用。 |
+| `llmData.maxTextBytes` | `65536` | 单次 Tool Result/报告生成的模型文本上限；任务累计内容上限另由 `protocolV2.dataPolicy.modelContentBytes` 管理。 |
+
+`schemaVersion: 1` 配置会经显式结构迁移为 v2 预算分组；旧检测工具的细分上限键仅保留为配置迁移输入，不是 v2 协议预算。生产运行时不保留 v1 Helper 协议分支。
+
+### 处置白名单
+
+`0.2.0` 的默认 `remediation.allowedTools` 只有 `quarantine_file`。`disable_account` 当前只能锁定密码认证和设置账户过期，无法保证活动会话、`authorized_keys`、`AuthorizedKeysCommand` 或 SSH CA/principals 同时失效，因此不属于默认支持能力。只有隔离 Lab 的回归配置可以显式启用它；真实目标在恢复动作、密钥信任面处置和定向复扫闭环完成前不得启用。
+
+### 已知哈希数据集
+
+桌面 GUI 的“配置中心 → 已知哈希数据集”可导入版本化 JSON：
+
+```json
+{
+  "name": "ubuntu-24.04-approved-binaries",
+  "version": "2026.08",
+  "description": "经发布流程批准的文件摘要",
+  "sha256": ["0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"]
+}
+```
+
+导入后生成不可猜测的 `DATASET-*` 引用；相同名称与版本只能重复导入相同内容，内容变化必须提升版本。`describe_capabilities` 只向模型列出引用、名称、版本、条目数与整体摘要，不暴露集合条目。`verify(..., baseline: "known_hash_set", dataSetRef)` 让目标 Helper 重观测稳定绑定文件的 SHA-256，再由控制端完成集合成员比较；哈希集合不会下发目标机，结果仅表示 `MATCH/MISMATCH/UNKNOWN`，不等同于恶意裁定。
 
 ### 模型供应商
 
@@ -122,10 +160,10 @@ export DBAPP_TI_API_KEY='nti-...'
 
 安全边界：
 
-- 模型不能提交任意 IP、域名或哈希；网络查询只接受当前任务产生的 `SOCK-*` 引用，额外 IOC 只能由分析师在新建任务时提供。
+- 模型不能提交任意 IP、域名或哈希；只能选择当前任务已建立的 socket/file/task IOC/Evidence 引用。
 - 私网、回环、链路本地、文档网段和其他保留地址始终在本地过滤，不会上送。
 - 相同 IOC 按 Profile 配置在内存中缓存；未命中缓存的每次批量请求消耗 1 次安恒威胁情报额度。
-- 情报命中会记录来源“安恒威胁情报 (DBAPP Threat Intelligence)”和 Evidence，但不能单独形成 `CONFIRMED` 结论。
+- 情报结果以 `source.kind=EXTERNAL` 的结构化 Fact 记录并标注“安恒威胁情报 (DBAPP Threat Intelligence)”；Provider 原始响应不进入模型平面，且外部命中不能单独形成 `CONFIRMED_MALICIOUS` 结论。
 - GUI“测试情报 API”会查询 `example.com`，只有在用户二次确认后执行，并消耗 1 次额度；自动化测试全部使用假客户端，不访问真实接口。
 
 ## 启动 TUI
@@ -208,7 +246,7 @@ npm run lab:up
 npm run test:docker
 ```
 
-`npm run test:docker` 会先自动重置 Lab，再执行包含真实文件隔离和账户禁用的测试；若只想针对已经运行且状态已知的容器执行测试，可使用 `npm run test:docker:running`。
+`npm run test:docker` 会先自动重置 Lab，再执行包含真实文件隔离和账户锁定的测试；账户动作只由测试配置显式启用，不代表生产默认白名单开放。若只想针对已经运行且状态已知的容器执行测试，可使用 `npm run test:docker:running`。
 
 处置闭环的 Electron GUI 自动化会为每个用例重置 Lab，使用仅在测试环境启用的 Pi Faux 脚本模型，并真实点击拒绝、二次确认和审计回执界面：
 
@@ -216,6 +254,9 @@ npm run test:docker
 npm run test:gui:remediation
 npm run test:gui:investigation
 npm run test:gui:recovery
+npm run test:gui:grant
+# 或串行运行全部 GUI E2E
+npm run test:gui:all
 ```
 
 写操作测试会改变容器内的文件或账户状态。重新执行处置场景前，用以下命令删除并重建五个 Lab 容器；本地测试身份 Key 会保留，`known_hosts` 会按当前容器重新生成：
@@ -238,7 +279,7 @@ npm run lab:reset
 npm run lab:down
 ```
 
-Lab 只允许在隔离开发环境使用。账户禁用与隔离测试会真实改变对应容器状态。
+Lab 只允许在隔离开发环境使用。账户锁定与隔离测试会真实改变对应容器状态。
 
 ## 安全与恢复语义
 
@@ -247,11 +288,11 @@ Lab 只允许在隔离开发环境使用。账户禁用与隔离测试会真实�
 - `SCAN` 模式在工具执行前硬阻断全部写操作。
 - `REMEDIATE` 模式仍要求绑定 `taskId + targetFingerprint + tool + argsDigest + actionId` 的一次性票据。
 - 文件隔离要求已有 Evidence，且远端当前哈希与审批时一致；仅同文件系统原子移动并设置 `000`。
-- 账户禁用永久拒绝 `root` 和当前 SSH 执行用户，保存前态并验证锁定/过期结果。
+- 账户锁定永久拒绝 `root` 和当前 SSH 执行用户，保存前态并验证密码锁定/过期结果；它不验证 SSH Key/CA 信任面，因此只属于隔离 Lab 回归。
 - SAFE 工具按原 `toolCallId` 幂等恢复；NEVER 工具先查远端 `actionId` 回执。状态未知时必须重新审批，绝不自动重放。
 - 启动时遗留活动任务会转为 `ABORTED + recoveryRequired`；GUI 仅在分析师点击后恢复。报告以 `v1/v2/...` 不可变保存，旧版单文件报告懒迁移为 LEGACY。
-- 已结束任务可归档并恢复到当前列表；归档只改变列表可见性，Finding、Evidence、报告和审计记录不会被删除，活动或待恢复任务禁止归档。
+- 已结束任务可归档并恢复到当前列表；归档只改变列表可见性，Coverage、Assessment、Evidence、报告和审计记录不会被删除，活动或待恢复任务禁止归档。
 - 流式半成品只存在于当前进程与界面内存，完整 Assistant 消息仅在 `message_end` 后写入 SQLite；Thinking 和未完成的 Tool Call 参数不会发送到 GUI/TUI。
-- 模型只接收脱敏且最多 64 KiB 的文本；原始 Evidence、二进制和 Class Dump 不上传。
+- Helper 观察先在控制端经 Manifest 校验和脱敏，再原子写入 Private/Model Fact Plane。模型只能用有界 `query_facts` 查询 Model Fact 快照，Private Fact、Evidence bytes 和 `storagePath` 在查询 schema 中不存在。
+- `file.content` 只能在分析师批准的 `SENSITIVE_READ` Grant 内脱敏读取；私钥、shadow、凭据库等 `DENIED_TEXT` 不得授权。Scope Grant 批准时会在目标端固化 canonical root 和 mount identity。
 - 数据目录为 `0700`，数据库、Evidence 和报告为 `0600`。首期不提供应用层加密或自动过期删除。
-

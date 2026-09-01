@@ -1,6 +1,7 @@
-import React, { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Box, Text, useApp, useInput } from "ink";
 import type { AgentStreamUpdate, ApprovalTicket, TaskContext } from "../domain/types.js";
+import type { GrantRequest } from "../protocol-v2/types.js";
 import type { Application } from "../runtime/application.js";
 
 type Tab = "任务" | "事件" | "发现" | "证据";
@@ -29,6 +30,7 @@ export function App({ application, initialTask, autoStart = false }: AppProps) {
   const [tabIndex, setTabIndex] = useState(0);
   const [status, setStatus] = useState("就绪");
   const [approval, setApproval] = useState<ApprovalTicket | undefined>();
+  const [grantRequest, setGrantRequest] = useState<GrantRequest | undefined>();
   const [inputMode, setInputMode] = useState(false);
   const [input, setInput] = useState("");
   const [newTaskStep, setNewTaskStep] = useState<number | undefined>();
@@ -41,7 +43,10 @@ export function App({ application, initialTask, autoStart = false }: AppProps) {
   const refresh = () => {
     const next = currentTasks(application);
     setTasks(next);
-    if (current) setApproval(application.store.listPendingApprovals(current.taskId)[0]);
+    if (current) {
+      setApproval(application.store.listPendingApprovals(current.taskId)[0]);
+      setGrantRequest(application.store.listGrantRequests(current.taskId).find((request) => request.status === "PENDING"));
+    }
   };
 
   useEffect(() => {
@@ -60,8 +65,7 @@ export function App({ application, initialTask, autoStart = false }: AppProps) {
     application.approvals.on("requested", onApproval);
     application.on("stream", onStream);
     if (initialTask && autoStart) {
-      const runtime = application.runtimeFor(initialTask);
-      void runtime.prompt(initialTask.request).then(() => setStatus("调查阶段完成，可按 g 生成报告")).catch((error) => setStatus(`失败: ${error instanceof Error ? error.message : String(error)}`));
+      void application.startTask(initialTask.taskId).then(() => setStatus("调查阶段完成，可按 g 生成报告")).catch((error) => setStatus(`失败: ${error instanceof Error ? error.message : String(error)}`));
     }
     return () => { clearInterval(timer); application.approvals.off("requested", onApproval); application.off("stream", onStream); };
   }, []);
@@ -70,6 +74,11 @@ export function App({ application, initialTask, autoStart = false }: AppProps) {
     if (approval) {
       if (value.toLowerCase() === "y") { application.approvals.decide(approval.approvalId, true); setApproval(undefined); setStatus("已批准一次性写操作"); }
       if (value.toLowerCase() === "n") { application.approvals.decide(approval.approvalId, false); setApproval(undefined); setStatus("已拒绝写操作"); }
+      return;
+    }
+    if (grantRequest) {
+      if (value.toLowerCase() === "y") void application.decideGrantRequest(grantRequest.requestId, true).then(() => setStatus("已批准 v2 Grant Request")).catch((error) => setStatus(`Grant 审批失败: ${error instanceof Error ? error.message : String(error)}`)).finally(() => setGrantRequest(undefined));
+      if (value.toLowerCase() === "n") void application.decideGrantRequest(grantRequest.requestId, false).then(() => setStatus("已拒绝 v2 Grant Request")).catch((error) => setStatus(`Grant 拒绝失败: ${error instanceof Error ? error.message : String(error)}`)).finally(() => setGrantRequest(undefined));
       return;
     }
     if (newTaskStep !== undefined) {
@@ -111,7 +120,7 @@ export function App({ application, initialTask, autoStart = false }: AppProps) {
     }
     if (inputMode) {
       if (key.return) {
-        if (current && input.trim()) void application.runtimeFor(current).steer(input.trim());
+        if (current && input.trim()) void application.steerTask(current.taskId, input.trim());
         setInput(""); setInputMode(false); setStatus("已加入 Steering 队列");
       } else if (key.escape) { setInput(""); setInputMode(false); }
       else if (key.backspace || key.delete) setInput((old) => old.slice(0, -1));
@@ -125,11 +134,10 @@ export function App({ application, initialTask, autoStart = false }: AppProps) {
     if (value === "n") { setNewTaskStep(0); setNewTaskDraft({}); setInput(""); setStatus("新建任务向导"); }
     if (value === "i" && current) setInputMode(true);
     if (value === "a" && current) {
-      const runtime = application.runtimeFor(current);
-      void runtime.prompt(current.request).then(() => setStatus("调查阶段完成，可按 g 生成报告")).catch((error) => setStatus(`失败: ${error instanceof Error ? error.message : String(error)}`));
+      void application.startTask(current.taskId).then(() => setStatus("调查阶段完成，可按 g 生成报告")).catch((error) => setStatus(`失败: ${error instanceof Error ? error.message : String(error)}`));
     }
     if (value === "r" && current) {
-      void application.runtimeFor(current).recover().then(() => setStatus("恢复完成")).catch((error) => setStatus(`恢复失败: ${error instanceof Error ? error.message : String(error)}`));
+      void application.recoverTask(current.taskId).then(() => setStatus("恢复完成")).catch((error) => setStatus(`恢复失败: ${error instanceof Error ? error.message : String(error)}`));
     }
     if (value === "g" && current) {
       void application.generateReport(current.taskId).then((report) => setStatus(`报告已保存: ${report.path}`)).catch((error) => setStatus(`报告失败: ${error instanceof Error ? error.message : String(error)}`));
@@ -142,10 +150,21 @@ export function App({ application, initialTask, autoStart = false }: AppProps) {
     if (tab === "任务") return [
       `任务: ${current.taskId}`, `目标: ${current.target.username}@${current.target.host}:${current.target.port}`,
       `状态: ${current.status}`, `模式: ${current.mode}`, `轮次/工具: ${current.turnCount}/${current.toolCallCount}`,
-      `覆盖: ${JSON.stringify(current.coverage)}`,
+      ...(current.protocolVersion === 2 && current.activeEpochId
+        ? [
+          `V2 Epoch: ${current.activeEpochId}`,
+          `覆盖: ${application.store.listCoverageRuns(current.taskId, current.activeEpochId).map((run) => `${run.category}=${run.status}/${run.applicability}`).join(", ") || "尚无 CoverageRun"}`,
+          `调查缺口: ${application.store.listInvestigationGaps(current.taskId, current.activeEpochId).map((gap) => `${gap.code}${gap.category ? `(${gap.category})` : ""}`).join(", ") || "无"}`,
+        ]
+        : ["历史 v1 任务：只保留任务元数据与已生成的报告文件，结构化结论不再展示"]),
     ];
     if (tab === "事件") return application.store.listAudit(current.taskId, 20).map((event) => `${event.createdAt.slice(11, 19)} ${event.level} ${event.event}`);
-    if (tab === "发现") return application.store.listFindings(current.taskId).map((finding) => `${finding.findingId} [${finding.severity}/${finding.status}] ${finding.title}`);
+    if (tab === "发现") {
+      if (current.protocolVersion !== 2 || !current.activeEpochId) return ["历史 v1 任务没有 v2 Assessment 平面"];
+      const assessments = application.store.listAssessments(current.taskId, current.activeEpochId);
+      if (assessments.length === 0) return ["尚无 Assessment：MODEL 未得出结论不代表目标安全（MODEL: NOT_CONCLUDED）"];
+      return assessments.map((assessment) => `${assessment.assessmentId} [${assessment.authorType}/${assessment.severity}/${assessment.verdict}] ${assessment.category} ${assessment.rationale}`);
+    }
     return application.store.listEvidence(current.taskId).map((item) => `${item.evidenceId} ${item.type} ${item.source}`);
   }, [current?.updatedAt, tab, tasks.length]);
 
@@ -155,6 +174,7 @@ export function App({ application, initialTask, autoStart = false }: AppProps) {
     <Box flexDirection="column" minHeight={12}>{body.slice(-18).map((line, index) => <Text key={`${index}-${line}`}>{line}</Text>)}</Box>
     {liveOutput ? <Box borderStyle="round" borderColor={liveOutput.error ? "red" : "cyan"} flexDirection="column" paddingX={1}><Text bold color={liveOutput.error ? "red" : "cyan"}>SEC AGENT {liveOutput.active ? "· LIVE" : "· 完成"}</Text><Text>{liveOutput.text.split("\n").slice(-6).join("\n") || "正在生成响应…"}{liveOutput.active ? "▌" : ""}</Text></Box> : null}
     {approval ? <Box borderStyle="double" borderColor="yellow" flexDirection="column"><Text bold color="yellow">写操作审批</Text><Text>工具: {approval.tool}</Text><Text>动作: {approval.actionSummary}</Text><Text>目标指纹: {approval.targetFingerprint}</Text><Text>参数摘要: {approval.argsDigest}</Text><Text>Action: {approval.actionId}</Text><Text>按 y 单次批准 / n 拒绝</Text></Box> : null}
+    {!approval && grantRequest ? <Box borderStyle="double" borderColor="yellow" flexDirection="column"><Text bold color="yellow">v2 Grant Request</Text><Text>类型: {grantRequest.kind}</Text><Text>请求: {grantRequest.requestId}</Text><Text>目标指纹: {grantRequest.targetFingerprint}</Text><Text>绑定: {JSON.stringify(grantRequest.binding)}</Text><Text>按 y 批准 / n 拒绝</Text></Box> : null}
     {newTaskStep !== undefined ? <Text color="cyan">新建任务 {newTaskStep + 1}/{NEW_TASK_FIELDS.length} · {NEW_TASK_FIELDS[newTaskStep]?.label} [默认: {NEW_TASK_FIELDS[newTaskStep]?.defaultValue(application) || "自动"}] &gt; {input}_</Text>
       : inputMode ? <Text color="green">Steering&gt; {input}_</Text>
       : <Text dimColor>Tab 切换 | ↑↓ 任务 | n 新建 | a 开始 | r 恢复 | i Steering | g 报告 | q 退出</Text>}

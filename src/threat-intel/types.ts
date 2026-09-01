@@ -33,14 +33,3 @@ export interface ThreatIntelClient {
   compromiseDetection(iocs: readonly string[], signal?: AbortSignal): Promise<ThreatIntelBatchResult>;
   batchFileInfo(hashes: readonly string[], signal?: AbortSignal): Promise<ThreatIntelBatchResult>;
 }
-
-export interface NetworkConnectionReferenceValue {
-  protocol: string;
-  local: string;
-  remote: string;
-  state: string;
-  remoteIp: string;
-  remotePort: number;
-  processRef?: string;
-  observedAt: string;
-}
