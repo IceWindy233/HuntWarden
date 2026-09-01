@@ -4,28 +4,12 @@
 
 ## [Unreleased]
 
-### Added
-
-- Tool Protocol v2 Manifest/Helper 升级为 `2.1.0`，新增通用 `delegation_rule` 与 `ssh_trust_config` Namespace；后门账户 Preset 现在采集 sudoers/doas/polkit 策略语句和 `sshd -T` 默认上下文有效信任配置。
-- Linux 分诊 Preset 通过固定策略绑定 `/usr/bin`、`/tmp` file Scope，并执行 `package → owns_file → verify(package_db)` 有界基线链路；新增软件包不一致确定性规则。
-- 新增 Ubuntu 24.04 ARM64 P1 增量实机验收记录；Helper `2.1.0` smoke 4/4 与 journald 回归 1/1 通过，限制与环境准备过程完整留档。
-- 新增 Manifest `2.1.0` 真实 Provider P1 发布评测：重新冻结 novel malicious + benign 已完成任务，七项门槛全部通过；模型评测脚本新增可独立安装、loopback-only 的 effective-root 专项夹具。
-- 新增 Ubuntu 24.04 ARM64 / Manifest `2.1.0` 的五类 × QUICK/STANDARD/DEEP 真实 GUI Profile 完整复验：15 个正式任务、152 次 ToolRun 零失败，报告引用校验通过；同时保留 Provider 空响应与两次被 fail-close 的引用错误首跑记录。
+## [0.2.0] - 2026-09-01
 
 ### Changed
 
-- WebShell Preset 恢复请求 `web_root.effective`；只有运行时有效配置来源能完成该字段，静态或兜底 root 继续以 `FIELD_UNAVAILABLE` 明示不确定性。
+- WebShell Preset 请求 `web_root.effective`；只有运行时有效配置来源能完成该字段，静态或兜底 root 继续以 `FIELD_UNAVAILABLE` 明示不确定性。
 - 初始 Scope 的 `scope_resolve` 远程调用纳入 PRESET 持久预算，固定策略只存在于 `INITIAL_GRANT_POLICY`。
-
-### Fixed
-
-- Helper 在账户枚举前校验 Predicate，并只在显式请求 `groups`/`locked` 时读取扩展账户状态；无效参数不再被目标环境差异覆盖为 `INTERNAL_ERROR`，基础 `uid`/`username` 枚举也不再依赖 shadow/group 命令。
-- Docker Lab 启动脚本现在会创建运行时公钥目录，干净 checkout 不再因 `labs/common` 尚不存在而在镜像构建前退出。
-
-## [0.2.0] - 2026-08-29
-
-### Changed
-
 - 默认 REMEDIATE 白名单只开放 `quarantine_file`；`disable_account` 在补齐活动会话、SSH Key/CA 信任面与恢复验证前保持显式禁用，避免把仅锁定密码认证误报为“账户已禁用”。
 - 生产调查链路切换到 Tool Protocol v2：新任务只创建 v2 Epoch，模型远程能力收敛为八个类型化取证原语，结果原子写入 Fact Store 后再通过本地 `query_facts` 暴露。
 - 五类检测迁移为版本化 Preset、CoverageRun 与不可覆盖的 RULE/MODEL/HUMAN Assessment；GUI、TUI、报告、审批、处置与崩溃恢复统一读取 v2 投影。
@@ -35,11 +19,16 @@
 ### Removed
 
 - **破坏性变更：删除 v1 结构化结论平面。** `findings` 表、`Finding`/`FindingStatus` 类型、`TaskContext.coverage`、`putFinding`/`listFindings`/覆盖聚合、`finding_recorded` 事件与 GUI/TUI/报告的 v1 回退分支全部移除。v0.1.x 创建的历史任务在新版本中只保留任务元数据、Evidence 与已生成的报告文件，原 Finding 不再展示（数据库行不会被删除，只是不再读取）。
-- 删除 Helper 中 43 个运行时不可达的 v1 collector（约 1263 行）与随之孤立的常量；`install-helper.sh` 不再引用已删除的 `yara_scan_files`。由此明确的能力缺口（sudoers/doas/polkit 委派配置与 sshd 有效信任配置在 v2 尚未采集）已记入 `docs/SUPPORT_MATRIX.md`。
+- 删除 Helper 中 43 个运行时不可达的 v1 collector（约 1263 行）与随之孤立的常量；`install-helper.sh` 不再引用已删除的 `yara_scan_files`。
 - 删除只断言死代码源文本的 `helper-optional-paths.test.ts`；`collect`/目录穿越/枚举上限/进程环境四类边界测试改用 v2 verb 断言。
 
 ### Added
 
+- Tool Protocol v2 Manifest/Helper 升级为 `2.1.0`，新增通用 `delegation_rule` 与 `ssh_trust_config` Namespace；后门账户 Preset 现在采集 sudoers/doas/polkit 策略语句和 `sshd -T` 默认上下文有效信任配置。
+- Linux 分诊 Preset 通过固定策略绑定 `/usr/bin`、`/tmp` file Scope，并执行 `package → owns_file → verify(package_db)` 有界基线链路；新增软件包不一致确定性规则。
+- 新增 Ubuntu 24.04 ARM64 P1 增量实机验收记录；Helper `2.1.0` smoke 4/4 与 journald 回归 1/1 通过，限制与环境准备过程完整留档。
+- 新增 Manifest `2.1.0` 真实 Provider P1 发布评测：重新冻结 novel malicious + benign 已完成任务，七项门槛全部通过；模型评测脚本新增可独立安装、loopback-only 的 effective-root 专项夹具。
+- 新增 Ubuntu 24.04 ARM64 / Manifest `2.1.0` 的五类 × QUICK/STANDARD/DEEP 真实 GUI Profile 完整复验：15 个正式任务、152 次 ToolRun 零失败，报告引用校验通过；同时保留 Provider 空响应与两次被 fail-close 的引用错误首跑记录。
 - 新增 `log_event`、版本化日志游标及系统日志凭据脱敏，并补齐进程、Socket、文件、账户、SSH Key、持久化、日志、Web、Package 和 Java Probe 关系边。
 - 新增控制端版本化 `known_hash_set` Dataset Registry：GUI 可导入严格 JSON，目标 Helper 仅重观测文件哈希，哈希集合不离开控制端。
 - 新增五类 `v1→v2` 冻结能力等价语料与 Docker 门禁，证明旧版能力子集可由 v2 通用 Namespace、Relation、Matcher、Verify 与 Probe 到达。
@@ -51,6 +40,8 @@
 
 ### Fixed
 
+- Helper 在账户枚举前校验 Predicate，并只在显式请求 `groups`/`locked` 时读取扩展账户状态；无效参数不再被目标环境差异覆盖为 `INTERNAL_ERROR`，基础 `uid`/`username` 枚举也不再依赖 shadow/group 命令。
+- Docker Lab 启动脚本现在会创建运行时公钥目录，干净 checkout 不再因 `labs/common` 尚不存在而在镜像构建前退出。
 - `query_facts` 与 `get_assessment_projection` 在 INVESTIGATE/REPORT 阶段均可用；SCAN 工具表不包含写工具。
 - Query 字节预算二分试算不再落模型未见过的孤儿 QuerySnapshot/Cursor；默认排序下推 SQLite 并使用 keyset，自定义排序固化剩余事实顺序，分页不跳行。
 - Helper 错误码收敛为 Wire 闭集，Predicate 在投影前严格校验字段和类型，Reservation、Cursor、FactBatch 与 Target/Epoch 绑定均 fail-close。
@@ -61,7 +52,7 @@
 - `match` 的 `includeContext` 已真正实现（此前先是静默忽略、后改为显式拒绝）：命中处返回固定数量的有界脱敏窗口，每个窗口以**字节偏移**标注可直接交给 `read` 复读，窗口内换行转义因此单个窗口不会被拆行；它复用 `read` 的内容分级与 Sensitive-read 授权链路，`DENIED_TEXT` 拒绝、批次内任一对象缺授权即整体失败，并计入内容出境预算。1 MiB 扫描窗口仍写成 `BYTE_LIMIT` gap，未命中不再被当成整文件真阴性。
 - `match includeContext` 对非法 UTF-8 的窗口偏移改为映射原始字节，不再因 U+FFFD 重编码导致后续 offset 漂移；Helper 直连请求遇到 `DENIED_TEXT` 也会整体返回 `PERMISSION_DENIED`。
 - 采集器未取到的字段不再填 `unknown` / `NOT_VERIFIED` / `effective=true` 等占位值，而是缺省并由 `unavailableFields` 与 `FIELD_UNAVAILABLE` gap 表达；`web_root.effective` 仅在来自运行时生效配置（`nginx -T`）时为真。
-- Preset 已删除 Helper 不产出的 `web_stack.version`、`web_root.effective`、`jvm.version` 与 `package.integrity` 必选字段；`module.sha256` 也不再被能力清单宣称，不会把固定能力缺口伪装成每次调查的动态 PARTIAL。
+- Preset 已删除 Helper 不产出的 `web_stack.version`、`jvm.version` 与 `package.integrity` 必选字段；`module.sha256` 也不再被能力清单宣称，不会把固定能力缺口伪装成每次调查的动态 PARTIAL。
 - GUI 覆盖区显式渲染 `INCOMPLETE：…` 与 `MODEL: NOT_CONCLUDED：…`，不再只写在悬浮 title 里。
 - 自定义 Provider 配置：Provider ID 与 API Key 环境变量名在输入期即按 Schema 字符集收敛（凭据按 Provider ID 存取，大小写不合法会先存下一个永远校验不过的 Provider）；配置校验通道改为返回结构化 issues 并只报告 `model.source` 选定分支的真实原因，不再抛出混杂 anyOf 分支的 IPC 异常。
 - 修复日志事件与日志源之间的身份断链。`log_event`/`auth_event`/`exec_event` 的 `sourceId` 现在与 `log_source` 共用同一派生函数：此前 `auth_event`/`exec_event` 用硬编码的 `"auth"`/`"exec"` 字符串，事件无法与任何日志源关联；文件源两端一个用 resolve 后路径、一个用 glob 原始路径，符号链接日志目录会把同一文件拆成两个源。
