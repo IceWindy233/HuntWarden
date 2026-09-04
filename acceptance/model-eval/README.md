@@ -19,8 +19,8 @@ npm run eval:model -- \
   --manifest acceptance/model-eval/manifest.release.json \
   --storage-dir "/path/to/HuntWarden/runtime" \
   --database-file runtime.db \
-  --json docs/acceptance/MODEL_EVAL_YYYY-MM-DD.json \
-  --markdown docs/acceptance/MODEL_EVAL_YYYY-MM-DD.md
+  --json acceptance/model-eval/模型评测结果-YYYY-MM-DD.json \
+  --markdown acceptance/model-eval/模型评测结果-YYYY-MM-DD.md
 ```
 
 `--storage-dir` 和 `--database-file` 可省略；省略时使用当前配置档的 `storage`。评估桌面端真实任务时应显式指向桌面端 RuntimeStore，避免误读默认开发库。执行前须退出持有该数据库写锁的 HuntWarden 实例。
@@ -29,4 +29,4 @@ npm run eval:model -- \
 
 示例清单中的路径和 Task ID 是不可执行占位符，禁止把它当作发布结果。阈值必须由发布负责人在执行前冻结，不能在看到结果后调低。
 
-当前 P1 冻结清单为 `manifest.release.json`，对应 Manifest/Helper `2.1.0` 的 2026-08-30 真实 Provider 已完成任务；发布结果见 [`MODEL_EVAL_P1_2026-08-30.md`](../../docs/acceptance/MODEL_EVAL_P1_2026-08-30.md)。基础发布语料用 `acceptance/vm/install-model-eval-fixtures.sh --install` 安装。`--install-effective-root` 是独立的 loopback-only P1 专项夹具；若其 Coverage 不是 `COMPLETE`，不得把该任务混入冻结统计清单。两类夹具都由 `--remove` 统一校验 sentinel 后清理。
+当前 P1 冻结清单为 `manifest.release.json`，对应 Manifest/Helper `2.1.0` 的 2026-08-30 真实 Provider 已完成任务；发布结论见 [`支持与验收说明.md`](../../docs/支持与验收说明.md)，机器可读结果见 [`基线评测结果-2026-08-30.json`](基线评测结果-2026-08-30.json)。基础发布语料用 `acceptance/vm/install-model-eval-fixtures.sh --install` 安装。`--install-effective-root` 是独立的 loopback-only P1 专项夹具；若其 Coverage 不是 `COMPLETE`，不得把该任务混入冻结统计清单。两类夹具都由 `--remove` 统一校验 sentinel 后清理。

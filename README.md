@@ -105,20 +105,20 @@ npm run lab:up
 npm run test:docker
 ```
 
-完整的配置、启动与 Lab 说明见 [`docs/USAGE.md`](docs/USAGE.md)。
+完整的配置、启动与 Lab 说明见 [`docs/用户使用说明.md`](docs/用户使用说明.md)。
 
 ## 范围与非范围
 
 **在范围内**：单台 Linux 主机、SSH 接入、单活动任务、上述五类检测，以及默认开放的 WebShell 文件隔离。账户锁定实现仅保留用于隔离 Lab 回归，在完整信任面处置闭环完成前不属于默认支持能力。
 
-**刻意不做**：Windows、Kubernetes、批量 Hunt、多 Agent 编排、持续实时 EDR、企业 SSO/RBAC/多租户、SIEM 集成、自动网络隔离、内核 Rootkit 自动清除。长期方向记录在 [`docs/TODO_PLAN_REAL_WORLD.md`](docs/TODO_PLAN_REAL_WORLD.md)，它是路线图而非承诺。
+**刻意不做**：Windows、Kubernetes、批量 Hunt、多 Agent 编排、持续实时 EDR、企业 SSO/RBAC/多租户、SIEM 集成、自动网络隔离、内核 Rootkit 自动清除。长期方向记录在 [`docs/后续工作路线.md`](docs/后续工作路线.md)，它是路线图而非承诺。
 
 ## 已知限制
 
 诚实优于好看，以下均为当前真实状态：
 
 - **真实模型发布结果仍只覆盖安全自造语料。** Manifest `2.1.0` 的冻结 novel malicious + benign 评测七项门槛全部通过，但不能外推为真实站点召回率或误报率。报告里的 `NO_OBSERVED_FINDING` 不应被当作「已排查干净」。
-- **真实发行版 VM 矩阵尚未完整。** Ubuntu 24.04 ARM64 已通过真实 GUI/Provider/SSH/root Helper、五类 × QUICK/STANDARD/DEEP、smoke 4/4、journald 1/1 与模型评测，结果为 `PASS_WITH_LIMITATIONS`；高推理 Provider 首跑仍出现过空响应和非法引用。Ubuntu 22.04 仅经 Docker 验证，Debian 12 仅经动态容器场景验证，其余平台仍待实机验收。各平台状态见 [`docs/SUPPORT_MATRIX.md`](docs/SUPPORT_MATRIX.md)。
+- **真实发行版 VM 矩阵尚未完整。** Ubuntu 24.04 ARM64 已通过真实 GUI/Provider/SSH/root Helper、五类 × QUICK/STANDARD/DEEP、smoke 4/4、journald 1/1 与模型评测，结果为 `PASS_WITH_LIMITATIONS`；高推理 Provider 首跑仍出现过空响应和非法引用。Ubuntu 22.04 仅经 Docker 验证，Debian 12 仅经动态容器场景验证，其余平台仍待实机验收。各平台状态见 [`docs/支持与验收说明.md`](docs/支持与验收说明.md)。
 - **Java 检测只在 Tomcat 9 / JDK 17 上验证过。**
 - **事实可达不等于未采集数据可见。** `query_facts` 能到达当前任务已采集的 Model Fact，但每个原语仍受 scope、Capability、cursor 和持久化 Budget 约束；上限、权限或依赖造成的缺口会显式写入 Coverage。
 - **YARA 与哈希基线都只开放版本化引用。** Helper 在 YARA 依赖和内置规则文件均可用时声明 `yara`，模型只能选择静态注册的 `RuleSetRef`，不能提交源码或路径；RE2 同样只在依赖实际存在时声明。`known_hash_set` 由分析师在控制端导入，名称与版本不可变；模型只见 `DATASET-*` 引用，集合内容不发送目标机。`package_db` 基线校验也已可用。
@@ -131,17 +131,14 @@ npm run test:docker
 
 | 文档 | 内容 |
 | --- | --- |
-| [`docs/USAGE.md`](docs/USAGE.md) | 环境、模型供应商配置、TUI/GUI 启动、Docker Lab、安全与恢复语义 |
-| [`docs/SUPPORT_MATRIX.md`](docs/SUPPORT_MATRIX.md) | 平台与能力的已验证 / 待验收状态 |
-| [`host-helper/README.md`](host-helper/README.md) | 目标端 Helper 的依赖、安装、升级与自检 |
-| [`docs/TOOL_PROTOCOL_V2_DESIGN.md`](docs/TOOL_PROTOCOL_V2_DESIGN.md) | v2 类型化取证能力协议与运行时设计（协议、数据模型、安全边界、验收口径） |
-| [`docs/TODO_PLAN_REAL_WORLD.md`](docs/TODO_PLAN_REAL_WORLD.md) | 检测能力与平台覆盖的长期路线 |
-| [`docs/adr/`](docs/adr/) | 架构决策记录 |
-| [`docs/acceptance/`](docs/acceptance/) | 当前 V2 验收模板、Ubuntu 24.04 ARM64 P1 实机记录、完整 GUI Profile 矩阵与模型评测 |
-| [`acceptance/vm/README.md`](acceptance/vm/README.md) | 授权临时 VM 的只读冒烟入口与无害夹具 |
-| [`acceptance/model-eval/README.md`](acceptance/model-eval/README.md) | 真实模型统计评测清单、阈值、指标与可复现命令 |
-| [`docs/releases/`](docs/releases/) | 各版本发布说明、下载校验与安全提示 |
-| [`CHANGELOG.md`](CHANGELOG.md) | 版本变化 |
+| [`docs/HuntWarden-系统设计文档.md`](docs/HuntWarden-系统设计文档.md) | Tool Protocol v2、数据模型、信任边界与安全不变量 |
+| [`docs/系统架构图.md`](docs/系统架构图.md) | 系统上下文、调查链路、处置链路与数据边界图 |
+| [`docs/用户使用说明.md`](docs/用户使用说明.md) | 环境、模型配置、TUI/GUI、Docker Lab 与恢复语义 |
+| [`docs/支持与验收说明.md`](docs/支持与验收说明.md) | 平台与能力边界、自动化门禁、实机和模型验收基线 |
+| [`docs/后续工作路线.md`](docs/后续工作路线.md) | 当前限制、优先级与完成口径 |
+| [`docs/版本发布说明.md`](docs/版本发布说明.md) | 合并后的版本摘要、验证范围与安装校验 |
+
+面向具体执行器的说明保留在相应目录：[`host-helper/README.md`](host-helper/README.md)、[`acceptance/vm/README.md`](acceptance/vm/README.md) 和 [`acceptance/model-eval/README.md`](acceptance/model-eval/README.md)。逐项版本变化见 [`CHANGELOG.md`](CHANGELOG.md)。
 
 ## 目录
 

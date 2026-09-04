@@ -2,7 +2,7 @@
 
 该入口用于授权临时 Linux VM 的 v2 只读验收；当前发布门槛为 Ubuntu 24.04 ARM64，Rocky Linux 9 x86_64/SELinux 保留为后续非阻塞兼容性验证。它只调用以下固定 v2 只读/证据动词：
 
-最近一次 P1 实机记录：[`Ubuntu 24.04.4 ARM64 v2 P1 验收`](../../docs/acceptance/VM_UBUNTU_24.04_ARM64_V2_P1_2026-08-30.md)，结果为 `PASS_WITH_LIMITATIONS`。Manifest `2.1.0` 五类 × QUICK/STANDARD/DEEP 已于 2026-09-01 完整重跑，见 [`GUI Profile 矩阵`](../../docs/acceptance/GUI_PROFILE_MATRIX_V2_P1_2026-09-01.md)；首跑空响应与模型引用错误仍按限制保留。
+最近一次 P1 实机、GUI Profile 与模型评测已经合并到 [`支持与验收说明.md`](../../docs/支持与验收说明.md)，综合结果为 `PASS_WITH_LIMITATIONS`；首跑空响应与模型引用错误仍按限制保留。
 
 - `capabilities`
 - `enumerate`（host/process/file/account/cron_entry/unit/persistence/jvm）
@@ -80,7 +80,7 @@ npm run test:acceptance:vm
 
 不要把上述环境值保存到仓库文件。文档网段地址仅用于示例，必须替换为你自己的测试 VM。
 
-冒烟通过后，复制 [`docs/acceptance/VM_ACCEPTANCE_TEMPLATE.md`](../../docs/acceptance/VM_ACCEPTANCE_TEMPLATE.md)，继续在 GUI 中完成五类单项调查、联合调查、无害阳性样本、良性对照和手动报告，并把结果回填 [`docs/SUPPORT_MATRIX.md`](../../docs/SUPPORT_MATRIX.md)。
+冒烟通过后，复制 [`验收记录模板.md`](验收记录模板.md)，继续在 GUI 中完成五类单项调查、联合调查、无害阳性样本、良性对照和手动报告，并把稳定结论回填 [`支持与验收说明.md`](../../docs/支持与验收说明.md)。
 
 ## 无害阳性与良性对照
 
