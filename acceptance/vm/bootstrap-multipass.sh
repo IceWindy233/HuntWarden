@@ -314,7 +314,7 @@ chmod 600 "${env_file}"
 
 # 直接输出「字段: 值」而不做列对齐：printf 的 %-Ns 按字节补齐，中日韩字符是双宽，
 # 对齐结果反而更乱。这段内容是给人抄进验收模板的，可读性优先。
-step "目标身份（填入 VM_ACCEPTANCE_TEMPLATE.md 第 2 节）"
+step "目标身份（填入验收记录模板.md 第 2 节）"
 echo "镜像来源: Multipass 官方镜像 ${image}"
 echo "发行版: ${distro} ${version}"
 echo "架构: ${arch}"
@@ -334,8 +334,8 @@ cat <<NEXT
    验收要点与清理步骤见 acceptance/vm/README.md。
 
 3. 回填：
-     cp docs/acceptance/VM_ACCEPTANCE_TEMPLATE.md \\
-        docs/acceptance/VM_${distro}_${version}_${arch}_\$(date +%F).md
+     cp acceptance/vm/验收记录模板.md \\
+        "acceptance/vm/验收记录-${distro}-${version}-${arch}-\$(date +%F).md"
 
 4. 销毁：
      acceptance/vm/bootstrap-multipass.sh --name ${vm_name} --destroy

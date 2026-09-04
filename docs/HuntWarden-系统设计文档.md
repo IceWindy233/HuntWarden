@@ -1,8 +1,8 @@
-# HuntWarden v2 类型化取证能力协议与运行时设计
+# HuntWarden 系统设计文档
 
 > 状态：Accepted / v2.1 P1 验证基线（2026-09-01）
 >
-> 当前实现：Manifest/Helper `2.1.0`。代码与门禁基线为 `331d395e8f00b020490a32ebecf39e297815e36b`；最新实机和 GUI Profile 结果由 [`V2_INVARIANT_VERIFICATION.md`](V2_INVARIANT_VERIFICATION.md) 统一索引。
+> 当前实现：Tool Protocol v2，Manifest/Helper `2.1.0`。代码与门禁基线为 `331d395e8f00b020490a32ebecf39e297815e36b`；当前支持范围与验证证据统一收录于 [`支持与验收说明.md`](支持与验收说明.md)。
 >
 > 决策：v2 直接替换 v1，不提供运行时双协议兼容；旧任务只保证可读，不保证恢复执行。
 >
@@ -134,6 +134,19 @@ effectiveCapability
 `tool_runs` 不是事实数据库，只保存调用状态、参数摘要、Fact/Edge/Evidence 引用、cursor/gap 和 cost。
 
 原始 `read` 文本不写入 `tool_runs`；需要保留完整原始字节时只能进入 Evidence Plane。
+
+### 2.3 桌面客户端决策
+
+桌面端采用 Electron：主进程承载既有 Node.js/TypeScript 核心、SQLite、SSH、Evidence 与报告能力；React Renderer 运行在隔离沙箱中，Preload 只暴露 `src/gui/contracts.ts` 定义的逐方法白名单。Electron Forge 负责打包，Vite 独立构建 Renderer。
+
+该决策的安全约束如下：
+
+- Renderer 始终视为不可信输入面，不能直接访问 Node、Electron、文件系统、数据库、SSH 或密钥；
+- 主进程必须验证 sender、Schema、任务绑定和权限；
+- API Key 通过系统安全存储保存，配置文件不包含秘密；
+- Electron/Chromium 属于安全更新责任，版本升级必须经过完整回归。
+
+核心 Application、RuntimeStore、SecurityAgentRuntime 和 Tool 保持界面无关，TUI 与 CLI 继续复用相同领域服务和事件模型。首期打包优先 macOS，其次 Linux，Windows 暂不进入支持范围。
 
 ---
 
@@ -852,7 +865,7 @@ v1 → v2 必须使用显式、可测试的结构迁移，而不是简单补默�
 
 ### 15.1 门禁
 
-逐条归属和当前自动化入口见 [`V2_INVARIANT_VERIFICATION.md`](./V2_INVARIANT_VERIFICATION.md)。
+逐条归属和当前自动化入口见 [`支持与验收说明.md`](支持与验收说明.md)。
 
 | 层级 | 内容 |
 | --- | --- |
@@ -862,7 +875,7 @@ v1 → v2 必须使用显式、可测试的结构迁移，而不是简单补默�
 
 模型能力评测是发布层统计评测，不作为 PR/merge 的非确定性布尔门禁。至少记录：事实可达率、截断损失、MODEL NOT_CONCLUDED、Preset partial、规则误报裁定、新颖场景召回、无效工具调用、Token/延迟/远程成本和良性场景误报率。
 
-可复现入口为 `npm run eval:model -- --manifest <labels.json>`，清单与执行约束见 `acceptance/model-eval/README.md`。事实可达率只以最终持久化 QuerySnapshot 的 Controller-only `rowRefs` 为证据，FactStore 中存在但未进入模型查询结果的事实不得计为可达；输出预算预览不得创建 QuerySnapshot。阈值必须在运行前冻结，语料缺失与模型漏检必须分开统计。
+可复现入口为 `npm run eval:model -- --manifest <labels.json>`，清单与执行约束见 [`acceptance/model-eval/README.md`](../acceptance/model-eval/README.md)。事实可达率只以最终持久化 QuerySnapshot 的 Controller-only `rowRefs` 为证据，FactStore 中存在但未进入模型查询结果的事实不得计为可达；输出预算预览不得创建 QuerySnapshot。阈值必须在运行前冻结，语料缺失与模型漏检必须分开统计。
 
 ---
 
@@ -878,7 +891,7 @@ V2 实现已经满足以下完成条件：
 - INV-01 ~ INV-28 均有自动化或 release 层验证归属；
 - 仓库不存在运行时 Helper v1 协议分支。
 
-2026-09-01 的发布层状态为 `PASS_WITH_LIMITATIONS`：Ubuntu 24.04 ARM64 已完成真实 VM smoke、journald、模型评测和五类 × 三 Profile 验收，但 Provider 首跑空响应、非法引用与其他发行版尚未覆盖仍需保留为限制。后续工作只记录在 [`TODO_PLAN_REAL_WORLD.md`](TODO_PLAN_REAL_WORLD.md)，不再在设计正文保留已执行的迁移步骤。
+2026-09-01 的发布层状态为 `PASS_WITH_LIMITATIONS`：Ubuntu 24.04 ARM64 已完成真实 VM smoke、journald、模型评测和五类 × 三 Profile 验收，但 Provider 首跑空响应、非法引用与其他发行版尚未覆盖仍需保留为限制。后续工作只记录在 [`后续工作路线.md`](后续工作路线.md)，不再在设计正文保留已执行的迁移步骤。
 
 ---
 

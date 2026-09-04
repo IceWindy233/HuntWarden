@@ -14,7 +14,7 @@
 - 生产调查链路切换到 Tool Protocol v2：新任务只创建 v2 Epoch，模型远程能力收敛为八个类型化取证原语，结果原子写入 Fact Store 后再通过本地 `query_facts` 暴露。
 - 五类检测迁移为版本化 Preset、CoverageRun 与不可覆盖的 RULE/MODEL/HUMAN Assessment；GUI、TUI、报告、审批、处置与崩溃恢复统一读取 v2 投影。
 - Helper 只接受 v2 静态动词白名单；控制端 v1 operation map、旧问题型工具、ScanPlanner 和旧规则运行时已删除，v1 历史任务仅可只读查看。
-- Docker 五类 Lab、Linux IR、四套 GUI E2E、Debian 12 动态场景和 VM smoke 均已迁移到 v2；逐条安全不变量归属见 `docs/V2_INVARIANT_VERIFICATION.md`。
+- Docker 五类 Lab、Linux IR、四套 GUI E2E、Debian 12 动态场景和 VM smoke 均已迁移到 v2；安全不变量与验证归属见 `docs/支持与验收说明.md`。
 
 ### Removed
 
@@ -34,7 +34,7 @@
 - 新增五类 `v1→v2` 冻结能力等价语料与 Docker 门禁，证明旧版能力子集可由 v2 通用 Namespace、Relation、Matcher、Verify 与 Probe 到达。
 - 新增 macOS ARM64 + Ubuntu 22.04 ARM64 RE2 语义矩阵，验证实际匹配及不支持语法必须返回 `INVALID_ARGUMENT`，禁止回退 Python `re`。
 - 新增真实模型能力统计评测入口与严格标签清单，基于 QuerySnapshot provenance 统计事实可达率、截断、模型结论、Preset 覆盖、新颖召回、良性误报、无效工具调用及 Token/延迟/远程成本。
-- 完成 Ubuntu 24.04.4 ARM64 的首轮 V2 真实 VM 只读验收与 Provider 模型能力统计；现行 Manifest `2.1.0` 结果已合并到 `docs/acceptance/VM_UBUNTU_24.04_ARM64_V2_P1_2026-08-30.md` 与 `docs/acceptance/MODEL_EVAL_P1_2026-08-30.md`。
+- 完成 Ubuntu 24.04.4 ARM64 的首轮 V2 真实 VM 只读验收与 Provider 模型能力统计；现行 Manifest `2.1.0` 结果已合并到 `docs/支持与验收说明.md`，机器可读结果保存在 `acceptance/model-eval/基线评测结果-2026-08-30.json`。
 - 新增配置键 `agent.providerTimeoutSeconds`（默认 600 秒）：单轮 Provider 流式请求硬超时，覆盖首 token 与流中停滞，旧 Profile 迁移时自动注入。
 - 新增 GUI Sensitive-read Grant 生命周期 E2E（`tests/e2e/gui-grant.test.ts`，门控 `HUNTWARDEN_GUI_GRANT_TESTS`）：批准后 Grant 绑定申请对象并 ACTIVE、拒绝后落 `InvestigationGap(GRANT_DENIED)` 且无 Grant、撤销后立即失效且理由进审计。INV-16/INV-17 的 GUI 层覆盖由此补齐。
 
