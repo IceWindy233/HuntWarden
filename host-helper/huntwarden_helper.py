@@ -339,6 +339,10 @@ def path_kind(path: pathlib.Path, ledger: SkipLedger, *, follow: bool = False) -
     """
     try:
         info = path.stat() if follow else path.lstat()
+    except FileNotFoundError:
+        # 固定的可选来源目录在不同发行版上经常不存在；不存在是完整的阴性观察，
+        # 不能累计成“权限或 I/O 错误”。
+        return "unavailable"
     except OSError:
         ledger.add(SKIP_UNREADABLE)
         return "unavailable"
@@ -1466,6 +1470,9 @@ def stable_process(pid: int, digest_cache: dict[tuple[int, int], str] | None = N
                    include_hash: bool = True) -> dict[str, Any]:
     before = proc_stat_fields(pid)
     proc_exe = pathlib.Path(f"/proc/{pid}/exe")
+    info: os.stat_result | None = None
+    raw_path: str | None = None
+    digest: str | None = None
     try:
         info = proc_exe.stat()
         raw_path = os.readlink(proc_exe)
@@ -1475,16 +1482,26 @@ def stable_process(pid: int, digest_cache: dict[tuple[int, int], str] | None = N
             digest = sha256_file(proc_exe)
             if digest_cache is not None:
                 digest_cache[key] = digest
-        uid = process_uid(pid)
     except FileNotFoundError as exc:
-        raise HelperError("EVIDENCE_COLLECTION", "process executable disappeared") from exc
+        # Linux 内核线程本来就没有 /proc/<pid>/exe。只要进程记录仍存在且 startTicks
+        # 未变化，就保留稳定进程事实；真正退出或 PID 复用仍由下面的二次 stat 拒绝。
+        try:
+            current = proc_stat_fields(pid)
+        except (FileNotFoundError, ProcessLookupError) as missing:
+            raise HelperError("EVIDENCE_COLLECTION", "process disappeared during collection") from missing
+        if before["startTicks"] != current["startTicks"]:
+            raise HelperError("EVIDENCE_COLLECTION", "PID was reused during collection") from exc
     except PermissionError as exc:
         raise HelperError("PERMISSION_DENIED", "cannot inspect process executable") from exc
+    try:
+        uid = process_uid(pid)
+    except FileNotFoundError as exc:
+        raise HelperError("EVIDENCE_COLLECTION", "process disappeared during collection") from exc
     after = proc_stat_fields(pid)
     if before["startTicks"] != after["startTicks"]:
         raise HelperError("EVIDENCE_COLLECTION", "PID was reused during collection")
-    deleted = raw_path.endswith(" (deleted)")
-    clean_path = raw_path[:-10] if deleted else raw_path
+    deleted = raw_path.endswith(" (deleted)") if raw_path is not None else False
+    clean_path = raw_path[:-10] if deleted and raw_path is not None else raw_path
     try:
         username = pwd.getpwuid(uid).pw_name
     except KeyError:
@@ -1498,21 +1515,20 @@ def stable_process(pid: int, digest_cache: dict[tuple[int, int], str] | None = N
         "bootId": boot_id(),
         "pid": pid,
         "startTicks": before["startTicks"],
-        "exeInode": str(info.st_ino),
         "ppid": before["ppid"],
         "state": before["state"],
         "comm": before["comm"],
         "command": command,
         "uid": uid,
         "username": username,
-        "exePath": clean_path,
-        "exeDeleted": deleted,
-        "exeSize": info.st_size,
         "startedAt": process_start_time(before["startTicks"]),
         "launcherPath": process_launcher_path(pid),
         "environment": process_environment_metadata(pid),
         **scope,
     }
+    if info is not None and clean_path is not None:
+        result.update({"exeInode": str(info.st_ino), "exePath": clean_path,
+                       "exeDeleted": deleted, "exeSize": info.st_size})
     if digest is not None:
         result["exeSha256"] = digest
     return result
@@ -3731,9 +3747,9 @@ def v2_enumerate(params: dict[str, Any], epoch_id: str) -> tuple[list[dict[str, 
     projected_rows = [{field: row[field] for field in requested_fields if field in row} for row in window]
     objects = [v2_observation(str(namespace), row, "CURSOR_BEST_EFFORT", requested_fields) for row in projected_rows]
     gaps = []
-    missing_fields = sorted({item["field"] for observation in objects for item in observation.get("unavailableFields", [])})
-    for field in missing_fields:
-        gaps.append({"code": "FIELD_UNAVAILABLE", "field": field, "detail": "collector did not produce the requested field", "resumable": False})
+    # enumerable capability 表示该字段可在适用对象上产生，不表示每个对象都必须有值。
+    # 逐对象缺失仍保留在 unavailableFields 中供分析，但不把“socket 没有 PID”、
+    # “内核线程没有 exe”之类合法状态升级成整个来源的采集缺口。
     if partial: gaps.append({"code": "COLLECTOR_ERROR", "detail": "; ".join(warnings[:20]), "resumable": False})
     if more: gaps.append({"code": "NODE_LIMIT", "detail": "enumerate limit reached", "resumable": True})
     # 源在分页期间变化时不能丢弃整页：设计 §5.2 要求存在可用部分数据就返回 PARTIAL + gap

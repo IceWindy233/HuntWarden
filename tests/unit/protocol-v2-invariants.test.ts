@@ -42,6 +42,7 @@ describe("Tool Protocol v2 invariants", () => {
     expect(estimateRemoteCost("read", { length: 65_536 }).bytes).toBe(409_600);
     expect(estimateRemoteCost("collect", { maxBytes: 12_345 }).bytes).toBe(12_345);
     expect(estimateRemoteCost("enumerate", { namespace: "account", predicate: { op: "eq", field: "uid", value: 1 }, limit: 10 }).nodes).toBe(5_000);
+    expect(estimateRemoteCost("enumerate", { namespace: "file", limit: 10 }).nodes).toBe(5_000);
   });
 
   it("五类 Preset 覆盖最低检测维度，且每类至少有一条版本化确定性规则", () => {

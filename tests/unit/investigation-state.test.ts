@@ -325,7 +325,7 @@ describe("持久化调查状态", () => {
           content: [{ type: "text", text: "{}" }],
           details: continuation
             ? { status: "success", factRefs: ["FACT-PAGE-2"], objectRefs: ["OBJ-PAGE-2"] }
-            : { status: "success", factRefs: ["FACT-PAGE-1"], objectRefs: ["OBJ-PAGE-1"], cursorRef: "CURSOR-PAGE-2" },
+            : { status: "partial", factRefs: ["FACT-PAGE-1"], objectRefs: ["OBJ-PAGE-1"], cursorRef: "CURSOR-PAGE-2", gaps: [{ code: "NODE_LIMIT", resumable: true }] },
         };
       },
     };

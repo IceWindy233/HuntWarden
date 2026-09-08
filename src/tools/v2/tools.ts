@@ -529,7 +529,7 @@ function remoteTool<T extends TSchema>(deps: V2ToolDependencies, verb: ForensicV
 
 export function estimateRemoteCost(verb: ForensicVerb, params: Record<string, unknown>): WireCost {
   const nodes = verb === "enumerate" || verb === "relate"
-    ? verb === "enumerate" && params.predicate !== undefined
+    ? verb === "enumerate"
       ? PROTOCOL_MANIFEST.hardLimits.enumerateScanNodes!
       : Number(params.limit ?? 500)
     : verb === "match"

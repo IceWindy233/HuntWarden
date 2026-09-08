@@ -3,6 +3,7 @@ import type { RuntimeStore } from "../storage/runtime-store.js";
 import type { InvestigationAction } from "./types.js";
 import { Value } from "typebox/value";
 import { digestObject } from "../common/json.js";
+import { isIncompleteRemotePage } from "../protocol-v2/completeness.js";
 
 export interface ActionExecutionSummary {
   executed: number;
@@ -63,7 +64,7 @@ export class InvestigationActionExecutor {
             const result = await tool.execute(toolCallId, args as never, signal);
             const details = result.details as Record<string, unknown>;
             resultRefs.push(...collectResultRefs(details));
-            partial = partial || details.status === "partial";
+            partial = partial || isIncompleteRemotePage(details);
             cursorRef = paged && typeof details.cursorRef === "string" ? details.cursorRef : undefined;
             if (!cursorRef) break;
             args = { ...claimed.action.args, cursorRef };

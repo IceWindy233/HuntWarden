@@ -316,6 +316,20 @@ print(json.dumps({"count": len(paths), "partial": ledger.partial, "warnings": le
       ] });
     } finally { await rm(directory, { recursive: true, force: true }); }
   });
+  it("不存在的可选来源路径不计为权限或 I/O 覆盖缺口", async () => {
+    const directory = await mkdtemp(resolve(tmpdir(), "huntwarden-absent-source-"));
+    try {
+      const result = spawnSync("python3", ["-c", `
+import json, pathlib, runpy, sys
+ns = runpy.run_path(sys.argv[1])
+ledger = ns["SkipLedger"]()
+kind = ns["path_kind"](pathlib.Path(sys.argv[2]) / "not-installed", ledger, follow=True)
+print(json.dumps({"kind": kind, "partial": ledger.partial, "warnings": ledger.warnings()}))
+`, helper, directory], { encoding: "utf8" });
+      expect(result.status, result.stderr).toBe(0);
+      expect(JSON.parse(result.stdout)).toEqual({ kind: "unavailable", partial: false, warnings: [] });
+    } finally { await rm(directory, { recursive: true, force: true }); }
+  });
   it("返回版本化能力清单并声明 Artifact 传输", () => {
     const result = invoke("capabilities", {
       protocolVersion: 2, requestId: "REQ-CAPABILITIES", epochId: "PRECHECK", deadlineMs: 10_000,

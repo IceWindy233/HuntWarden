@@ -9,6 +9,7 @@ import { selectedPresets } from "./registry.js";
 import type { PresetDefinition, PresetStep } from "./types.js";
 import { INITIAL_GRANT_POLICY } from "../protocol-v2/policy.js";
 import { selectJavaClassInspectionTargets } from "../investigation/java-class-identity.js";
+import { isIncompleteRemotePage } from "../protocol-v2/completeness.js";
 
 export interface PresetRunResult { presetRunId: string; coverage: CoverageRun[]; promptContext: string }
 type StepOutcome = { status: "success" | "partial" | "error"; runId?: string; factRefs?: string[]; objectRefs?: string[]; reason?: string; fanout?: Array<{ sourceRef: string; objectRefs: string[] }> };
@@ -200,10 +201,10 @@ export class PresetExecutorV2 {
       const toolCallId = `PRESET-${randomUUID()}`;
       firstRunId ??= toolCallId;
       try {
-        const result = await tool.execute(toolCallId, { ...baseParams, ...(cursorRef ? { cursorRef } : {}) } as never, signal) as AgentToolResult<{ status: "success" | "partial"; factRefs: string[]; objectRefs: string[]; cursorRef?: string }>;
+        const result = await tool.execute(toolCallId, { ...baseParams, ...(cursorRef ? { cursorRef } : {}) } as never, signal) as AgentToolResult<{ status: "success" | "partial"; factRefs: string[]; objectRefs: string[]; cursorRef?: string; gaps?: unknown[] }>;
         factRefs.push(...result.details.factRefs);
         objectRefs.push(...result.details.objectRefs);
-        partial = partial || result.details.status === "partial";
+        partial = partial || isIncompleteRemotePage(result.details);
         // 每个远程页已经作为独立 FactBatch 原子提交。此时立即唤醒持久化调度器，
         // 让首屏的易失对象先建 Lead 和保全动作，而不等待大型枚举耗尽 Cursor。
         await this.afterPageCommitted?.();
