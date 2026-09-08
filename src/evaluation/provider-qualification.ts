@@ -155,7 +155,10 @@ function duplicatePrimitiveExecutions(toolRuns: ToolRunRecord[]): number {
 }
 
 function isCurrentVerifiedReport(report: ReportRecord, epochId: string | undefined): boolean {
-  if (!epochId || report.epochId !== epochId || report.validationErrors.length > 0 || !/^[a-f0-9]{64}$/.test(report.sha256)) return false;
+  // ReportService 只有在最终 Markdown 通过结构化投影校验后才会写入 MODEL、
+  // REPAIRED 或 FALLBACK 报告。validationErrors 保存的是模型初稿的修复历史，
+  // 不是最终文件的校验状态；把它当作发布失败会错误拒绝已验证的确定性回退报告。
+  if (!epochId || report.epochId !== epochId || report.generationMode === "LEGACY" || !/^[a-f0-9]{64}$/.test(report.sha256)) return false;
   try {
     return createHash("sha256").update(readFileSync(report.path)).digest("hex") === report.sha256;
   } catch {

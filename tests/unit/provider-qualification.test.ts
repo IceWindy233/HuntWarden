@@ -148,6 +148,18 @@ describe("真实 Provider 发布资格生成器", () => {
     expect(result.failures).toEqual(expect.arrayContaining([expect.stringContaining("文件摘要一致")]));
   });
 
+  it("接受最终投影已校验且摘要一致的确定性回退报告", () => {
+    const value = input();
+    value.store.listReports = (taskId) => [{
+      reportId: `${taskId}-FALLBACK-REPORT`, taskId, epochId: `${taskId}-EPOCH`, version: 1,
+      path: reportPath, sha256: reportSha256, generationMode: "FALLBACK",
+      validationErrors: ["模型初稿缺少字段，已使用确定性模板"], createdAt: now,
+    }];
+    const result = evaluateProviderQualification(value);
+    expect(result.status).toBe("PASS");
+    expect(result.failures).toEqual([]);
+  });
+
   it("拒绝把旧 Epoch 的 Provider 审计和 ToolRun 计入当前任务", () => {
     const value = input();
     for (const taskId of [value.linuxId, value.javaId]) {
