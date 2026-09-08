@@ -1467,7 +1467,7 @@ def process_maps_summary(pid: int) -> dict[str, Any]:
 
 
 def stable_process(pid: int, digest_cache: dict[tuple[int, int], str] | None = None,
-                   include_hash: bool = True) -> dict[str, Any]:
+                   include_hash: bool = True, include_context: bool = True) -> dict[str, Any]:
     before = proc_stat_fields(pid)
     proc_exe = pathlib.Path(f"/proc/{pid}/exe")
     info: os.stat_result | None = None
@@ -1506,7 +1506,6 @@ def stable_process(pid: int, digest_cache: dict[tuple[int, int], str] | None = N
         username = pwd.getpwuid(uid).pw_name
     except KeyError:
         username = str(uid)
-    scope = process_scope_metadata(pid)
     try:
         command = redact_secret_text(pathlib.Path(f"/proc/{pid}/cmdline").read_bytes()[:65536].replace(b"\0", b" ").decode("utf-8", errors="replace"), 4096).strip()
     except OSError:
@@ -1523,9 +1522,10 @@ def stable_process(pid: int, digest_cache: dict[tuple[int, int], str] | None = N
         "username": username,
         "startedAt": process_start_time(before["startTicks"]),
         "launcherPath": process_launcher_path(pid),
-        "environment": process_environment_metadata(pid),
-        **scope,
     }
+    if include_context:
+        result.update(process_scope_metadata(pid))
+        result["environment"] = process_environment_metadata(pid)
     if info is not None and clean_path is not None:
         result.update({"exeInode": str(info.st_ino), "exePath": clean_path,
                        "exeDeleted": deleted, "exeSize": info.st_size})
@@ -1554,7 +1554,8 @@ def process_request(request: dict[str, Any]) -> dict[str, Any]:
     return current
 
 
-def enumerate_stable_processes(maximum: int, include_hash: bool = True) -> tuple[list[dict[str, Any]], list[str], bool]:
+def enumerate_stable_processes(maximum: int, include_hash: bool = True,
+                               include_context: bool = True) -> tuple[list[dict[str, Any]], list[str], bool]:
     items: list[dict[str, Any]] = []
     warnings: list[str] = []
     cache: dict[tuple[int, int], str] = {}
@@ -1566,12 +1567,12 @@ def enumerate_stable_processes(maximum: int, include_hash: bool = True) -> tuple
         if deadline_exceeded():
             return items, warnings[:100] + [DEADLINE_WARNING], True
         try:
-            record = stable_process(int(entry.name), cache, include_hash)
+            record = stable_process(int(entry.name), cache, include_hash, include_context)
         except HelperError as exc:
             # Kernel threads and racing processes are expected, but inability to collect is explicit.
             warnings.append(f"PID {entry.name}: {str(exc)}")
             continue
-        if record.get("cgroupsTruncated") or record["environment"]["partial"]:
+        if include_context and (record.get("cgroupsTruncated") or record["environment"]["partial"]):
             truncated += 1
         items.append(record)
     if truncated:
@@ -4027,7 +4028,7 @@ def v2_relate(params: dict[str, Any], epoch_id: str) -> tuple[list[dict[str, Any
                 except HelperError as exc:
                     gaps.append({"code": "SOURCE_CHANGED", "detail": str(exc), "resumable": False})
         elif relation == "children":
-            values, warnings, partial = enumerate_stable_processes(5000)
+            values, warnings, partial = enumerate_stable_processes(5000, include_context=False)
             rows = [("process", {**value, "exe": value.get("exePath"), "command": value.get("command", value.get("comm"))})
                     for value in values if value.get("ppid") == current.get("pid")]
             if partial:
@@ -4080,7 +4081,7 @@ def v2_relate(params: dict[str, Any], epoch_id: str) -> tuple[list[dict[str, Any
                     gaps.append({"code": "COLLECTOR_ERROR", "detail": "; ".join(warnings[:20]), "resumable": False})
     elif namespace == "socket" and relation == "owned_by":
         current = dict(identity)
-        processes, warnings, partial = enumerate_stable_processes(5000)
+        processes, warnings, partial = enumerate_stable_processes(5000, include_context=False)
         for process in processes:
             try:
                 for descriptor in pathlib.Path(f"/proc/{process['pid']}/fd").iterdir():
@@ -4096,7 +4097,7 @@ def v2_relate(params: dict[str, Any], epoch_id: str) -> tuple[list[dict[str, Any
         descriptor, current = v2_bound_file(params)
         os.close(descriptor)
         if relation == "opened_by":
-            processes, warnings, partial = enumerate_stable_processes(5000)
+            processes, warnings, partial = enumerate_stable_processes(5000, include_context=False)
             for process in processes:
                 try:
                     for entry in pathlib.Path(f"/proc/{process['pid']}/fd").iterdir():

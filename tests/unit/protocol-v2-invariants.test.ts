@@ -153,6 +153,16 @@ describe("Tool Protocol v2 invariants", () => {
       hypothesisId: hypothesis.hypothesisId, obligationId: hypothesis.obligationId,
       actions: [{ clientRef: "bad", operationRef: "query_facts", subjectRefs: [batch.facts[0]!.subjectRef], args: { view: "facts", limit: 0 }, dependsOnClientRefs: [] }],
     } as never)).rejects.toThrow(/不符合工具 Schema/);
+
+    const actionCount = store.listInvestigationActions(task.taskId, epoch.epochId).length;
+    await expect(proposalTool.execute("CALL-SEMANTIC-BAD-ACTIONS", {
+      hypothesisId: hypothesis.hypothesisId, obligationId: hypothesis.obligationId,
+      actions: [
+        { clientRef: "valid-first", operationRef: "query_facts", subjectRefs: [batch.facts[0]!.subjectRef], args: { view: "facts", namespace: "process", subjectRef: batch.facts[0]!.subjectRef, limit: 10 }, dependsOnClientRefs: [] },
+        { clientRef: "invalid-second", operationRef: "verify", subjectRefs: [batch.facts[0]!.subjectRef], args: { ref: batch.facts[0]!.subjectRef, baseline: "package_db" }, dependsOnClientRefs: ["valid-first"] },
+      ],
+    } as never)).rejects.toThrow(/ObjectRef 不存在、类型错误/);
+    expect(store.listInvestigationActions(task.taskId, epoch.epochId)).toHaveLength(actionCount);
   });
 
   it("INV-07：read 拒绝 DENIED_TEXT、无授权的 SENSITIVE_TEXT 与非 file 引用，且拒绝时不触达目标", async () => {

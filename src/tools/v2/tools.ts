@@ -50,6 +50,15 @@ const RefSchema = Type.String({ pattern: "^OBJ-[0-9a-f-]{36}$" });
 const CursorSchema = Type.String({ pattern: "^CURSOR-[0-9a-f-]{36}$" });
 const severities = ["CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"] as const;
 const verdicts = ["CONFIRMED_MALICIOUS", "HIGHLY_SUSPICIOUS", "SUSPICIOUS", "BENIGN", "NO_OBSERVED_FINDING", "INCONCLUSIVE"] as const;
+const MODEL_ACTION_OPERATION_NAMES = ["enumerate", "project", "read", "match", "relate", "verify", "collect", "probe", "query_facts"] as const;
+type ModelActionOperation = typeof MODEL_ACTION_OPERATION_NAMES[number];
+interface ModelActionProposal {
+  clientRef: string;
+  operationRef: ModelActionOperation;
+  subjectRefs: string[];
+  args: Record<string, unknown>;
+  dependsOnClientRefs: string[];
+}
 // Upper bound on the hit context one `match` object can return: the Helper emits a capped hit
 // marker plus MATCH_CONTEXT_HITS windows, each an escaped MATCH_CONTEXT_BYTES window (escaping
 // can double the length) with a byte-offset label. Context is a content egress path, so it is
@@ -723,13 +732,12 @@ function createProposeHypothesisTool(deps: V2ToolDependencies): SecurityToolDefi
 }
 
 function createProposeActionsTool(deps: V2ToolDependencies): SecurityToolDefinition {
-  const operationNames = ["enumerate", "project", "read", "match", "relate", "verify", "collect", "probe", "query_facts"] as const;
   return localTool(deps, "propose_actions", "为调查义务提交受限动作组合并交由持久化调度器执行", Type.Object({
     hypothesisId: Type.String({ pattern: "^HYP-[A-Za-z0-9-]+$" }),
     obligationId: Type.String({ pattern: "^OBL-[A-Za-z0-9-]+$" }),
     actions: Type.Array(Type.Object({
       clientRef: Type.String({ minLength: 1, maxLength: 64 }),
-      operationRef: Type.Union(operationNames.map((value) => Type.Literal(value))),
+      operationRef: Type.Union(MODEL_ACTION_OPERATION_NAMES.map((value) => Type.Literal(value))),
       subjectRefs: Type.Array(RefSchema, { maxItems: 32, uniqueItems: true }),
       args: Type.Record(Type.String({ maxLength: 64 }), Type.Unknown()),
       dependsOnClientRefs: Type.Array(Type.String({ minLength: 1, maxLength: 64 }), { maxItems: 32, uniqueItems: true }),
@@ -740,34 +748,49 @@ function createProposeActionsTool(deps: V2ToolDependencies): SecurityToolDefinit
     const hypothesis = deps.store.listInvestigationHypotheses(deps.task.taskId, deps.epoch.epochId).find((item) => item.hypothesisId === params.hypothesisId);
     const obligation = deps.store.listInvestigationObligations(deps.task.taskId, deps.epoch.epochId).find((item) => item.obligationId === params.obligationId && item.hypothesisId === params.hypothesisId);
     if (!hypothesis || !obligation) throw new InvalidArgumentError("Action 必须绑定当前 Epoch 的 Hypothesis 与 Obligation");
-    const clientRefs = new Set(params.actions.map((item) => item.clientRef));
-    if (clientRefs.size !== params.actions.length) throw new InvalidArgumentError("clientRef 必须唯一");
-    const created = new Map<string, string>();
-    const pending = [...params.actions];
+    const proposals = params.actions as ModelActionProposal[];
+    const clientRefs = new Set(proposals.map((item) => item.clientRef));
+    if (clientRefs.size !== proposals.length) throw new InvalidArgumentError("clientRef 必须唯一");
+    if (proposals.some((item) => item.dependsOnClientRefs.some((dependency) => !clientRefs.has(dependency)))) {
+      throw new InvalidArgumentError("Action 依赖引用了未知 clientRef");
+    }
+    const ordered: ModelActionProposal[] = [];
+    const resolved = new Set<string>();
+    const pending = [...proposals];
     while (pending.length > 0) {
-      const index = pending.findIndex((item) => item.dependsOnClientRefs.every((dependency) => created.has(dependency)));
-      if (index < 0) throw new InvalidArgumentError("Action 依赖存在循环或引用未知 clientRef");
+      const index = pending.findIndex((item) => item.dependsOnClientRefs.every((dependency) => resolved.has(dependency)));
+      if (index < 0) throw new InvalidArgumentError("Action 依赖存在循环");
       const [proposal] = pending.splice(index, 1);
-      for (const ref of proposal!.subjectRefs) resolveObject(deps, ref);
-      const operationRef = proposal!.operationRef;
-      const tool = createV2SecurityTools(deps).find((item) => item.name === operationRef);
-      if (!tool || !Value.Check(tool.parameters, proposal!.args)) throw new InvalidArgumentError(`Action ${proposal!.clientRef} 的 ${operationRef} 参数不符合工具 Schema`);
+      ordered.push(proposal!);
+      resolved.add(proposal!.clientRef);
+    }
+
+    // 整批动作先完成 Schema、对象绑定、能力和操作语义校验。任何一项无效时不写入
+    // InvestigationAction，避免一个晚失败的动作污染必选 Obligation 与会话结论。
+    const modelTools = createV2SecurityTools(deps).filter((item) => MODEL_ACTION_OPERATION_NAMES.includes(item.name as ModelActionOperation));
+    const toolsByName = new Map(modelTools.map((tool) => [tool.name, tool]));
+    for (const proposal of ordered) validateProposedAction(deps, proposal, toolsByName.get(proposal.operationRef));
+
+    const actionIds = new Map(ordered.map((proposal) => [proposal.clientRef, `IACT-${randomUUID()}`]));
+    const created = new Map<string, string>();
+    for (const proposal of ordered) {
+      const operationRef = proposal.operationRef;
       const now = new Date().toISOString();
-      const argsDigest = digestObject(proposal!.args);
+      const argsDigest = digestObject(proposal.args);
       const action: InvestigationAction = {
-        actionId: `IACT-${randomUUID()}`,
+        actionId: actionIds.get(proposal.clientRef)!,
         taskId: deps.task.taskId,
         epochId: deps.epoch.epochId,
         kind: operationRef === "query_facts" ? "LOCAL_QUERY" : "REMOTE_PRIMITIVE",
         requestedBy: "MODEL",
         obligationIds: [obligation.obligationId],
-        subjectRefs: proposal!.subjectRefs,
-        entityVersionRefs: proposal!.subjectRefs.flatMap((ref) => deps.store.listEntityVersions(deps.task.taskId, deps.epoch.epochId, ref).slice(-1).map((item) => item.versionRef)),
+        subjectRefs: proposal.subjectRefs,
+        entityVersionRefs: proposal.subjectRefs.flatMap((ref) => deps.store.listEntityVersions(deps.task.taskId, deps.epoch.epochId, ref).slice(-1).map((item) => item.versionRef)),
         operationRef,
         replayPolicy: operationRef === "collect" ? "RESUME_OR_RECOLLECT" : "SAFE_REOBSERVE",
-        args: proposal!.args,
+        args: proposal.args,
         argsDigest,
-        dependsOn: proposal!.dependsOnClientRefs.map((ref) => created.get(ref)!),
+        dependsOn: proposal.dependsOnClientRefs.map((ref) => actionIds.get(ref)!),
         authorizationVersion: session.authorizationVersion,
         observationRound: `MODEL:${hypothesis.hypothesisId}:${hypothesis.revision}`,
         idempotencyKey: digestObject({ taskId: deps.task.taskId, epochId: deps.epoch.epochId, hypothesisId: hypothesis.hypothesisId, operationRef, argsDigest }),
@@ -778,17 +801,117 @@ function createProposeActionsTool(deps: V2ToolDependencies): SecurityToolDefinit
         updatedAt: now,
       };
       const stored = deps.store.putInvestigationAction(action);
-      created.set(proposal!.clientRef, stored.actionId);
+      created.set(proposal.clientRef, stored.actionId);
     }
     const accepted = [...created].map(([clientRef, actionId]) => ({ clientRef, actionId }));
     const eligibleActionIds = new Set(accepted.map((item) => item.actionId));
-    const modelTools = createV2SecurityTools(deps).filter((item) => operationNames.includes(item.name as typeof operationNames[number]));
     const discoveryTools = createV2SecurityTools({ ...deps, budgetOwner: "DISCOVERY", factSource: { kind: "SYSTEM" } })
-      .filter((item) => operationNames.includes(item.name as typeof operationNames[number]));
+      .filter((item) => MODEL_ACTION_OPERATION_NAMES.includes(item.name as ModelActionOperation));
     const scheduler = await new InvestigationScheduler(deps.store, deps.task.taskId, deps.epoch.epochId, session, discoveryTools, modelTools)
       .runUntilQuiescent(signal, 20, eligibleActionIds);
     return { accepted, rejected: [], scheduler };
   });
+}
+
+function validateProposedAction(
+  deps: V2ToolDependencies,
+  proposal: ModelActionProposal,
+  tool: SecurityToolDefinition | undefined,
+): void {
+  const { args, operationRef } = proposal;
+  if (!tool || !Value.Check(tool.parameters, args)) {
+    throw new InvalidArgumentError(`Action ${proposal.clientRef} 的 ${operationRef} 参数不符合工具 Schema`);
+  }
+  for (const ref of proposal.subjectRefs) resolveObject(deps, ref);
+
+  if (operationRef === "query_facts") {
+    const input = args as Omit<FactQueryAst, "select"> & { select?: string[] };
+    validateFactQuery({ ...input, select: input.select ?? defaultFactQuerySelect(input.view) });
+    return;
+  }
+  if (operationRef === "enumerate") {
+    const namespace = args.namespace as NamespaceName;
+    if (namespace === "task_ioc") throw new InvalidArgumentError("task_ioc 只能通过 query_facts 查询");
+    assertEffectiveVerb(deps, namespace, "enumerate");
+    const fields = (args.fields as string[] | undefined) ?? identityFields(namespace);
+    for (const field of fields) {
+      assertManifestField(namespace, field, "enumerable");
+      assertEffectiveField(deps, namespace, field);
+    }
+    validatePredicate(namespace, args.predicate as Predicate | undefined);
+    for (const sort of (args.sort as Array<{ field: string }> | undefined) ?? []) assertManifestField(namespace, sort.field, "sortable");
+    if (typeof args.scopeRef === "string") resolveGrant(deps, args.scopeRef, "SCOPE");
+    return;
+  }
+
+  if (operationRef === "project") {
+    const binding = resolveObject(deps, args.ref as string);
+    assertEffectiveVerb(deps, binding.namespace, "project");
+    for (const field of args.fields as string[]) {
+      assertManifestField(binding.namespace, field, "projectable");
+      assertEffectiveField(deps, binding.namespace, field);
+    }
+    return;
+  }
+  if (operationRef === "read") {
+    const binding = resolveObject(deps, args.ref as string, "file");
+    assertEffectiveVerb(deps, binding.namespace, "read");
+    const latest = latestPrivateFact(deps, args.ref as string);
+    const contentClass = effectiveContentClass(latest.path, latest.contentClass);
+    if (contentClass === "DENIED_TEXT") throw new SecurityError("PERMISSION_DENIED", "DENIED_TEXT 永不进入模型");
+    if (contentClass !== "SAFE_TEXT") requireSensitiveGrant(deps, args.ref as string);
+    return;
+  }
+  if (operationRef === "match") {
+    const matcher = args.matcher as { engine: "literal" | "re2" | "yara" };
+    if (!deps.capabilities.matchers.has(matcher.engine)) throw new SecurityError("UNSUPPORTED_ENVIRONMENT", `目标不支持 matcher ${matcher.engine}`);
+    for (const ref of args.refs as string[]) {
+      const binding = resolveObject(deps, ref, "file");
+      assertEffectiveVerb(deps, binding.namespace, "match");
+      if (args.includeContext) {
+        const latest = latestPrivateFact(deps, ref);
+        const contentClass = effectiveContentClass(latest.path, latest.contentClass);
+        if (contentClass === "DENIED_TEXT") throw new SecurityError("PERMISSION_DENIED", "DENIED_TEXT 不返回命中上下文");
+        if (contentClass !== "SAFE_TEXT") requireSensitiveGrant(deps, ref);
+      }
+    }
+    return;
+  }
+  if (operationRef === "relate") {
+    const binding = resolveObject(deps, args.ref as string);
+    assertEffectiveVerb(deps, binding.namespace, "relate");
+    const relation = args.relation as string;
+    if (!requireNamespace(binding.namespace).relations.includes(relation)) throw new InvalidArgumentError("Relation 未在 Manifest 注册");
+    if (!deps.capabilities.namespaces[binding.namespace]?.relations.has(relation)) throw new SecurityError("UNSUPPORTED_ENVIRONMENT", "目标未声明该 Relation 能力");
+    return;
+  }
+  if (operationRef === "verify") {
+    const binding = resolveObject(deps, args.ref as string, "file");
+    assertEffectiveVerb(deps, binding.namespace, "verify");
+    if (args.baseline === "package_db" && args.dataSetRef) throw new InvalidArgumentError("package_db verify 不接受 dataSetRef");
+    if (args.baseline === "known_hash_set") {
+      if (typeof args.dataSetRef !== "string") throw new InvalidArgumentError("known_hash_set verify 必须提供控制端 dataSetRef");
+      if (!deps.store.getKnownHashDataSet(args.dataSetRef)) throw new SecurityError("UNSUPPORTED_ENVIRONMENT", "known_hash_set 数据集不存在或尚未导入");
+    }
+    return;
+  }
+  if (operationRef === "collect") {
+    const binding = resolveObject(deps, args.ref as string);
+    if (binding.namespace !== "file" && binding.namespace !== "process") throw new SecurityError("UNSUPPORTED_ENVIRONMENT", "collect 只支持 file 或稳定 process executable 对象");
+    assertEffectiveVerb(deps, binding.namespace, "collect");
+    return;
+  }
+  if (operationRef === "probe") {
+    const probeKind = args.probeKind as "jvm.tomcat.inventory" | "jvm.class.inspect" | "jvm.class.dump";
+    if (!deps.capabilities.probes.has(probeKind)) throw new SecurityError("UNSUPPORTED_ENVIRONMENT", `目标不支持 probe ${probeKind}`);
+    assertEffectiveVerb(deps, "jvm", "probe");
+    const parameters = args.parameters as Record<string, unknown>;
+    if (probeKind === "jvm.tomcat.inventory" && Object.keys(parameters).length > 0) throw new InvalidArgumentError("jvm.tomcat.inventory 不接受 parameters");
+    if ((probeKind === "jvm.class.inspect" || probeKind === "jvm.class.dump") && !parameters.className) throw new InvalidArgumentError(`${probeKind} 必须提供 className`);
+    const granted = deps.store.listTaskGrants(deps.task.taskId).some((grant) => grant.kind === "PROBE" && grant.status === "ACTIVE" && grant.targetFingerprint === deps.task.target.hostFingerprint && grant.binding.probeKind === probeKind && (!grant.expiresAt || Date.parse(grant.expiresAt) > Date.now()));
+    if (!granted) throw new SecurityError("PERMISSION_DENIED", `Probe ${probeKind} 未获得任务级授权`);
+    resolveObject(deps, args.ref as string, "jvm");
+  }
 }
 
 function createQueryFactsTool(deps: V2ToolDependencies): SecurityToolDefinition {

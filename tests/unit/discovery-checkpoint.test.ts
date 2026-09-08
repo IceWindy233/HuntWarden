@@ -32,7 +32,8 @@ describe("远程扫描检查点", () => {
         cost: { remoteCalls: 1, nodes: 3, bytes: 512, wallTimeMs: 5, probeCalls: 0 },
       };
     });
-    store.initializeBudget(task.taskId, epoch.epochId, "MODEL", { remoteCalls: 10, nodes: 100, bytes: 20_000_000, wallTimeMs: 100_000, probeCalls: 0 });
+    // enumerate 预留完整扫描页上限（5000 nodes），收到 Wire cost 后再按实际 3 nodes 结算。
+    store.initializeBudget(task.taskId, epoch.epochId, "MODEL", { remoteCalls: 10, nodes: 6_000, bytes: 20_000_000, wallTimeMs: 100_000, probeCalls: 0 });
     const tools = createV2SecurityTools({ task, epoch, config: testConfig(directory), store, executor, evidence: new EvidenceStore(directory, store), capabilities: gateCapabilities(helper, [grant]), approvals: new ApprovalService(store), budgetOwner: "MODEL" });
     const enumerate = tools.find((tool) => tool.name === "enumerate")!;
     const args = { namespace: "account", fields: ["uid", "username", "gid", "home", "shell"], limit: 3 };
