@@ -1,0 +1,23 @@
+{
+  "schemaVersion": 2,
+  "suiteId": "m2-process-egress-4x4x4",
+  "trustBoundary": {
+    "controllerInput": ["target", "selectedCategory", "entryMode"],
+    "excludedFromTargetAndModel": ["disposition", "expectedFacts", "expectedRelations", "expectedGapCodes"],
+    "truthOwner": "acceptance-runner"
+  },
+  "cases": [
+    { "caseId": "malicious-temp-egress", "disposition": "MALICIOUS", "entryMode": "ZERO_IOC", "category": "linux_intrusion_triage", "truth": "临时目录进程建立公网外连且映像可保全", "expectedFacts": ["process:/tmp/.agent", "file:/tmp/.agent"], "expectedRelations": ["process -executable-> file"], "evidenceRequired": true },
+    { "caseId": "malicious-deleted-egress", "disposition": "MALICIOUS", "entryMode": "SINGLE_LEAD", "category": "linux_intrusion_triage", "truth": "已删除执行映像保持运行且可通过绑定描述符保全", "expectedFacts": ["process:exeDeleted", "file:/proc/pid/exe"], "expectedRelations": ["process -executable-> file"], "evidenceRequired": true },
+    { "caseId": "malicious-cron-download", "disposition": "MALICIOUS", "entryMode": "ZERO_IOC", "category": "linux_persistence", "truth": "Cron 引用临时脚本并形成可验证执行关系", "expectedFacts": ["cron_entry:/etc/cron.d/update", "file:/tmp/update.py"], "expectedRelations": ["cron_entry -executes-> file"], "evidenceRequired": true },
+    { "caseId": "malicious-unit-egress", "disposition": "MALICIOUS", "entryMode": "SINGLE_LEAD", "category": "linux_persistence", "truth": "systemd 有效配置从临时目录启动程序", "expectedFacts": ["unit:update.service", "file:/tmp/update"], "expectedRelations": ["unit -executes-> file"], "evidenceRequired": true },
+    { "caseId": "benign-package-update", "disposition": "BENIGN", "entryMode": "ZERO_IOC", "category": "linux_intrusion_triage", "truth": "系统包更新程序正常运行", "expectedFacts": ["process:/usr/bin/apt-get"], "expectedRelations": [], "evidenceRequired": false },
+    { "caseId": "benign-monitoring-agent", "disposition": "BENIGN", "entryMode": "SINGLE_LEAD", "category": "linux_intrusion_triage", "truth": "已部署监控 Agent 使用固定安装路径", "expectedFacts": ["process:/opt/monitor/bin/agent"], "expectedRelations": [], "evidenceRequired": false },
+    { "caseId": "benign-admin-script", "disposition": "BENIGN", "entryMode": "ZERO_IOC", "category": "linux_intrusion_triage", "truth": "受控运维脚本由系统解释器执行", "expectedFacts": ["process:/usr/bin/bash"], "expectedRelations": [], "evidenceRequired": false },
+    { "caseId": "benign-web-worker", "disposition": "BENIGN", "entryMode": "SINGLE_LEAD", "category": "linux_intrusion_triage", "truth": "正常 Web worker 进程运行", "expectedFacts": ["process:/usr/sbin/nginx"], "expectedRelations": [], "evidenceRequired": false },
+    { "caseId": "limited-log-missing", "disposition": "LIMITED", "entryMode": "ZERO_IOC", "category": "backdoor_account", "truth": "认证历史数据源不可用", "expectedFacts": ["process:/usr/sbin/sshd"], "expectedRelations": [], "expectedGapCodes": ["LOG_SOURCE_UNAVAILABLE"] },
+    { "caseId": "limited-budget", "disposition": "LIMITED", "entryMode": "SINGLE_LEAD", "category": "linux_intrusion_triage", "truth": "调查预算在后续动作执行时耗尽", "expectedFacts": ["process:/usr/bin/curl"], "expectedRelations": [], "expectedGapCodes": ["BUDGET_EXHAUSTED"] },
+    { "caseId": "limited-target-disconnect", "disposition": "LIMITED", "entryMode": "ZERO_IOC", "category": "linux_intrusion_triage", "truth": "目标在关系动作提交窗口不可用", "expectedFacts": ["socket:198.51.100.10"], "expectedRelations": [], "expectedGapCodes": ["TARGET_UNAVAILABLE"] },
+    { "caseId": "limited-evidence-corrupt", "disposition": "LIMITED", "entryMode": "SINGLE_LEAD", "category": "linux_intrusion_triage", "truth": "控制端 Evidence 摘要恢复核验失败", "expectedFacts": ["process:/tmp/corrupt"], "expectedRelations": [], "expectedGapCodes": ["EVIDENCE_INTEGRITY_FAILED"] }
+  ]
+}

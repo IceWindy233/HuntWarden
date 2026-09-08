@@ -28,7 +28,7 @@ async function v2Store() {
   const task = testTask(); task.protocolVersion = 2; store.createTask(task);
   const epoch: ScanEpoch = {
     epochId: "EPOCH-00000000-0000-4000-8000-000000000001", taskId: task.taskId,
-    targetFingerprint: task.target.hostFingerprint, protocolVersion: 2, manifestVersion: "2.1.0", helperVersion: "2.1.0",
+    targetFingerprint: task.target.hostFingerprint, protocolVersion: 2, manifestVersion: "3.0.0", helperVersion: "3.0.0",
     reason: "INITIAL", status: "RUNNING", startedAt: new Date().toISOString(),
   };
   store.createScanEpoch(epoch);
@@ -41,6 +41,7 @@ describe("Tool Protocol v2 invariants", () => {
     expect(estimateRemoteCost("read", { length: 467 }).bytes).toBe(19_186);
     expect(estimateRemoteCost("read", { length: 65_536 }).bytes).toBe(409_600);
     expect(estimateRemoteCost("collect", { maxBytes: 12_345 }).bytes).toBe(12_345);
+    expect(estimateRemoteCost("enumerate", { namespace: "account", predicate: { op: "eq", field: "uid", value: 1 }, limit: 10 }).nodes).toBe(5_000);
   });
 
   it("五类 Preset 覆盖最低检测维度，且每类至少有一条版本化确定性规则", () => {
@@ -64,7 +65,7 @@ describe("Tool Protocol v2 invariants", () => {
     task.checks = ["linux_intrusion_triage"];
     store.saveTask(task);
     const helper: HelperCapabilitiesV2 = {
-      protocolVersion: 2, manifestVersion: "2.1.0", helper: { name: "helper", version: "2.1.0" },
+      protocolVersion: 2, manifestVersion: "3.0.0", helper: { name: "helper", version: "3.0.0" },
       namespaces: { process: { fields: ["bootId", "pid", "startTicks", "exeInode", "exeSha256"], relations: ["children"], verbs: ["enumerate", "project", "relate"] } },
       matchers: ["literal"], probes: [], verbs: ["enumerate", "project", "read", "match", "relate", "verify", "collect", "probe"],
       limits: { maxObjects: 500, maxOutputBytes: 1_572_864, maxReadBytes: 65_536, maxCollectBytes: 104_857_600 },
@@ -77,7 +78,7 @@ describe("Tool Protocol v2 invariants", () => {
 
     const investigate = createV2SecurityTools(deps);
     const investigateNames = investigate.map((tool) => tool.name);
-    expect(investigateNames).toEqual(expect.arrayContaining(["query_facts", "get_assessment_projection", "describe_capabilities", "enumerate", "project", "read", "match", "relate", "verify", "collect", "probe"]));
+    expect(investigateNames).toEqual(expect.arrayContaining(["query_facts", "query_investigation", "propose_hypothesis", "propose_actions", "get_assessment_projection", "describe_capabilities", "enumerate", "project", "read", "match", "relate", "verify", "collect", "probe"]));
     expect(investigateNames).not.toContain("quarantine_file");
     expect(investigateNames).not.toContain("disable_account");
     expect(new Set(investigateNames).size).toBe(investigateNames.length);
@@ -85,13 +86,72 @@ describe("Tool Protocol v2 invariants", () => {
     // object，不能只给 allOf/anyOf。该断言覆盖完整调查工具表，避免模型在
     // 首个 token 前因任一未调用工具的 Schema 无效而整体返回 400。
     for (const tool of investigate) expect((tool.parameters as { type?: string }).type, tool.name).toBe("object");
+    const probe = investigate.find((tool) => tool.name === "probe");
+    expect(probe).toBeDefined();
+    expect(Value.Check(probe!.parameters, {
+      ref: "OBJ-00000000-0000-4000-8000-000000000001",
+      probeKind: "jvm.tomcat.inventory",
+      parameters: { pid: 999 },
+    })).toBe(false);
+    expect(Value.Check(probe!.parameters, {
+      ref: "OBJ-00000000-0000-4000-8000-000000000001",
+      probeKind: "jvm.class.inspect",
+      parameters: { className: "example.Filter", classLoaderId: "loader-A" },
+    })).toBe(true);
 
     const reportNames = createV2SecurityTools(deps, "REPORT").map((tool) => tool.name);
-    expect(reportNames).toEqual(["query_facts", "get_assessment_projection"]);
+    expect(reportNames).toEqual(["query_facts", "query_investigation", "get_assessment_projection"]);
 
     task.mode = "REMEDIATE";
     const remediationNames = createV2SecurityTools(deps).map((tool) => tool.name);
     expect(remediationNames).toEqual(expect.arrayContaining(["quarantine_file", "disable_account"]));
+  });
+
+  it("模型假设与动作提议必须绑定当前 Epoch，并由持久化调度器执行", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "huntwarden-model-proposal-"));
+    const { store, task, epoch } = await v2Store();
+    task.checks = ["linux_intrusion_triage"];
+    store.saveTask(task);
+    const helper: HelperCapabilitiesV2 = {
+      protocolVersion: 2, manifestVersion: "3.0.0", helper: { name: "helper", version: "3.0.0" },
+      namespaces: { process: { fields: ["bootId", "pid", "startTicks", "exeInode", "exeSha256"], relations: ["parent"], verbs: ["enumerate", "project", "relate", "collect"] } },
+      matchers: ["literal"], probes: [], verbs: ["enumerate", "project", "read", "match", "relate", "verify", "collect", "probe"],
+      limits: { maxObjects: 500, maxOutputBytes: 1_572_864, maxReadBytes: 65_536, maxCollectBytes: 104_857_600 },
+    };
+    const grant: TaskGrant = { grantId: "GRANT-PROPOSAL", taskId: task.taskId, targetFingerprint: task.target.hostFingerprint, kind: "CATEGORY", status: "ACTIVE", binding: { category: "linux_intrusion_triage" }, createdAt: new Date().toISOString() };
+    store.putTaskGrant(grant);
+    const now = new Date().toISOString();
+    const batch = store.commitFactBatch({
+      taskId: task.taskId, epochId: epoch.epochId, sourceRunId: "RUN-PROPOSAL", source: { kind: "SYSTEM" }, targetFingerprint: task.target.hostFingerprint,
+      requestId: "RUN-PROPOSAL", collector: { name: "enumerate", version: "2.1.0" },
+      observations: [{ namespace: "process", identity: { bootId: "boot", pid: 77, startTicks: "100", exeInode: "200", exeSha256: "a".repeat(64) }, fields: { bootId: "boot", pid: 77, startTicks: "100", exeInode: "200", exeSha256: "a".repeat(64) }, observedAt: now, consistency: "OBJECT_STABLE" }],
+      edges: [], gaps: [], wireDigest: "b".repeat(64),
+    });
+    store.createInvestigationSession({
+      sessionId: "ISESS-PROPOSAL", taskId: task.taskId, epochId: epoch.epochId, engineVersion: "1.0.0", playbookRegistryDigest: "c".repeat(64), ruleRegistryDigest: "d".repeat(64),
+      authorizationVersion: "AUTH-PROPOSAL", executionStatus: "RUNNING", investigationStatus: "OPEN", revision: 0, createdAt: now, updatedAt: now,
+    });
+    for (const [kind, limit] of [["LOCAL_QUERY_CALLS", 10], ["LOCAL_QUERY_ROWS", 100], ["LOCAL_QUERY_WALL_MS", 10_000]] as const) store.initializeUsageCounter(task.taskId, epoch.epochId, kind, limit);
+    const capabilities = gateCapabilities(helper, [grant]);
+    const tools = createV2SecurityTools({ task, epoch, config: testConfig(directory), store, executor: new FakeProtocolV2Executor(helper, async () => { throw new Error("本测试动作应为本地查询"); }), evidence: new EvidenceStore(directory, store), capabilities, approvals: new ApprovalService(store), budgetOwner: "MODEL" });
+    const hypothesisTool = tools.find((item) => item.name === "propose_hypothesis")!;
+    const hypothesisResult = await hypothesisTool.execute("CALL-HYP", {
+      subjectRef: batch.facts[0]!.subjectRef, claim: "该进程的外连需要排除正常运维解释", supportRefs: [batch.facts[0]!.factId], counterEvidenceRefs: [], alternativeExplanations: ["合法运维程序"],
+    } as never);
+    const hypothesis = hypothesisResult.details as { hypothesisId: string; obligationId: string };
+    const proposalTool = tools.find((item) => item.name === "propose_actions")!;
+    const proposal = await proposalTool.execute("CALL-ACTIONS", {
+      hypothesisId: hypothesis.hypothesisId,
+      obligationId: hypothesis.obligationId,
+      actions: [{ clientRef: "counter", operationRef: "query_facts", subjectRefs: [batch.facts[0]!.subjectRef], args: { view: "facts", namespace: "process", subjectRef: batch.facts[0]!.subjectRef, limit: 10 }, dependsOnClientRefs: [] }],
+    } as never);
+    expect(proposal.details).toMatchObject({ scheduler: { executed: 1, succeeded: 1, failed: 0 } });
+    expect(store.listInvestigationActions(task.taskId, epoch.epochId)).toEqual([expect.objectContaining({ requestedBy: "MODEL", status: "SUCCEEDED" })]);
+    expect(store.listInvestigationObligations(task.taskId, epoch.epochId)).toEqual(expect.arrayContaining([expect.objectContaining({ obligationId: hypothesis.obligationId, status: "SATISFIED", resultRefs: [expect.stringMatching(/^QUERY-/)] })]));
+    await expect(proposalTool.execute("CALL-BAD-ACTIONS", {
+      hypothesisId: hypothesis.hypothesisId, obligationId: hypothesis.obligationId,
+      actions: [{ clientRef: "bad", operationRef: "query_facts", subjectRefs: [batch.facts[0]!.subjectRef], args: { view: "facts", limit: 0 }, dependsOnClientRefs: [] }],
+    } as never)).rejects.toThrow(/不符合工具 Schema/);
   });
 
   it("INV-07：read 拒绝 DENIED_TEXT、无授权的 SENSITIVE_TEXT 与非 file 引用，且拒绝时不触达目标", async () => {
@@ -99,7 +159,7 @@ describe("Tool Protocol v2 invariants", () => {
     const { store, task, epoch } = await v2Store();
     task.checks = ["webshell"]; store.saveTask(task);
     const helper: HelperCapabilitiesV2 = {
-      protocolVersion: 2, manifestVersion: "2.1.0", helper: { name: "helper", version: "2.1.0" },
+      protocolVersion: 2, manifestVersion: "3.0.0", helper: { name: "helper", version: "3.0.0" },
       namespaces: {
         file: { fields: ["mountId", "device", "inode", "path", "kind", "size", "contentClass", "content"], relations: [], verbs: ["enumerate", "read", "match"] },
         process: { fields: ["bootId", "pid", "startTicks", "exeInode", "exeSha256"], relations: [], verbs: ["enumerate"] },
@@ -177,7 +237,7 @@ describe("Tool Protocol v2 invariants", () => {
 
   it("Manifest 是静态安全上限，Helper 的未知能力只记录异常且 task_ioc 不进入远程能力", () => {
     const capabilities: HelperCapabilitiesV2 = {
-      protocolVersion: 2, manifestVersion: "2.1.0", helper: { name: "helper", version: "2.1.0" },
+      protocolVersion: 2, manifestVersion: "3.0.0", helper: { name: "helper", version: "3.0.0" },
       namespaces: { process: { fields: ["pid", "doesNotExist"], relations: ["children", "invented"] }, task_ioc: { fields: ["kind"], relations: [] } },
       matchers: ["literal"], probes: [], verbs: ["enumerate"],
       limits: { maxObjects: 99999, maxOutputBytes: 99999999, maxReadBytes: 99999999, maxCollectBytes: 999999999 },
@@ -202,7 +262,7 @@ describe("Tool Protocol v2 invariants", () => {
 
   it("FactBatch 原子提交引用、双平面投影和 ToolRun 终态，失败批次不泄漏半批事实", async () => {
     const { store, task, epoch } = await v2Store();
-    store.startToolRun({ toolCallId: "CALL-1", taskId: task.taskId, toolName: "enumerate", risk: "READ", replayPolicy: "SAFE_REOBSERVE", args: {} });
+    store.startToolRun({ toolCallId: "CALL-1", taskId: task.taskId, epochId: epoch.epochId, toolName: "enumerate", risk: "READ", replayPolicy: "SAFE_REOBSERVE", args: {} });
     const batch = store.commitFactBatch({
       taskId: task.taskId, epochId: epoch.epochId, sourceRunId: "CALL-1", source: { kind: "MODEL" },
       targetFingerprint: task.target.hostFingerprint, requestId: "CALL-1", collector: { name: "enumerate", version: "2.0.0" },
@@ -223,7 +283,7 @@ describe("Tool Protocol v2 invariants", () => {
     expect(batch.facts[0]!.redactedFields).toContain("passwordHash");
     expect(store.getToolRun("CALL-1")).toMatchObject({ status: "SUCCEEDED", result: { factRefs: [batch.facts[0]!.factId] } });
 
-    store.startToolRun({ toolCallId: "CALL-2", taskId: task.taskId, toolName: "enumerate", risk: "READ", replayPolicy: "SAFE_REOBSERVE", args: {} });
+    store.startToolRun({ toolCallId: "CALL-2", taskId: task.taskId, epochId: epoch.epochId, toolName: "enumerate", risk: "READ", replayPolicy: "SAFE_REOBSERVE", args: {} });
     expect(() => store.commitFactBatch({
       taskId: task.taskId, epochId: epoch.epochId, sourceRunId: "CALL-2", source: { kind: "MODEL" }, targetFingerprint: task.target.hostFingerprint,
       requestId: "CALL-2", collector: { name: "enumerate", version: "2.0.0" }, observations: [{ namespace: "account", identity: { uid: 1, username: "bad" }, fields: { uid: 1, username: "bad", invented: "x" }, observedAt: new Date().toISOString(), consistency: "OBJECT_STABLE" }],
@@ -231,6 +291,14 @@ describe("Tool Protocol v2 invariants", () => {
     })).toThrow(/Manifest 外字段/);
     expect(store.listFacts(task.taskId, epoch.epochId)).toHaveLength(1);
     expect(store.getToolRun("CALL-2")?.status).toBe("STARTED");
+
+    store.startToolRun({ toolCallId: "CALL-STALE-EPOCH", taskId: task.taskId, epochId: "EPOCH-STALE", toolName: "enumerate", risk: "READ", replayPolicy: "SAFE_REOBSERVE", args: {} });
+    expect(() => store.commitFactBatch({
+      taskId: task.taskId, epochId: epoch.epochId, sourceRunId: "CALL-STALE-EPOCH", source: { kind: "MODEL" }, targetFingerprint: task.target.hostFingerprint,
+      requestId: "CALL-STALE-EPOCH", collector: { name: "enumerate", version: "3.0.0" }, observations: [], edges: [], gaps: [], wireDigest: "c".repeat(64),
+      toolRun: { toolCallId: "CALL-STALE-EPOCH", status: "SUCCEEDED" },
+    })).toThrow(/任务与 Epoch/);
+    expect(store.getToolRun("CALL-STALE-EPOCH")?.status).toBe("STARTED");
   });
 
   it("受控 read 文本进入 Model Fact，但不会因 Manifest DENY 被静默丢弃", async () => {
@@ -290,7 +358,7 @@ describe("Tool Protocol v2 invariants", () => {
     }
     const grant: TaskGrant = { grantId: "GRANT-QUERY-SIZE", taskId: task.taskId, targetFingerprint: task.target.hostFingerprint, kind: "CATEGORY", status: "ACTIVE", binding: { category: "backdoor_account" }, createdAt: new Date().toISOString() };
     store.putTaskGrant(grant);
-    const helper: HelperCapabilitiesV2 = { protocolVersion: 2, manifestVersion: "2.1.0", helper: { name: "helper", version: "2.1.0" }, namespaces: { account: { fields: ["uid", "username", "home"], relations: [], verbs: ["enumerate"] } }, matchers: [], probes: [], verbs: ["enumerate"], limits: { maxObjects: 10, maxOutputBytes: 4096, maxReadBytes: 1024, maxCollectBytes: 1024 } };
+    const helper: HelperCapabilitiesV2 = { protocolVersion: 2, manifestVersion: "3.0.0", helper: { name: "helper", version: "3.0.0" }, namespaces: { account: { fields: ["uid", "username", "home"], relations: [], verbs: ["enumerate"] } }, matchers: [], probes: [], verbs: ["enumerate"], limits: { maxObjects: 10, maxOutputBytes: 4096, maxReadBytes: 1024, maxCollectBytes: 1024 } };
     const config = testConfig("/tmp/query-size");
     config.llmData.maxTextBytes = 1024;
     const tools = createV2SecurityTools({ task, epoch, config, store, executor: new FakeProtocolV2Executor(helper, async () => { throw new Error("本测试不应远程调用 helper"); }), evidence: new EvidenceStore("/tmp/query-size", store), capabilities: gateCapabilities(helper, [grant]), approvals: new ApprovalService(store), budgetOwner: "MODEL" });
@@ -347,6 +415,17 @@ describe("Tool Protocol v2 invariants", () => {
     store.reserveBudget("BRES-1", task.taskId, epoch.epochId, "MODEL", { remoteCalls: 1, nodes: 5, bytes: 500, wallTimeMs: 500, probeCalls: 0 });
     expect(() => store.reserveBudget("BRES-2", task.taskId, epoch.epochId, "MODEL", { remoteCalls: 1, nodes: 1, bytes: 1, wallTimeMs: 1, probeCalls: 0 })).toThrow(/预算不足/);
     expect(() => store.settleBudget("BRES-1", { remoteCalls: 1, nodes: 6, bytes: 500, wallTimeMs: 500, probeCalls: 0 })).toThrow(/超过预留/);
+    expect(store.getBudgetAccount(task.taskId, epoch.epochId, "MODEL")).toMatchObject({
+      used: { remoteCalls: 0, nodes: 0, bytes: 0, wallTimeMs: 0, probeCalls: 0 },
+      reserved: { remoteCalls: 1, nodes: 5, bytes: 500, wallTimeMs: 500, probeCalls: 0 },
+      remaining: { remoteCalls: 0, nodes: 5, bytes: 500, wallTimeMs: 500, probeCalls: 0 },
+    });
+    store.settleBudget("BRES-1", { remoteCalls: 1, nodes: 4, bytes: 400, wallTimeMs: 250, probeCalls: 0 });
+    expect(store.getBudgetAccount(task.taskId, epoch.epochId, "MODEL")).toMatchObject({
+      used: { remoteCalls: 1, nodes: 4, bytes: 400, wallTimeMs: 250, probeCalls: 0 },
+      reserved: { remoteCalls: 0, nodes: 0, bytes: 0, wallTimeMs: 0, probeCalls: 0 },
+      remaining: { remoteCalls: 0, nodes: 6, bytes: 600, wallTimeMs: 750, probeCalls: 0 },
+    });
   });
 
   it("本地查询、内容和 Grant Request 使用独立持久预算，Pending Request 可过期", async () => {
@@ -394,7 +473,7 @@ describe("Tool Protocol v2 invariants", () => {
       batchFileInfo: async () => { throw new Error("不应调用文件情报"); },
     };
     const config = testConfig(directory); config.threatIntel.enabled = true;
-    const helper: HelperCapabilitiesV2 = { protocolVersion: 2, manifestVersion: "2.1.0", helper: { name: "helper", version: "2.1.0" }, namespaces: { process: { fields: ["pid"], relations: [], verbs: ["enumerate"] } }, matchers: [], probes: [], verbs: ["enumerate"], limits: { maxObjects: 1, maxOutputBytes: 1024, maxReadBytes: 1024, maxCollectBytes: 1024 } };
+    const helper: HelperCapabilitiesV2 = { protocolVersion: 2, manifestVersion: "3.0.0", helper: { name: "helper", version: "3.0.0" }, namespaces: { process: { fields: ["pid"], relations: [], verbs: ["enumerate"] } }, matchers: [], probes: [], verbs: ["enumerate"], limits: { maxObjects: 1, maxOutputBytes: 1024, maxReadBytes: 1024, maxCollectBytes: 1024 } };
     const grants = store.listTaskGrants(task.taskId);
     const tools = createV2SecurityTools({ task, epoch, config, store, executor: new FakeProtocolV2Executor(helper, async () => { throw new Error("不应远程调用 helper"); }), evidence: new EvidenceStore(directory, store), capabilities: gateCapabilities(helper, grants), approvals: new ApprovalService(store), threatIntel, budgetOwner: "MODEL" });
     const tool = tools.find((candidate) => candidate.name === "enrich_threat_intel");
@@ -413,10 +492,94 @@ describe("Tool Protocol v2 invariants", () => {
     const batch = store.commitFactBatch({ taskId: task.taskId, epochId: epoch.epochId, sourceRunId: "EXT-1", source: { kind: "EXTERNAL", externalProvider: "dbapp-ti" }, targetFingerprint: task.target.hostFingerprint, requestId: "EXT-1", collector: { name: "dbapp-ti", version: "1" }, observations: [{ namespace: "socket", identity: { protocol: "tcp", localAddress: "127.0.0.1", localPort: 1, remoteAddress: "8.8.8.8", remotePort: 443, inode: "1" }, fields: { protocol: "tcp", localAddress: "127.0.0.1", localPort: 1, remoteAddress: "8.8.8.8", remotePort: 443, inode: "1" }, observedAt: new Date().toISOString(), consistency: "EXTERNAL_BASELINE" }], edges: [], gaps: [], wireDigest: "c".repeat(64) });
     store.putEvidence({ evidenceId: "EV-00000000-0000-4000-8000-000000000001", taskId: task.taskId, host: task.target.host, type: "metadata", source: "external", tool: "intel", collectedAt: new Date().toISOString(), metadata: { complete: true } });
     const assessment: Assessment = { assessmentId: "ASM-00000000-0000-4000-8000-000000000001", taskId: task.taskId, epochId: epoch.epochId, authorType: "MODEL", category: "linux_intrusion_triage", subjectRef: batch.facts[0]!.subjectRef, scope: "SUBJECT", verdict: "CONFIRMED_MALICIOUS", severity: "CRITICAL", confidence: 0.9, rationale: "仅依据外部情报", evidenceRefs: ["EV-00000000-0000-4000-8000-000000000001"], factRefs: [batch.facts[0]!.factId], queryRefs: [], createdAt: new Date().toISOString() };
-    expect(() => store.putAssessment(assessment)).toThrow(/主机信号/);
+    expect(() => store.putAssessment(assessment)).toThrow(/完整 Evidence|主机信号/);
   });
 
-  it("INV-15：规则只消费精确匹配的当前 PresetRun Fact", async () => {
+  it("CONFIRMED_MALICIOUS 只接受当前 Epoch 且绑定被裁定对象的显式完整 Evidence", async () => {
+    const { store, task, epoch } = await v2Store();
+    const observedAt = new Date().toISOString();
+    const commit = (runId: string, collector: string, inode: string, path: string) => store.commitFactBatch({
+      taskId: task.taskId,
+      epochId: epoch.epochId,
+      sourceRunId: runId,
+      source: { kind: "MODEL" },
+      targetFingerprint: task.target.hostFingerprint,
+      requestId: runId,
+      collector: { name: collector, version: "2.1.0" },
+      observations: [{
+        namespace: "file",
+        identity: { mountId: "1", device: "1", inode },
+        fields: { mountId: "1", device: "1", inode, path, kind: "file", size: 10, contentClass: "SYSTEM_TEXT" },
+        observedAt,
+        consistency: "OBJECT_STABLE",
+      }],
+      edges: [],
+      gaps: [],
+      wireDigest: runId.padEnd(64, "0").slice(0, 64),
+    }).facts[0]!;
+    const first = commit("HOST-FACT-1", "enumerate", "10", "/tmp/suspect");
+    const second = commit("HOST-FACT-2", "match", "10", "/tmp/suspect");
+    const unrelated = commit("HOST-FACT-3", "enumerate", "11", "/tmp/unrelated");
+    const incompleteEvidenceId = "EV-00000000-0000-4000-8000-000000000010";
+    const unrelatedEvidenceId = "EV-00000000-0000-4000-8000-000000000011";
+    const boundEvidenceId = "EV-00000000-0000-4000-8000-000000000012";
+    const evidenceBase = { taskId: task.taskId, host: task.target.host, type: "metadata" as const, source: "host", tool: "collect", collectedAt: observedAt };
+    store.putEvidence({ ...evidenceBase, evidenceId: incompleteEvidenceId, metadata: { epochId: epoch.epochId, subjectRef: first.subjectRef } });
+    const completeMetadata = { complete: true, epochId: epoch.epochId, range: { start: 0, length: 10, complete: true }, artifactSize: 10, artifactDigest: "a".repeat(64), integrityStatus: "VERIFIED" };
+    store.putEvidence({ ...evidenceBase, evidenceId: unrelatedEvidenceId, sha256: "a".repeat(64), metadata: { ...completeMetadata, subjectRef: unrelated.subjectRef } });
+    store.putEvidence({ ...evidenceBase, evidenceId: boundEvidenceId, sha256: "a".repeat(64), metadata: { ...completeMetadata, subjectRef: first.subjectRef } });
+    const assessment = (assessmentId: string, evidenceId: string): Assessment => ({
+      assessmentId,
+      taskId: task.taskId,
+      epochId: epoch.epochId,
+      authorType: "MODEL",
+      category: "webshell",
+      subjectRef: first.subjectRef,
+      scope: "SUBJECT",
+      verdict: "CONFIRMED_MALICIOUS",
+      severity: "CRITICAL",
+      confidence: 0.95,
+      rationale: "两个主机采集器事实与完整证据共同确认",
+      evidenceRefs: [evidenceId],
+      factRefs: [first.factId, second.factId],
+      queryRefs: [],
+      createdAt: observedAt,
+    });
+    expect(() => store.putAssessment(assessment("ASM-00000000-0000-4000-8000-000000000010", incompleteEvidenceId))).toThrow(/完整 Evidence/);
+    expect(() => store.putAssessment(assessment("ASM-00000000-0000-4000-8000-000000000011", unrelatedEvidenceId))).toThrow(/完整 Evidence/);
+    expect(() => store.putAssessment(assessment("ASM-00000000-0000-4000-8000-000000000012", boundEvidenceId))).not.toThrow();
+    expect(store.listAssessments(task.taskId, epoch.epochId)).toEqual(expect.arrayContaining([expect.objectContaining({ assessmentId: "ASM-00000000-0000-4000-8000-000000000012" })]));
+  });
+
+  it("JVM retransformation 证据仅能通过精确 loads_class 谱系支撑对应 Class", async () => {
+    const { store, task, epoch } = await v2Store();
+    const observedAt = new Date().toISOString();
+    const jvmIdentity = { bootId: "boot-jvm", pid: 4242, startTicks: "100" };
+    const classIdentity = { jvmDigest: "jvm-digest", className: "demo.SuspiciousFilter", loaderId: "loader-1" };
+    const batch = store.commitFactBatch({
+      taskId: task.taskId, epochId: epoch.epochId, sourceRunId: "PROBE-DUMP-1",
+      source: { kind: "MODEL", evidenceOrigin: "TARGET_OBSERVATION" }, targetFingerprint: task.target.hostFingerprint,
+      requestId: "PROBE-DUMP-1", collector: { name: "probe", version: "3.0.0" },
+      observations: [
+        { namespace: "jvm", identity: jvmIdentity, fields: jvmIdentity, observedAt, consistency: "POINT_IN_TIME" },
+        { namespace: "class", identity: classIdentity, fields: { ...classIdentity, bytecodeSha256: "a".repeat(64), modifiable: true }, observedAt, consistency: "POINT_IN_TIME" },
+      ],
+      edges: [{ relation: "loads_class", fromIdentity: { namespace: "jvm", identity: jvmIdentity }, toIdentity: { namespace: "class", identity: classIdentity }, observedAt }],
+      gaps: [], wireDigest: "d".repeat(64),
+    });
+    const jvm = batch.facts.find((fact) => fact.namespace === "jvm")!;
+    const loadedClass = batch.facts.find((fact) => fact.namespace === "class")!;
+    const evidenceId = "EV-00000000-0000-4000-8000-000000000020";
+    store.putEvidence({ evidenceId, taskId: task.taskId, host: task.target.host, type: "jvm_class_bytecode", source: "probe", tool: "probe", sha256: "a".repeat(64), collectedAt: observedAt, metadata: { complete: true, epochId: epoch.epochId, subjectRef: jvm.subjectRef, className: classIdentity.className, classLoaderId: classIdentity.loaderId, captureMethod: "JVM_RETRANSFORM", range: { start: 0, length: 10, complete: true }, artifactSize: 10, artifactDigest: "a".repeat(64), integrityStatus: "VERIFIED" } });
+    const assessment: Assessment = { assessmentId: "ASM-00000000-0000-4000-8000-000000000020", taskId: task.taskId, epochId: epoch.epochId, authorType: "MODEL", category: "java_memory_shell", subjectRef: loadedClass.subjectRef, scope: "SUBJECT", verdict: "CONFIRMED_MALICIOUS", severity: "CRITICAL", confidence: 0.95, rationale: "精确 ClassLoader 的运行态字节码证据", evidenceRefs: [evidenceId], factRefs: [jvm.factId, loadedClass.factId], queryRefs: [], createdAt: observedAt };
+    expect(() => store.putAssessment(assessment)).not.toThrow();
+
+    const otherIdentity = { ...classIdentity, loaderId: "loader-2" };
+    const other = store.commitFactBatch({ taskId: task.taskId, epochId: epoch.epochId, sourceRunId: "PROBE-DUMP-2", source: { kind: "MODEL", evidenceOrigin: "TARGET_OBSERVATION" }, targetFingerprint: task.target.hostFingerprint, requestId: "PROBE-DUMP-2", collector: { name: "probe", version: "3.0.0" }, observations: [{ namespace: "class", identity: otherIdentity, fields: otherIdentity, observedAt, consistency: "POINT_IN_TIME" }], edges: [], gaps: [], wireDigest: "e".repeat(64) }).facts[0]!;
+    expect(() => store.putAssessment({ ...assessment, assessmentId: "ASM-00000000-0000-4000-8000-000000000021", subjectRef: other.subjectRef, factRefs: [jvm.factId, other.factId] })).toThrow(/实测关系验证/);
+  });
+
+  it("INV-15：规则按目标观察来源增量消费，不信任控制面或模型文本", async () => {
     const { store, task, epoch } = await v2Store();
     task.checks = ["backdoor_account"]; store.saveTask(task);
     const put = (runId: string, username: string, uid: number) => store.commitFactBatch({
@@ -432,6 +595,20 @@ describe("Tool Protocol v2 invariants", () => {
     const assessments = new DeterministicRuleEngineV2(store).evaluate(task.taskId, epoch.epochId, "PRESET-RUN-1");
     expect(assessments).toHaveLength(1);
     expect(assessments[0]?.factRefs).toEqual([current.factId]);
+
+    const observed = (runId: string, username: string, evidenceOrigin: "TARGET_OBSERVATION" | "CONTROL_PLANE_INPUT") => store.commitFactBatch({
+      taskId: task.taskId, epochId: epoch.epochId, sourceRunId: runId,
+      source: { kind: "MODEL", evidenceOrigin }, targetFingerprint: task.target.hostFingerprint,
+      requestId: runId, collector: { name: "enumerate", version: "2.1.0" },
+      observations: [{ namespace: "account", identity: { uid: 0, username }, fields: { uid: 0, username, gid: 0, home: `/home/${username}`, shell: "/bin/bash", locked: false }, observedAt: new Date().toISOString(), consistency: "OBJECT_STABLE" }],
+      edges: [], gaps: [], wireDigest: runId.padEnd(64, "0").slice(0, 64),
+    }).facts[0]!;
+    const remoteModelRequested = observed("MODEL-REMOTE", "remote-admin", "TARGET_OBSERVATION");
+    const controlPlane = observed("MODEL-TEXT", "fabricated-admin", "CONTROL_PLANE_INPUT");
+    const incremental = new DeterministicRuleEngineV2(store).evaluateFactRefs(task.taskId, epoch.epochId, [remoteModelRequested.factId, controlPlane.factId]);
+    expect(incremental).toHaveLength(1);
+    expect(incremental[0]?.factRefs).toEqual([remoteModelRequested.factId]);
+    expect(new DeterministicRuleEngineV2(store).evaluateFactRefs(task.taskId, epoch.epochId, [remoteModelRequested.factId])).toHaveLength(0);
   });
 
   it("INV-25：稳定身份强化只追加 Fact，不生成新 ObjectRef", async () => {

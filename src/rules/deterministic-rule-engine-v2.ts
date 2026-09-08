@@ -35,10 +35,10 @@ export const DETERMINISTIC_RULES_V2: readonly V2Rule[] = [
     rationale: () => "持久化命令包含下载后直接交给解释器执行的组合；需读取来源并固化完整 Evidence。",
   },
   {
-    ruleId: "HW2-WEB-EXECUTABLE-001", version: "2.0.0", category: "webshell", namespace: "file",
-    verdict: "SUSPICIOUS", severity: "MEDIUM", confidence: 0.62,
-    matches: (payload) => typeof payload.path === "string" && /\.(?:php\d*|phtml|jsp|jspx|asp|aspx)$/i.test(payload.path),
-    rationale: (payload) => `Web 范围内发现可执行脚本候选：${String(payload.path)}；文件类型本身不是恶意结论，需 match/read/日志关联。`,
+    ruleId: "HW2-WEB-YARA-001", version: "2.3.0", category: "webshell", namespace: "file",
+    verdict: "HIGHLY_SUSPICIOUS", severity: "HIGH", confidence: 0.86,
+    matches: (payload) => typeof payload.content === "string" && payload.content.startsWith("YARA_MATCH:"),
+    rationale: (payload) => `Web 文件 ${String(payload.path)} 命中内置版本化 YARA 组合规则；需结合请求、工作进程、基线与 Evidence 裁定。`,
   },
   {
     ruleId: "HW2-ACCOUNT-PRIVILEGED-001", version: "2.1.0", category: "backdoor_account", namespace: "account",
@@ -90,9 +90,7 @@ export const DETERMINISTIC_RULES_V2: readonly V2Rule[] = [
   },
 ];
 
-/**
- * 规则入口强制使用当前 PresetRun Fact；调用方无法传入任意 Fact Query（INV-15）。
- */
+/** 规则只消费经过 Helper 协议校验的目标观察；请求方不决定证据可信等级。 */
 export class DeterministicRuleEngineV2 {
   constructor(private readonly store: RuntimeStore, private readonly registry: readonly V2Rule[] = DETERMINISTIC_RULES_V2) {}
 
@@ -101,15 +99,32 @@ export class DeterministicRuleEngineV2 {
     if (!task || task.activeEpochId !== epochId) return [];
     const facts = this.store.listFacts(taskId, epochId, { sourceKind: "PRESET" })
       .filter((fact) => fact.source.presetRunId === presetRunPrefix);
+    return this.evaluateFacts(taskId, epochId, facts);
+  }
+
+  evaluateFactRefs(taskId: string, epochId: string, factRefs: readonly string[]): Assessment[] {
+    const wanted = new Set(factRefs);
+    const facts = this.store.listFacts(taskId, epochId)
+      .filter((fact) => wanted.has(fact.factId))
+      .filter((fact) => fact.source.evidenceOrigin === "TARGET_OBSERVATION" || (fact.source.evidenceOrigin === undefined && fact.source.kind === "PRESET"));
+    return this.evaluateFacts(taskId, epochId, facts);
+  }
+
+  private evaluateFacts(taskId: string, epochId: string, facts: FactRecord[]): Assessment[] {
+    const task = this.store.getTask(taskId);
+    if (!task || task.activeEpochId !== epochId) return [];
+    const existing = this.store.listAssessments(taskId, epochId).filter((item) => item.authorType === "RULE");
     const created: Assessment[] = [];
     for (const rule of this.registry) {
       if (!task.checks.includes(rule.category)) continue;
       for (const fact of facts.filter((item) => item.namespace === rule.namespace && rule.matches(item.privatePayload))) {
+        const ruleRef = `${rule.ruleId}@${rule.version}:`;
+        if (existing.some((item) => item.factRefs.includes(fact.factId) && item.rationale.startsWith(ruleRef))) continue;
         const assessment: Assessment = {
           assessmentId: `ASM-${randomUUID()}`, taskId, epochId, authorType: "RULE", category: rule.category,
           subjectRef: fact.subjectRef, scope: "SUBJECT", verdict: rule.verdict, severity: rule.severity,
           confidence: fact.completeness === "PARTIAL" ? Math.min(rule.confidence, 0.65) : rule.confidence,
-          rationale: `${rule.ruleId}@${rule.version}: ${rule.rationale(fact.modelPayload)}${fact.completeness === "PARTIAL" ? " 输入为 PARTIAL，未覆盖范围必须继续调查。" : ""}`,
+          rationale: `${ruleRef} ${rule.rationale(fact.modelPayload)}${fact.completeness === "PARTIAL" ? " 输入为 PARTIAL，未覆盖范围必须继续调查。" : ""}`,
           evidenceRefs: [], factRefs: [fact.factId], queryRefs: [], createdAt: new Date().toISOString(),
         };
         this.store.putAssessment(assessment); created.push(assessment);

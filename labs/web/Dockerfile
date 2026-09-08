@@ -1,6 +1,7 @@
 FROM ubuntu:22.04
 ENV DEBIAN_FRONTEND=noninteractive
-RUN apt-get update && apt-get install -y --no-install-recommends openssh-server sudo python3 yara nginx ca-certificates && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends openssh-server sudo python3 yara nginx apache2 php-fpm ca-certificates && rm -rf /var/lib/apt/lists/*
+RUN sed -i 's/^Listen 80$/Listen 127.0.0.1:8089/' /etc/apache2/ports.conf
 RUN useradd -m -s /bin/bash secagent && mkdir -p /run/sshd /home/secagent/.ssh /usr/local/libexec /opt/huntwarden/rules /var/lib/huntwarden/actions && chmod 700 /home/secagent/.ssh /var/lib/huntwarden/actions
 COPY labs/common/lab_authorized_key.pub /home/secagent/.ssh/authorized_keys
 COPY host-helper/huntwarden_helper.py /usr/local/libexec/huntwarden-helper
@@ -9,6 +10,8 @@ COPY labs/web/fixtures/ /var/www/html/
 COPY labs/web/fixtures/lab-webshell.php /tmp/lab-upload.php
 COPY labs/web/alternate-app/ /srv/alternate-app/
 COPY labs/web/huntwarden-lab.conf /etc/nginx/conf.d/huntwarden-lab.conf
+COPY labs/web/huntwarden-apache.conf /etc/apache2/conf-enabled/huntwarden-apache.conf
+COPY labs/web/apache-app/ /srv/apache-app/
 COPY labs/web/entrypoint.sh /usr/local/bin/huntwarden-lab-web-entrypoint
 RUN chown -R secagent:secagent /home/secagent/.ssh && chmod 600 /home/secagent/.ssh/authorized_keys && chmod 755 /usr/local/libexec/huntwarden-helper /usr/local/bin/huntwarden-lab-web-entrypoint && chown root:root /usr/local/libexec/huntwarden-helper /usr/local/bin/huntwarden-lab-web-entrypoint && printf 'secagent ALL=(root) NOPASSWD: /usr/local/libexec/huntwarden-helper *\n' > /etc/sudoers.d/huntwarden && chmod 440 /etc/sudoers.d/huntwarden
 ENTRYPOINT ["/usr/local/bin/huntwarden-lab-web-entrypoint"]

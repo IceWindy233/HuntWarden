@@ -149,6 +149,11 @@ function registerIpc(): void {
     const taskId = text(taskIdValue, "Task ID", 64);
     void requireBackend().startTask(taskId).catch(() => undefined);
   });
+  handle(IPC.taskPause, (_event, taskId) => requireBackend().pauseTask(text(taskId, "Task ID", 64)));
+  handle(IPC.taskResume, (_event, taskIdValue) => {
+    const taskId = text(taskIdValue, "Task ID", 64);
+    void requireBackend().resumeTask(taskId).catch(() => undefined);
+  });
   handle(IPC.taskAbort, (_event, taskId) => requireBackend().abortTask(text(taskId, "Task ID", 64)));
   handle(IPC.taskArchive, (_event, taskId) => requireBackend().archiveTask(text(taskId, "Task ID", 64)));
   handle(IPC.taskRestore, (_event, taskId) => requireBackend().restoreTask(text(taskId, "Task ID", 64)));
@@ -285,7 +290,7 @@ async function repairStoredProfiles(configurationDir: string, currentUserData: s
     if (!/\.ya?ml$/i.test(name)) continue;
     const path = join(profilesDir, name);
     const config = parseConfig(await readFile(path, "utf8"), path);
-    const changed = repairProfilePaths(config, { appPath: app.getAppPath(), currentUserData, ...(labStateDir ? { labStateDir } : {}) });
+    const changed = repairProfilePaths(config, { currentUserData, ...(labStateDir ? { labStateDir } : {}) });
     if (!changed) continue;
     await writeFile(path, serializeConfig(config), { encoding: "utf8", mode: 0o600 });
     await chmod(path, 0o600);

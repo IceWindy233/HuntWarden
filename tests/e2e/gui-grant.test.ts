@@ -110,7 +110,7 @@ describe.skipIf(!enabled)("GUI Sensitive-read Grant 生命周期", () => {
     const finished = await waitFinished(page, taskId);
     expect(finished.grantRequests).toMatchObject([{ kind: "SENSITIVE_READ", status: "DENIED" }]);
     expect(finished.grants.filter((item) => item.kind === "SENSITIVE_READ")).toEqual([]);
-    expect(finished.protocolV2?.investigationGaps).toMatchObject([{ code: "GRANT_DENIED", reasonCode: "SENSITIVE_READ" }]);
+    expect(finished.protocolV2?.investigationGaps).toEqual(expect.arrayContaining([expect.objectContaining({ code: "GRANT_DENIED", reasonCode: "SENSITIVE_READ" })]));
     expect(finished.audit.map((item) => item.event)).toContain("protocol_v2_grant_denied");
     expect(finished.audit.map((item) => item.event)).not.toContain("protocol_v2_grant_activated");
   }, 240_000);

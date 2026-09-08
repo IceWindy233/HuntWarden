@@ -2,7 +2,7 @@ import type { PresetDefinition } from "./types.js";
 
 export const PRESET_REGISTRY: readonly PresetDefinition[] = [
   {
-    presetId: "webshell-baseline", version: "2.3.0", category: "webshell",
+    presetId: "webshell-baseline", version: "2.5.0", category: "webshell",
     requiredCapabilities: [{ namespace: "web_stack", verb: "enumerate" }, { namespace: "web_root", verb: "enumerate" }, { namespace: "file", verb: "enumerate" }, { namespace: "log_source", verb: "enumerate" }],
     steps: [
       { stepId: "web-stack", verb: "enumerate", params: { namespace: "web_stack", fields: ["kind", "instanceId", "pid", "configPaths"], limit: 100 }, required: true },
@@ -19,11 +19,12 @@ export const PRESET_REGISTRY: readonly PresetDefinition[] = [
       { stepId: "jvm-discovery", verb: "enumerate", params: { namespace: "jvm", fields: ["bootId", "pid", "startTicks", "command", "attachSupported", "container"], limit: 100 }, required: true },
       { stepId: "tomcat-inventory", verb: "probe", params: { probeKind: "jvm.tomcat.inventory", parameters: {} }, required: true },
       { stepId: "jvm-class-inspect", verb: "probe", params: { probeKind: "jvm.class.inspect", parameters: {} }, required: true },
+      { stepId: "jvm-class-bytecode", verb: "probe", params: { probeKind: "jvm.class.dump", parameters: {} }, required: true },
     ],
-    coverageCriteria: [{ criterion: "jvm-discovery", stepIds: ["jvm-discovery"] }, { criterion: "tomcat-inventory", stepIds: ["tomcat-inventory"] }, { criterion: "class-integrity", stepIds: ["jvm-class-inspect"] }],
+    coverageCriteria: [{ criterion: "jvm-discovery", stepIds: ["jvm-discovery"] }, { criterion: "tomcat-inventory", stepIds: ["tomcat-inventory"] }, { criterion: "class-integrity", stepIds: ["jvm-class-inspect", "jvm-class-bytecode"] }],
   },
   {
-    presetId: "account-baseline", version: "2.2.0", category: "backdoor_account",
+    presetId: "account-baseline", version: "2.3.0", category: "backdoor_account",
     requiredCapabilities: [{ namespace: "account", verb: "enumerate", fields: ["uid", "username", "gid", "shell", "home", "locked"] }, { namespace: "ssh_key", verb: "enumerate" }, { namespace: "delegation_rule", verb: "enumerate" }, { namespace: "ssh_trust_config", verb: "enumerate" }, { namespace: "auth_event", verb: "enumerate" }],
     steps: [
       { stepId: "account-db", verb: "enumerate", params: { namespace: "account", fields: ["uid", "username", "gid", "shell", "home", "groups", "locked"], limit: 500 }, required: true },
@@ -39,7 +40,7 @@ export const PRESET_REGISTRY: readonly PresetDefinition[] = [
     requiredCapabilities: [{ namespace: "cron_entry", verb: "enumerate" }, { namespace: "unit", verb: "enumerate" }, { namespace: "persistence", verb: "enumerate" }],
     steps: [
       { stepId: "cron-source", verb: "enumerate", params: { namespace: "cron_entry", fields: ["source", "line", "digest", "schedule", "user", "command"], limit: 500 }, required: true },
-      { stepId: "unit-source", verb: "enumerate", params: { namespace: "unit", fields: ["name", "fragmentDigest", "path", "enabled", "active", "execStart", "user"], limit: 500 }, required: true },
+      { stepId: "unit-source", verb: "enumerate", params: { namespace: "unit", fields: ["scope", "ownerUid", "name", "fragmentDigest", "path", "enabled", "active", "generated", "transient", "execStart", "user"], limit: 500 }, required: true },
       { stepId: "extended-source", verb: "enumerate", params: { namespace: "persistence", fields: ["kind", "sourceDigest", "source", "user", "command", "enabled"], limit: 500 }, required: true },
       { stepId: "ssh-persistence", verb: "enumerate", params: { namespace: "persistence", fields: ["kind", "sourceDigest", "source", "user", "command", "enabled"], predicate: { op: "eq", field: "kind", value: "ssh" }, limit: 500 }, required: true },
       { stepId: "shell-loader-persistence", verb: "enumerate", params: { namespace: "persistence", fields: ["kind", "sourceDigest", "source", "user", "command", "enabled"], predicate: { op: "in", field: "kind", value: ["shell", "extended"] }, limit: 500 }, required: true },
@@ -47,10 +48,10 @@ export const PRESET_REGISTRY: readonly PresetDefinition[] = [
     coverageCriteria: [{ criterion: "cron", stepIds: ["cron-source"] }, { criterion: "systemd", stepIds: ["unit-source"] }, { criterion: "ssh", stepIds: ["ssh-persistence"] }, { criterion: "shell-and-loader", stepIds: ["shell-loader-persistence"] }, { criterion: "extended", stepIds: ["extended-source"] }],
   },
   {
-    presetId: "linux-triage-baseline", version: "2.3.0", category: "linux_intrusion_triage",
+    presetId: "linux-triage-baseline", version: "2.5.0", category: "linux_intrusion_triage",
     requiredCapabilities: [{ namespace: "process", verb: "enumerate" }, { namespace: "socket", verb: "enumerate" }, { namespace: "file", verb: "enumerate" }, { namespace: "auth_event", verb: "enumerate" }, { namespace: "exec_event", verb: "enumerate" }, { namespace: "module", verb: "enumerate" }, { namespace: "package", verb: "enumerate" }, { namespace: "package", verb: "relate" }, { namespace: "file", verb: "verify" }],
     steps: [
-      { stepId: "process-snapshot", verb: "enumerate", params: { namespace: "process", fields: ["bootId", "pid", "startTicks", "ppid", "uid", "username", "comm", "exe", "exeInode", "exeSha256", "state", "startedAt"], limit: 500 }, required: true },
+      { stepId: "process-snapshot", verb: "enumerate", params: { namespace: "process", fields: ["bootId", "pid", "startTicks", "ppid", "uid", "username", "comm", "exe", "exeDeleted", "exeInode", "command", "launcherPath", "namespaces", "cgroups", "cgroupsTruncated", "state", "startedAt"], limit: 500 }, required: true },
       { stepId: "socket-snapshot", verb: "enumerate", params: { namespace: "socket", fields: ["protocol", "localAddress", "localPort", "remoteAddress", "remotePort", "state", "inode", "pid"], limit: 500 }, required: true },
       { stepId: "auth-events", verb: "enumerate", params: { namespace: "auth_event", fields: ["sourceId", "cursor", "timestamp", "eventType", "username", "sourceAddress", "program", "success"], limit: 500, sinceHours: 24 }, required: true },
       { stepId: "exec-events", verb: "enumerate", params: { namespace: "exec_event", fields: ["sourceId", "cursor", "timestamp", "pid", "uid", "executable", "arguments", "cwd"], limit: 500, sinceHours: 24 }, required: true },
@@ -66,5 +67,7 @@ export const PRESET_REGISTRY: readonly PresetDefinition[] = [
 
 export function selectedPresets(categories: readonly string[]): PresetDefinition[] {
   const selected = new Set(categories);
-  return PRESET_REGISTRY.filter((preset) => selected.has(preset.category));
+  const priority = new Map(["linux_intrusion_triage", "backdoor_account", "linux_persistence", "webshell", "java_memory_shell"].map((category, index) => [category, index]));
+  return PRESET_REGISTRY.filter((preset) => selected.has(preset.category))
+    .toSorted((left, right) => (priority.get(left.category) ?? Number.MAX_SAFE_INTEGER) - (priority.get(right.category) ?? Number.MAX_SAFE_INTEGER));
 }

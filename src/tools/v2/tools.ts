@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { AgentToolResult } from "@earendil-works/pi-agent-core";
 import { Type, type Static, type TSchema } from "typebox";
+import { Value } from "typebox/value";
 import { InvalidArgumentError, SecurityError, type SecurityErrorCode } from "../../common/errors.js";
 import { digestObject } from "../../common/json.js";
 import type { ActionReceipt, CheckCategory, SecurityToolDefinition } from "../../domain/types.js";
@@ -26,6 +27,11 @@ import type { V2ToolDependencies } from "./dependencies.js";
 import { isPublicThreatIntelIp } from "../../threat-intel/network-ioc.js";
 import { DBAPP_THREAT_INTEL_SOURCE, type ThreatIntelVerdict } from "../../threat-intel/types.js";
 import { BUILTIN_YARA_RULESETS } from "../../rulesets/registry.js";
+import type { InvestigationAction, InvestigationHypothesis, InvestigationObligation } from "../../investigation/types.js";
+import { InvestigationScheduler } from "../../investigation/scheduler.js";
+import { projectEffectiveAssessments } from "../../assessments/projection.js";
+import { DERIVED_RESOLVERS, DerivedObjectResolver } from "../../investigation/derived-object-resolver.js";
+import type { DerivedResolverRef } from "../../investigation/types.js";
 
 interface RemoteResultDetails {
   status: "success" | "partial";
@@ -52,13 +58,14 @@ const MATCH_CONTEXT_MAX_BYTES = 2560;
 
 export function createV2SecurityTools(deps: V2ToolDependencies, phase: "INVESTIGATE" | "REPORT" = "INVESTIGATE"): SecurityToolDefinition[] {
   if (deps.task.protocolVersion !== 2 || deps.task.activeEpochId !== deps.epoch.epochId) throw new SecurityError("RECOVERY_UNCERTAIN", "v2 工具必须绑定任务当前 epoch");
-  const local = [createQueryFactsTool(deps), createAssessmentProjectionTool(deps)];
+  const local = [createQueryFactsTool(deps), createQueryInvestigationTool(deps), createAssessmentProjectionTool(deps)];
   if (phase === "REPORT") return local;
   const availableNamespaces = Object.keys(deps.capabilities.namespaces) as NamespaceName[];
   if (availableNamespaces.length === 0) throw new SecurityError("UNSUPPORTED_ENVIRONMENT", "当前任务没有有效 v2 namespace 能力");
   const namespaceSchema = Type.Union(availableNamespaces.map((value) => Type.Literal(value)));
   const tools: SecurityToolDefinition[] = [
     ...local,
+    createDerivedObjectTool(deps),
     localTool(deps, "describe_capabilities", "描述有效能力", Type.Object({}, { additionalProperties: false }), async () => ({
       protocolVersion: 2, manifestVersion: PROTOCOL_MANIFEST.version,
       namespaces: Object.fromEntries(Object.entries(deps.capabilities.namespaces).map(([name, value]) => [name, { fields: [...value!.fields], relations: [...value!.relations], verbs: [...value!.verbs] }])),
@@ -180,13 +187,27 @@ export function createV2SecurityTools(deps: V2ToolDependencies, phase: "INVESTIG
       consumeUsageOrGap(deps, "EVIDENCE_BYTES", params.maxBytes);
       return { ...binding, maxBytes: params.maxBytes, purpose: params.purpose };
     }),
-    remoteTool(deps, "probe", "执行受限诊断探针", Type.Object({ ref: RefSchema, probeKind: Type.Union([Type.Literal("jvm.tomcat.inventory"), Type.Literal("jvm.class.inspect")]), parameters: Type.Record(Type.String(), Type.Unknown()) }, { additionalProperties: false }), "INTRUSIVE_READ", "SAFE_REOBSERVE", (params) => {
+    remoteTool(deps, "probe", "执行受限诊断探针", Type.Object({
+      ref: RefSchema,
+      probeKind: Type.Union([Type.Literal("jvm.tomcat.inventory"), Type.Literal("jvm.class.inspect"), Type.Literal("jvm.class.dump")]),
+      parameters: Type.Object({
+        className: Type.Optional(Type.String({ pattern: "^[A-Za-z_$][A-Za-z0-9_$.]{0,511}$" })),
+        classLoaderId: Type.Optional(Type.String({ minLength: 1, maxLength: 1024, pattern: "^[^\\u0000-\\u001f\\u007f]+$" })),
+      }, { additionalProperties: false }),
+    }, { additionalProperties: false }), "INTRUSIVE_READ", "SAFE_REOBSERVE", (params) => {
       if (!deps.capabilities.probes.has(params.probeKind)) throw new SecurityError("UNSUPPORTED_ENVIRONMENT", `目标不支持 probe ${params.probeKind}`);
       assertEffectiveVerb(deps, "jvm", "probe");
+      if (params.probeKind === "jvm.tomcat.inventory" && Object.keys(params.parameters).length > 0) {
+        throw new InvalidArgumentError("jvm.tomcat.inventory 不接受 parameters");
+      }
+      if ((params.probeKind === "jvm.class.inspect" || params.probeKind === "jvm.class.dump") && !params.parameters.className) {
+        throw new InvalidArgumentError(`${params.probeKind} 必须提供 className`);
+      }
       const granted = deps.store.listTaskGrants(deps.task.taskId).some((grant) => grant.kind === "PROBE" && grant.status === "ACTIVE" && grant.targetFingerprint === deps.task.target.hostFingerprint && grant.binding.probeKind === params.probeKind && (!grant.expiresAt || Date.parse(grant.expiresAt) > Date.now()));
       if (!granted) throw new SecurityError("PERMISSION_DENIED", `Probe ${params.probeKind} 未获得任务级授权`);
       return { ...resolveObject(deps, params.ref, "jvm"), probeKind: params.probeKind, parameters: params.parameters };
     }),
+    createProposeHypothesisTool(deps), createProposeActionsTool(deps),
     createRequestScopeTool(deps), createRequestSensitiveTool(deps), createRecordAssessmentTool(deps), createAdjudicateAssessmentTool(deps),
   ];
   if (deps.config.threatIntel.enabled) tools.push(createThreatIntelTool(deps));
@@ -195,6 +216,20 @@ export function createV2SecurityTools(deps: V2ToolDependencies, phase: "INVESTIG
     if (deps.config.remediation.allowedTools.includes("disable_account")) tools.push(createDisableAccountTool(deps));
   }
   return tools;
+}
+
+function createDerivedObjectTool(deps: V2ToolDependencies): SecurityToolDefinition {
+  return localTool(deps, "resolve_derived_objects", "通过白名单解析器派生已观察对象关系", Type.Object({
+    resolverRef: Type.Union((Object.keys(DERIVED_RESOLVERS) as DerivedResolverRef[]).map((value) => Type.Literal(value))),
+    sourceFactRef: Type.String({ pattern: "^FACT-[0-9a-f-]{36}$" }),
+  }, { additionalProperties: false }), async (params, toolCallId) => {
+    const session = deps.store.getInvestigationSession(deps.task.taskId, deps.epoch.epochId);
+    if (!session?.authorizationEnvelope || session.executionStatus !== "RUNNING") throw new InvalidArgumentError("当前调查会话不允许派生对象");
+    return new DerivedObjectResolver(deps.store).resolve({
+      requestId: toolCallId, taskId: deps.task.taskId, epochId: deps.epoch.epochId,
+      resolverRef: params.resolverRef as DerivedResolverRef, sourceFactRef: params.sourceFactRef,
+    }, session.authorizationEnvelope);
+  });
 }
 
 function createThreatIntelTool(deps: V2ToolDependencies): SecurityToolDefinition {
@@ -260,7 +295,7 @@ function createThreatIntelTool(deps: V2ToolDependencies): SecurityToolDefinition
       observedAt, consistency: "EXTERNAL_BASELINE" as const,
     })));
     const batch = deps.store.commitFactBatch({
-      taskId: deps.task.taskId, epochId: deps.epoch.epochId, sourceRunId: toolCallId, source: { kind: "EXTERNAL", externalProvider: "dbapp-ti" },
+      taskId: deps.task.taskId, epochId: deps.epoch.epochId, sourceRunId: toolCallId, source: { kind: "EXTERNAL", evidenceOrigin: "EXTERNAL_INTELLIGENCE", externalProvider: "dbapp-ti" },
       targetFingerprint: deps.task.target.hostFingerprint, requestId: toolCallId, collector: { name: "dbapp-ti", version: "2.0.0" },
       observations, edges: [], gaps: [], wireDigest: digestObject({ provider: "dbapp-ti", verdictDigests: results.map(({ verdict }) => digestObject(verdict)), warnings: warnings.map(digestObject) }),
     });
@@ -320,7 +355,7 @@ function writeTool<T extends TSchema>(
       if (deps.task.mode !== "REMEDIATE" || !deps.config.remediation.allowedTools.includes(name)) throw new SecurityError("PERMISSION_DENIED", "写工具未获模式或白名单授权");
       const ticket = deps.approvals.consume(deps.task, name, params);
       if (!ticket) throw new SecurityError("APPROVAL_REQUIRED", "缺少与 task、target、tool、args digest 完全绑定的一次性审批");
-      const started: ActionReceipt = { actionId: ticket.actionId, taskId: deps.task.taskId, tool: name, targetFingerprint: deps.task.target.hostFingerprint, status: "STARTED", startedAt: new Date().toISOString() };
+      const started: ActionReceipt = { actionId: ticket.actionId, taskId: deps.task.taskId, epochId: deps.epoch.epochId, tool: name, targetFingerprint: deps.task.target.hostFingerprint, status: "STARTED", startedAt: new Date().toISOString() };
       deps.store.putActionReceipt(started);
       try {
         const remote = await run(params, ticket, signal);
@@ -336,7 +371,7 @@ function writeTool<T extends TSchema>(
       } catch (error) {
         const uncertain = error instanceof SecurityError && ["RECOVERY_UNCERTAIN", "TOOL_TIMEOUT", "TARGET_UNAVAILABLE"].includes(error.code);
         deps.store.putActionReceipt({ ...started, status: uncertain ? "UNKNOWN" : "FAILED", result: { error: error instanceof Error ? error.message : String(error) }, finishedAt: new Date().toISOString() });
-        const toolRun = deps.store.getToolRunForTask(deps.task.taskId, toolCallId);
+        const toolRun = deps.store.getToolRunForScope(deps.task.taskId, deps.epoch.epochId, toolCallId);
         if (toolRun?.status === "STARTED") deps.store.finishToolRun(toolCallId, "FAILED", undefined, error instanceof Error ? error.message : String(error));
         throw error;
       }
@@ -367,15 +402,16 @@ function remoteTool<T extends TSchema>(deps: V2ToolDependencies, verb: ForensicV
     name: verb, label, description: `${label}；参数由控制端 Manifest、引用、Grant 与预算闸门校验后才会发送到当前任务绑定目标。`, parameters,
     risk, replayPolicy, timeoutMs: 120_000, auditEvent: `v2_${verb}`,
     execute: async (toolCallId, params, signal, onUpdate) => {
-      const existing = deps.store.getToolRunForTask(deps.task.taskId, toolCallId);
+      const existing = deps.store.getToolRunForScope(deps.task.taskId, deps.epoch.epochId, toolCallId);
       if (existing?.status === "SUCCEEDED" && existing.result) return existing.result as AgentToolResult<RemoteResultDetails>;
+      if (existing && existing.status !== "STARTED") throw new SecurityError("RECOVERY_UNCERTAIN", "ToolCall 已进入终态，拒绝再次执行远程取证");
       const built = build(params);
       const cursorBinding = built._cursorBinding as { requestDigest: string } | undefined;
       delete built._cursorBinding;
       const estimate = estimateRemoteCost(verb, built);
       const reservationId = `BRES-${randomUUID()}`;
       const request: WireRequest = { protocolVersion: 2, requestId: toolCallId, epochId: deps.epoch.epochId, deadlineMs: Math.min(115_000, estimate.wallTimeMs), reservation: { reservationId, estimate }, params: built };
-      deps.store.startToolRun({ toolCallId, taskId: deps.task.taskId, toolName: verb, risk, replayPolicy, args: digestObject(params) });
+      deps.store.startToolRun({ toolCallId, taskId: deps.task.taskId, epochId: deps.epoch.epochId, toolName: verb, risk, replayPolicy, args: params });
       onUpdate?.({ content: [{ type: "text", text: `${label}正在执行` }], details: {} as RemoteResultDetails });
       try {
         deps.store.reserveBudget(reservationId, deps.task.taskId, deps.epoch.epochId, deps.budgetOwner, estimate);
@@ -398,20 +434,58 @@ function remoteTool<T extends TSchema>(deps: V2ToolDependencies, verb: ForensicV
           const namespace = String(built.namespace) as NamespaceName;
           deps.store.putRemoteCursor({ cursorRef, taskId: deps.task.taskId, epochId: deps.epoch.epochId, namespace, requestDigest: cursorBinding?.requestDigest ?? digestObject(built), helperCursor: response.cursor });
         }
+        if (verb === "enumerate" && response.scan && cursorBinding) {
+          const namespace = String(built.namespace) as NamespaceName;
+          const previous = deps.store.listDiscoveryCheckpoints(deps.task.taskId, deps.epoch.epochId)
+            .find((item) => item.namespace === namespace && item.requestDigest === cursorBinding.requestDigest);
+          const now = new Date().toISOString();
+          const nonResumable = response.gaps.filter((gap) => !gap.resumable);
+          const continuing = Boolean((params as Record<string, unknown>).cursorRef);
+          const inheritedLimit = continuing && previous?.status === "LIMITED";
+          const limitations = [
+            ...(inheritedLimit ? [previous.remainingDescription ?? "前页存在未解决的采集限制"] : []),
+            ...nonResumable.map((gap) => `${gap.code}:${gap.detail ?? ""}`),
+          ];
+          const limited = inheritedLimit || nonResumable.length > 0 || (!response.cursor && !response.scan.complete);
+          if (!response.cursor && !response.scan.complete) limitations.push("扫描未完成且未返回续页游标");
+          const remainingDescription = limited
+            ? [...new Set(limitations)].join("；")
+            : response.cursor ? `扫描未结束；下一页 cursor ${cursorRef}` : undefined;
+          deps.store.putDiscoveryCheckpoint({
+            checkpointId: previous?.checkpointId ?? `DCP-${randomUUID()}`,
+            taskId: deps.task.taskId, epochId: deps.epoch.epochId, namespace, requestDigest: cursorBinding.requestDigest,
+            status: limited ? "LIMITED" : response.cursor ? "RUNNING" : "COMPLETE",
+            sourceGeneration: response.scan.sourceGeneration,
+            ...(cursorRef ? { cursorRef } : {}),
+            scannedCount: (params as Record<string, unknown>).cursorRef ? (previous?.scannedCount ?? 0) + response.scan.scannedCount : response.scan.scannedCount,
+            matchedCount: (params as Record<string, unknown>).cursorRef ? (previous?.matchedCount ?? 0) + response.scan.matchedCount : response.scan.matchedCount,
+            returnedCount: (params as Record<string, unknown>).cursorRef ? (previous?.returnedCount ?? 0) + response.scan.returnedCount : response.scan.returnedCount,
+            ...(remainingDescription ? { remainingDescription } : {}),
+            createdAt: previous?.createdAt ?? now, updatedAt: now,
+          });
+        }
         let evidenceRefs: string[] = [];
-        if (verb === "collect" && response.artifact) {
+        if ((verb === "collect" || verb === "probe") && response.artifact) {
+          if (verb === "collect") {
+            const reserved = Number((params as Record<string, unknown>).maxBytes ?? 0);
+            if (response.artifact.size > reserved) throw new SecurityError("EVIDENCE_COLLECTION", "Artifact 大小超过 collect 授权上限");
+            deps.store.refundUsage(deps.task.taskId, deps.epoch.epochId, "EVIDENCE_BYTES", reserved - response.artifact.size);
+          } else {
+            consumeUsageOrGap(deps, "EVIDENCE_BYTES", response.artifact.size);
+          }
           const sourceRef = String((params as Record<string, unknown>).ref);
           const latest = latestPrivateFact(deps, sourceRef);
           const evidence = await deps.evidence.putStream({
-            taskId: deps.task.taskId, host: deps.task.target.host, type: "collected_object", source: String(latest.path ?? latest.exe ?? sourceRef), tool: "collect", toolCallId,
-            metadata: { epochId: deps.epoch.epochId, subjectRef: sourceRef, complete: response.artifact.complete, remoteSha256: response.artifact.sha256, remoteSize: response.artifact.size },
+            taskId: deps.task.taskId, host: deps.task.target.host, type: verb === "probe" ? "jvm_class_bytecode" : "collected_object", source: verb === "probe" ? `${String((params as Record<string, unknown>).probeKind)}:${String(((params as Record<string, unknown>).parameters as Record<string, unknown> | undefined)?.className ?? sourceRef)}` : String(latest.path ?? latest.exe ?? sourceRef), tool: verb, toolCallId,
+            metadata: { epochId: deps.epoch.epochId, subjectRef: sourceRef, sourceKind: "TARGET_OBSERVATION", complete: response.artifact.complete, range: { start: 0, length: response.artifact.size, complete: response.artifact.complete }, sourceDigest: response.artifact.sha256, remoteSha256: response.artifact.sha256, remoteSize: response.artifact.size, ...(verb === "probe" ? { className: ((params as Record<string, unknown>).parameters as Record<string, unknown> | undefined)?.className, classLoaderId: ((params as Record<string, unknown>).parameters as Record<string, unknown> | undefined)?.classLoaderId, captureMethod: "JVM_RETRANSFORM" } : {}) },
             transfer: async (onChunk) => deps.executor.downloadArtifact({ artifactToken: response.artifact!.token, sha256: response.artifact!.sha256, size: response.artifact!.size, expiresAt: response.artifact!.expiresAt }, onChunk, signal),
           });
           evidenceRefs = [evidence.evidenceId];
         }
-        const source: FactSource = deps.budgetOwner === "PRESET"
-          ? deps.factSource ?? (() => { throw new SecurityError("INTERNAL_ERROR", "Preset 必须提供完整 Fact 来源"); })()
-          : { kind: "MODEL" };
+        const requestedSource: FactSource = deps.factSource ?? (deps.budgetOwner === "MODEL"
+          ? { kind: "MODEL" }
+          : (() => { throw new SecurityError("INTERNAL_ERROR", `${deps.budgetOwner} 必须提供完整 Fact 来源`); })());
+        const source: FactSource = { ...requestedSource, evidenceOrigin: "TARGET_OBSERVATION" };
         const placeholder: RemoteResultDetails = { status: response.status === "PARTIAL" ? "partial" : "success", runId: toolCallId, factRefs: [], objectRefs: [], edgeRefs: [], evidenceRefs, gaps: response.gaps, ...(cursorRef ? { cursorRef } : {}), cost: response.cost };
         const batch = deps.store.commitFactBatch({
           taskId: deps.task.taskId, epochId: deps.epoch.epochId, sourceRunId: toolCallId, source,
@@ -422,6 +496,22 @@ function remoteTool<T extends TSchema>(deps: V2ToolDependencies, verb: ForensicV
             return { content: [{ type: "text", text: JSON.stringify(finalDetails) }], details: finalDetails } satisfies AgentToolResult<RemoteResultDetails>;
           } },
         });
+        for (const evidenceId of evidenceRefs) {
+          const item = deps.store.getEvidence(deps.task.taskId, evidenceId);
+          const probeParameters = (params as Record<string, unknown>).parameters as Record<string, unknown> | undefined;
+          const artifactFact = verb === "probe" && response.artifact
+            ? batch.facts.find((fact) => fact.namespace === "class"
+              && fact.privatePayload.className === probeParameters?.className
+              && fact.privatePayload.loaderId === probeParameters?.classLoaderId)
+            : undefined;
+          const versionSubjectRef = artifactFact?.subjectRef ?? String(item?.metadata?.subjectRef ?? "");
+          const entityVersionRef = deps.store.listEntityVersions(deps.task.taskId, deps.epoch.epochId, versionSubjectRef).at(-1)?.versionRef;
+          if (item && entityVersionRef) deps.store.putEvidence({ ...item, metadata: {
+            ...item.metadata,
+            entityVersionRef,
+            ...(artifactFact ? { captureSourceRef: item.metadata?.subjectRef, artifactSubjectRef: artifactFact.subjectRef } : {}),
+          } });
+        }
         const details: RemoteResultDetails = { ...placeholder, factRefs: batch.facts.map((fact) => fact.factId), objectRefs: [...new Set(batch.facts.map((fact) => fact.subjectRef))], edgeRefs: batch.edges.map((edge) => edge.edgeId) };
         const result: AgentToolResult<RemoteResultDetails> = { content: [{ type: "text", text: JSON.stringify(details) }], details };
         deps.store.appendAudit({ taskId: deps.task.taskId, event: `v2_${verb}`, level: response.status === "PARTIAL" ? "warn" : "info", data: { toolCallId, factCount: batch.facts.length, edgeCount: batch.edges.length, gapCodes: response.gaps.map((gap) => gap.code), cursorRef, evidenceRefs, cost: response.cost } });
@@ -429,7 +519,7 @@ function remoteTool<T extends TSchema>(deps: V2ToolDependencies, verb: ForensicV
       } catch (error) {
         // 无 Envelope 时无法获得实际成本；按最坏预留结算，避免断线重试绕过远程预算。
         try { deps.store.settleBudget(reservationId, estimate); } catch { /* 已由有效 Wire Response 结算 */ }
-        const run = deps.store.getToolRunForTask(deps.task.taskId, toolCallId);
+        const run = deps.store.getToolRunForScope(deps.task.taskId, deps.epoch.epochId, toolCallId);
         if (run?.status === "STARTED") deps.store.finishToolRun(toolCallId, "FAILED", undefined, error instanceof Error ? error.message : String(error));
         throw error;
       }
@@ -439,7 +529,9 @@ function remoteTool<T extends TSchema>(deps: V2ToolDependencies, verb: ForensicV
 
 export function estimateRemoteCost(verb: ForensicVerb, params: Record<string, unknown>): WireCost {
   const nodes = verb === "enumerate" || verb === "relate"
-    ? Number(params.limit ?? 500)
+    ? verb === "enumerate" && params.predicate !== undefined
+      ? PROTOCOL_MANIFEST.hardLimits.enumerateScanNodes!
+      : Number(params.limit ?? 500)
     : verb === "match"
       ? Number(params.maxHits ?? 500)
       : verb === "probe" && params.probeKind === "jvm.tomcat.inventory"
@@ -484,6 +576,10 @@ function resolveObject(deps: V2ToolDependencies, ref: string, namespace?: Namesp
   const latest = latestPrivateFact(deps, ref);
   const locator: Record<string, unknown> = {};
   if (typeof latest.path === "string") locator.path = latest.path;
+  if (value.namespace === "process") {
+    if (typeof latest.exeInode === "string") locator.exeInode = latest.exeInode;
+    if (typeof latest.exeSha256 === "string") locator.exeSha256 = latest.exeSha256;
+  }
   return { namespace: value.namespace, identity: value.stableIdentity, locator };
 }
 
@@ -539,13 +635,160 @@ function effectiveContentClass(pathValue: unknown, helperValue: unknown): "SAFE_
 }
 
 function localTool<T extends TSchema, R>(deps: V2ToolDependencies, name: string, label: string, parameters: T, run: (params: Static<T>, toolCallId: string, signal?: AbortSignal) => R | Promise<R>): SecurityToolDefinition<T, R> {
-  return { name, label, description: `${label}；仅访问当前 task + epoch 的控制端数据。`, parameters, risk: "LOCAL", replayPolicy: name === "enrich_threat_intel" ? "SAFE_REOBSERVE" : "IDEMPOTENT_LOCAL", timeoutMs: name === "enrich_threat_intel" ? Math.min(65_000, (deps.config.threatIntel.timeoutSeconds + 5) * 1_000) : 10_000, auditEvent: `v2_${name}`, executionMode: "sequential", execute: async (toolCallId, params, signal) => {
-    const existing = deps.store.getToolRunForTask(deps.task.taskId, toolCallId);
+  const timeoutMs = name === "propose_actions"
+    ? deps.config.executor.timeoutSeconds * 1_000 * 32
+    : name === "enrich_threat_intel" ? Math.min(65_000, (deps.config.threatIntel.timeoutSeconds + 5) * 1_000) : 10_000;
+  const replayPolicy = name === "enrich_threat_intel" ? "SAFE_REOBSERVE" : "IDEMPOTENT_LOCAL";
+  return { name, label, description: `${label}；仅访问当前 task + epoch 的控制端数据。`, parameters, risk: "LOCAL", replayPolicy, timeoutMs, auditEvent: `v2_${name}`, executionMode: "sequential", execute: async (toolCallId, params, signal) => {
+    const existing = deps.store.getToolRunForScope(deps.task.taskId, deps.epoch.epochId, toolCallId);
     if (existing?.status === "SUCCEEDED" && existing.result) return existing.result as AgentToolResult<R>;
-    deps.store.startToolRun({ toolCallId, taskId: deps.task.taskId, toolName: name, risk: "LOCAL", replayPolicy: "IDEMPOTENT_LOCAL", args: digestObject(params) });
+    if (existing && existing.status !== "STARTED") throw new SecurityError("RECOVERY_UNCERTAIN", "ToolCall 已进入终态，拒绝再次执行本地工具");
+    deps.store.startToolRun({ toolCallId, taskId: deps.task.taskId, epochId: deps.epoch.epochId, toolName: name, risk: "LOCAL", replayPolicy, args: params });
     try { const details = await run(params, toolCallId, signal); const result: AgentToolResult<R> = { content: [{ type: "text", text: JSON.stringify(details) }], details }; deps.store.finishToolRun(toolCallId, "SUCCEEDED", result); return result; }
     catch (error) { deps.store.finishToolRun(toolCallId, "FAILED", undefined, error instanceof Error ? error.message : String(error)); throw error; }
   } };
+}
+
+function createQueryInvestigationTool(deps: V2ToolDependencies): SecurityToolDefinition {
+  return localTool(deps, "query_investigation", "查询持久化调查状态", Type.Object({
+    afterEventSeq: Type.Optional(Type.Integer({ minimum: 0 })),
+    limit: Type.Integer({ minimum: 1, maximum: 200 }),
+  }, { additionalProperties: false }), async (params) => {
+    const taskId = deps.task.taskId;
+    const epochId = deps.epoch.epochId;
+    return {
+      session: deps.store.getInvestigationSession(taskId, epochId),
+      leads: deps.store.listInvestigationLeads(taskId, epochId).slice(0, params.limit).map((item) => ({ leadId: item.leadId, subjectRef: item.subjectRef, triggerKind: item.triggerKind, priority: item.priority, status: item.status, triggerFactRefs: item.triggerFactRefs })),
+      hypotheses: deps.store.listInvestigationHypotheses(taskId, epochId).slice(0, params.limit),
+      obligations: deps.store.listInvestigationObligations(taskId, epochId).slice(0, params.limit),
+      actions: deps.store.listInvestigationActions(taskId, epochId).slice(0, params.limit).map((item) => ({ actionId: item.actionId, kind: item.kind, requestedBy: item.requestedBy, obligationIds: item.obligationIds, subjectRefs: item.subjectRefs, operationRef: item.operationRef, dependsOn: item.dependsOn, status: item.status, resultRefs: item.resultRefs, error: item.error, updatedAt: item.updatedAt })),
+      discovery: deps.store.listDiscoveryCheckpoints(taskId, epochId).slice(0, params.limit),
+      events: deps.store.listInvestigationEvents(taskId, epochId, params.afterEventSeq ?? 0, params.limit),
+    };
+  });
+}
+
+function createProposeHypothesisTool(deps: V2ToolDependencies): SecurityToolDefinition {
+  return localTool(deps, "propose_hypothesis", "提交结构化调查假设", Type.Object({
+    subjectRef: RefSchema,
+    claim: Type.String({ minLength: 1, maxLength: 2_000 }),
+    supportRefs: Type.Array(Type.String({ pattern: "^(FACT|EV|ASM)-[A-Za-z0-9-]+$" }), { maxItems: 100, uniqueItems: true }),
+    counterEvidenceRefs: Type.Array(Type.String({ pattern: "^(FACT|EV|ASM)-[A-Za-z0-9-]+$" }), { maxItems: 100, uniqueItems: true }),
+    alternativeExplanations: Type.Array(Type.String({ minLength: 1, maxLength: 500 }), { minItems: 1, maxItems: 20, uniqueItems: true }),
+  }, { additionalProperties: false }), async (params) => {
+    const session = deps.store.getInvestigationSession(deps.task.taskId, deps.epoch.epochId);
+    if (!session || session.executionStatus === "STOPPED") throw new InvalidArgumentError("当前调查会话不接受新假设");
+    resolveObject(deps, params.subjectRef);
+    const known = new Set([
+      ...deps.store.listFacts(deps.task.taskId, deps.epoch.epochId).map((item) => item.factId),
+      ...deps.store.listEvidence(deps.task.taskId).filter((item) => item.metadata?.epochId === deps.epoch.epochId).map((item) => item.evidenceId),
+      ...deps.store.listAssessments(deps.task.taskId, deps.epoch.epochId).map((item) => item.assessmentId),
+    ]);
+    if ([...params.supportRefs, ...params.counterEvidenceRefs].some((ref) => !known.has(ref))) throw new InvalidArgumentError("Hypothesis 引用了未知或跨 Epoch 的支持/反证");
+    const now = new Date().toISOString();
+    const hypothesis: InvestigationHypothesis = {
+      hypothesisId: `HYP-${randomUUID()}`,
+      taskId: deps.task.taskId,
+      epochId: deps.epoch.epochId,
+      subjectRef: params.subjectRef,
+      claim: params.claim,
+      proposedBy: "MODEL",
+      supportRefs: params.supportRefs,
+      counterEvidenceRefs: params.counterEvidenceRefs,
+      alternativeExplanations: params.alternativeExplanations,
+      status: "OPEN",
+      revision: 0,
+      createdAt: now,
+      updatedAt: now,
+    };
+    deps.store.putInvestigationHypothesis(hypothesis);
+    const obligation: InvestigationObligation = {
+      obligationId: `OBL-${randomUUID()}`,
+      taskId: deps.task.taskId,
+      epochId: deps.epoch.epochId,
+      hypothesisId: hypothesis.hypothesisId,
+      obligationKind: "TEST_ALTERNATIVE_EXPLANATIONS",
+      dedupeKey: `TEST_ALTERNATIVE_EXPLANATIONS:${hypothesis.hypothesisId}`,
+      subjectRefs: [params.subjectRef],
+      required: true,
+      status: "OPEN",
+      resultRefs: params.counterEvidenceRefs,
+      gapRefs: [],
+      createdAt: now,
+      updatedAt: now,
+    };
+    deps.store.putInvestigationObligation(obligation);
+    return { hypothesisId: hypothesis.hypothesisId, obligationId: obligation.obligationId };
+  });
+}
+
+function createProposeActionsTool(deps: V2ToolDependencies): SecurityToolDefinition {
+  const operationNames = ["enumerate", "project", "read", "match", "relate", "verify", "collect", "probe", "query_facts"] as const;
+  return localTool(deps, "propose_actions", "为调查义务提交受限动作组合并交由持久化调度器执行", Type.Object({
+    hypothesisId: Type.String({ pattern: "^HYP-[A-Za-z0-9-]+$" }),
+    obligationId: Type.String({ pattern: "^OBL-[A-Za-z0-9-]+$" }),
+    actions: Type.Array(Type.Object({
+      clientRef: Type.String({ minLength: 1, maxLength: 64 }),
+      operationRef: Type.Union(operationNames.map((value) => Type.Literal(value))),
+      subjectRefs: Type.Array(RefSchema, { maxItems: 32, uniqueItems: true }),
+      args: Type.Record(Type.String({ maxLength: 64 }), Type.Unknown()),
+      dependsOnClientRefs: Type.Array(Type.String({ minLength: 1, maxLength: 64 }), { maxItems: 32, uniqueItems: true }),
+    }, { additionalProperties: false }), { minItems: 1, maxItems: 32 }),
+  }, { additionalProperties: false }), async (params, _toolCallId, signal) => {
+    const session = deps.store.getInvestigationSession(deps.task.taskId, deps.epoch.epochId);
+    if (!session || session.executionStatus === "STOPPED") throw new InvalidArgumentError("当前调查会话不接受新动作");
+    const hypothesis = deps.store.listInvestigationHypotheses(deps.task.taskId, deps.epoch.epochId).find((item) => item.hypothesisId === params.hypothesisId);
+    const obligation = deps.store.listInvestigationObligations(deps.task.taskId, deps.epoch.epochId).find((item) => item.obligationId === params.obligationId && item.hypothesisId === params.hypothesisId);
+    if (!hypothesis || !obligation) throw new InvalidArgumentError("Action 必须绑定当前 Epoch 的 Hypothesis 与 Obligation");
+    const clientRefs = new Set(params.actions.map((item) => item.clientRef));
+    if (clientRefs.size !== params.actions.length) throw new InvalidArgumentError("clientRef 必须唯一");
+    const created = new Map<string, string>();
+    const pending = [...params.actions];
+    while (pending.length > 0) {
+      const index = pending.findIndex((item) => item.dependsOnClientRefs.every((dependency) => created.has(dependency)));
+      if (index < 0) throw new InvalidArgumentError("Action 依赖存在循环或引用未知 clientRef");
+      const [proposal] = pending.splice(index, 1);
+      for (const ref of proposal!.subjectRefs) resolveObject(deps, ref);
+      const operationRef = proposal!.operationRef;
+      const tool = createV2SecurityTools(deps).find((item) => item.name === operationRef);
+      if (!tool || !Value.Check(tool.parameters, proposal!.args)) throw new InvalidArgumentError(`Action ${proposal!.clientRef} 的 ${operationRef} 参数不符合工具 Schema`);
+      const now = new Date().toISOString();
+      const argsDigest = digestObject(proposal!.args);
+      const action: InvestigationAction = {
+        actionId: `IACT-${randomUUID()}`,
+        taskId: deps.task.taskId,
+        epochId: deps.epoch.epochId,
+        kind: operationRef === "query_facts" ? "LOCAL_QUERY" : "REMOTE_PRIMITIVE",
+        requestedBy: "MODEL",
+        obligationIds: [obligation.obligationId],
+        subjectRefs: proposal!.subjectRefs,
+        entityVersionRefs: proposal!.subjectRefs.flatMap((ref) => deps.store.listEntityVersions(deps.task.taskId, deps.epoch.epochId, ref).slice(-1).map((item) => item.versionRef)),
+        operationRef,
+        replayPolicy: operationRef === "collect" ? "RESUME_OR_RECOLLECT" : "SAFE_REOBSERVE",
+        args: proposal!.args,
+        argsDigest,
+        dependsOn: proposal!.dependsOnClientRefs.map((ref) => created.get(ref)!),
+        authorizationVersion: session.authorizationVersion,
+        observationRound: `MODEL:${hypothesis.hypothesisId}:${hypothesis.revision}`,
+        idempotencyKey: digestObject({ taskId: deps.task.taskId, epochId: deps.epoch.epochId, hypothesisId: hypothesis.hypothesisId, operationRef, argsDigest }),
+        priority: 50,
+        status: "READY",
+        revision: 0,
+        createdAt: now,
+        updatedAt: now,
+      };
+      const stored = deps.store.putInvestigationAction(action);
+      created.set(proposal!.clientRef, stored.actionId);
+    }
+    const accepted = [...created].map(([clientRef, actionId]) => ({ clientRef, actionId }));
+    const eligibleActionIds = new Set(accepted.map((item) => item.actionId));
+    const modelTools = createV2SecurityTools(deps).filter((item) => operationNames.includes(item.name as typeof operationNames[number]));
+    const discoveryTools = createV2SecurityTools({ ...deps, budgetOwner: "DISCOVERY", factSource: { kind: "SYSTEM" } })
+      .filter((item) => operationNames.includes(item.name as typeof operationNames[number]));
+    const scheduler = await new InvestigationScheduler(deps.store, deps.task.taskId, deps.epoch.epochId, session, discoveryTools, modelTools)
+      .runUntilQuiescent(signal, 20, eligibleActionIds);
+    return { accepted, rejected: [], scheduler };
+  });
 }
 
 function createQueryFactsTool(deps: V2ToolDependencies): SecurityToolDefinition {
@@ -666,5 +909,9 @@ function createAdjudicateAssessmentTool(deps: V2ToolDependencies): SecurityToolD
 }
 
 function createAssessmentProjectionTool(deps: V2ToolDependencies): SecurityToolDefinition {
-  return localTool(deps, "get_assessment_projection", "读取 Assessment 投影", Type.Object({}, { additionalProperties: false }), async () => ({ coverage: deps.store.listCoverageRuns(deps.task.taskId, deps.epoch.epochId), assessments: deps.store.listAssessments(deps.task.taskId, deps.epoch.epochId), relations: deps.store.listAssessmentRelations(deps.task.taskId, deps.epoch.epochId), investigationGaps: deps.store.listInvestigationGaps(deps.task.taskId, deps.epoch.epochId) }));
+  return localTool(deps, "get_assessment_projection", "读取 Assessment 投影", Type.Object({}, { additionalProperties: false }), async () => {
+    const assessments = deps.store.listAssessments(deps.task.taskId, deps.epoch.epochId);
+    const relations = deps.store.listAssessmentRelations(deps.task.taskId, deps.epoch.epochId);
+    return { coverage: deps.store.listCoverageRuns(deps.task.taskId, deps.epoch.epochId), assessments, relations, effectiveAssessments: projectEffectiveAssessments(assessments, relations), investigationGaps: deps.store.listInvestigationGaps(deps.task.taskId, deps.epoch.epochId) };
+  });
 }

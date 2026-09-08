@@ -9,6 +9,13 @@ if [[ -n "$(git status --porcelain)" ]]; then
   exit 1
 fi
 
+qualification="${HUNTWARDEN_RELEASE_QUALIFICATION:-}"
+if [[ -z "$qualification" ]]; then
+  echo "缺少 HUNTWARDEN_RELEASE_QUALIFICATION；拒绝在没有真实 Provider、独立盲测、平台矩阵和真实业务 JVM 证据时生成发布资产。" >&2
+  exit 1
+fi
+node scripts/release-qualification-check.mjs --qualification "$qualification"
+
 version="$(node -p "require('./package.json').version")"
 release_dir="$project_root/release/v$version"
 mkdir -p "$release_dir"
@@ -16,8 +23,10 @@ mkdir -p "$release_dir"
 npm ci
 npm run audit:prod
 npm run build
+node scripts/write-build-identity.mjs --output dist/build-identity.json
 npm test
 npm run probe:build
+npm run release:self-check -- --require-probe --require-build-identity --write-manifest "release/v${version}/COMPONENTS.json"
 npm run make:gui
 
 packaged_asar="$(find "$project_root/out" -path '*/HuntWarden.app/Contents/Resources/app.asar' -print -quit)"
@@ -27,6 +36,10 @@ if [[ -z "$packaged_asar" ]]; then
 fi
 if npx --no-install asar list "$packaged_asar" | grep -Eq '^/release($|/)'; then
   echo "发布资产目录被递归打入 app.asar；拒绝生成 Release。" >&2
+  exit 1
+fi
+if ! npx --no-install asar list "$packaged_asar" | grep -Fxq '/dist/build-identity.json'; then
+  echo "发布包缺少 dist/build-identity.json；无法把运行时 Epoch 绑定到构建提交。" >&2
   exit 1
 fi
 
@@ -51,11 +64,13 @@ fi
 
 (
   cd "$release_dir"
-  shasum -a 256 ./*.zip ./*.dmg 2>/dev/null > SHA256SUMS ||
-    find . -maxdepth 1 -type f \( -name '*.zip' -o -name '*.dmg' \) -print0 |
+  shasum -a 256 ./*.zip ./*.dmg ./COMPONENTS.json 2>/dev/null > SHA256SUMS ||
+    find . -maxdepth 1 -type f \( -name '*.zip' -o -name '*.dmg' -o -name 'COMPONENTS.json' \) -print0 |
       sort -z |
       xargs -0 shasum -a 256 > SHA256SUMS
 )
+
+npm run release:self-check -- --require-probe --require-build-identity --artifacts "release/v${version}"
 
 echo "发布资产已生成：$release_dir"
 cat "$release_dir/SHA256SUMS"

@@ -32,11 +32,11 @@ if ((query_status != 0)) && [[ ! -s ${capabilities_file} ]]; then
   exit 1
 fi
 
-python3 - "${capabilities_file}" <<'PY'
-import json, pathlib, sys
+python3 - "${capabilities_file}" "${HELPER_PATH}" <<'PY'
+import hashlib, json, pathlib, sys
 
 REQUIRED_PROTOCOL = 2
-REQUIRED_MANIFEST = "2.1.0"
+REQUIRED_MANIFEST = "3.0.0"
 REQUIRED_VERBS = {"enumerate", "project", "read", "match", "relate", "verify", "collect", "probe"}
 REQUIRED_NAMESPACES = {"host", "process", "socket", "file", "account", "delegation_rule", "ssh_trust_config", "jvm"}
 
@@ -55,6 +55,11 @@ if not isinstance(cap, dict):
     raise SystemExit(1)
 print("===== HuntWarden Helper v2 自检 =====")
 print("Helper       : {0} {1}".format(cap.get("helper", {}).get("name", "?"), cap.get("helper", {}).get("version", "?")))
+installed_sha256 = hashlib.sha256(pathlib.Path(sys.argv[2]).read_bytes()).hexdigest()
+if cap.get("helper", {}).get("sha256") != installed_sha256:
+    print("Helper capabilities 摘要与已安装文件不一致", file=sys.stderr)
+    raise SystemExit(1)
+print("Helper SHA-256: {0}".format(installed_sha256))
 print("协议/Manifest: {0} / {1}".format(cap.get("protocolVersion"), cap.get("manifestVersion")))
 if cap.get("protocolVersion") != REQUIRED_PROTOCOL or cap.get("manifestVersion") != REQUIRED_MANIFEST:
     print("协议不兼容：控制端要求 v2 / Manifest {0}".format(REQUIRED_MANIFEST), file=sys.stderr)

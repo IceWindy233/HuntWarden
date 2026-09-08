@@ -12,6 +12,19 @@ python3 /opt/huntwarden-lab/listener.py &
 python3 /tmp/.update &
 /tmp/.cache-worker 3600 &
 deleted_pid=$!
+# Bash may return from the background launch before the child has opened its
+# executable. Wait for /proc to expose the executable so unlinking the fixture
+# cannot race the dynamic loader.
+for _ in $(seq 1 100); do
+  if [[ "$(readlink "/proc/${deleted_pid}/exe" 2>/dev/null || true)" == "/tmp/.cache-worker" ]]; then
+    break
+  fi
+  sleep 0.01
+done
+if [[ "$(readlink "/proc/${deleted_pid}/exe" 2>/dev/null || true)" != "/tmp/.cache-worker" ]]; then
+  echo "deleted executable fixture did not start" >&2
+  exit 1
+fi
 rm -f /tmp/.cache-worker
 printf '%s\n' "$deleted_pid" > /run/huntwarden-deleted-process.pid
 exec /usr/sbin/sshd -D -e

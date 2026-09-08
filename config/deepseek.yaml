@@ -39,34 +39,6 @@ llmData:
 
 webshell:
   modifiedWithinHours: 168
-  maxCandidateFiles: 500
-  maxFileSizeBytes: 10485760
-  maxScriptExcerptBytes: 65536
-  maxAccessLogLines: 500
-  yaraRuleDir: ./rules/yara
-
-java:
-  supportedContainers: [tomcat]
-  allowClassDump: true
-  allowRuntimeModification: false
-  probeJar: ./java/tomcat-probe/build/libs/huntwarden-tomcat-probe.jar
-
-account:
-  checkAuthorizedKeys: true
-  checkLoginHistory: true
-  maxLoginHistoryEntries: 100
-
-persistence:
-  maxItemsPerSource: 500
-  includeUserScope: true
-
-triage:
-  maxProcesses: 2000
-  maxConnections: 5000
-  maxFiles: 5000
-  maxTimelineEvents: 5000
-  maxArtifactBytes: 10485760
-  maxProcessTreeDepth: 12
 
 threatIntel:
   enabled: false
@@ -76,8 +48,6 @@ threatIntel:
   timeoutSeconds: 15
   maxBatchSize: 100
   cacheTtlSeconds: 3600
-  autoEnrichConnections: true
-  includePrivateAddresses: false
 
 remediation:
   requireApproval: true

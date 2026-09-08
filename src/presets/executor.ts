@@ -11,19 +11,44 @@ import { INITIAL_GRANT_POLICY } from "../protocol-v2/policy.js";
 
 export interface PresetRunResult { presetRunId: string; coverage: CoverageRun[]; promptContext: string }
 type StepOutcome = { status: "success" | "partial" | "error"; runId?: string; factRefs?: string[]; objectRefs?: string[]; reason?: string; fanout?: Array<{ sourceRef: string; objectRefs: string[] }> };
+const PRESET_MAX_PAGES = 100;
 
 export class PresetExecutorV2 {
-  constructor(private readonly deps: Omit<V2ToolDependencies, "budgetOwner" | "factSource">) {}
+  private rootRunId?: string;
+  private readonly seededOutcomes = new Map<string, Map<string, StepOutcome>>();
+
+  constructor(
+    private readonly deps: Omit<V2ToolDependencies, "budgetOwner" | "factSource">,
+    private readonly afterPageCommitted?: () => Promise<void>,
+  ) {}
+
+  async runVolatilePrelude(signal?: AbortSignal): Promise<{ presetRunId: string; stepIds: string[] }> {
+    this.rootRunId ??= `PRUN-${randomUUID()}`;
+    const preset = selectedPresets(this.deps.task.checks).find((item) => item.presetId === "linux-triage-baseline");
+    if (!preset) return { presetRunId: this.rootRunId, stepIds: [] };
+    const outcomes = this.seededOutcomes.get(preset.presetId) ?? new Map<string, StepOutcome>();
+    const stepIds = ["process-snapshot", "socket-snapshot"];
+    for (const stepId of stepIds) {
+      const step = preset.steps.find((item) => item.stepId === stepId);
+      if (!step || outcomes.has(stepId)) continue;
+      signal?.throwIfAborted();
+      outcomes.set(stepId, await this.executeStep(preset, this.rootRunId, step, signal));
+    }
+    this.seededOutcomes.set(preset.presetId, outcomes);
+    return { presetRunId: this.rootRunId, stepIds: [...outcomes.keys()] };
+  }
 
   async run(signal?: AbortSignal): Promise<PresetRunResult> {
     const coverage: CoverageRun[] = [];
     const summaries: Record<string, unknown>[] = [];
-    const rootRunId = `PRUN-${randomUUID()}`;
+    if (!this.rootRunId) this.rootRunId = `PRUN-${randomUUID()}`;
+    const rootRunId = this.rootRunId;
     for (const preset of selectedPresets(this.deps.task.checks)) {
       signal?.throwIfAborted();
       const presetRunId = rootRunId;
-      const outcomes = new Map<string, StepOutcome>();
+      const outcomes = new Map(this.seededOutcomes.get(preset.presetId) ?? []);
       for (const step of preset.steps) {
+        if (outcomes.has(step.stepId)) continue;
         const outcome = step.stepId === "web-candidate-file"
           ? await this.executeWebFileFanout(preset, presetRunId, step, outcomes.get("web-root"), signal)
           : step.stepId === "triage-file-scopes"
@@ -36,6 +61,8 @@ export class PresetExecutorV2 {
             ? await this.executeProbeFanout(preset, presetRunId, step, outcomes.get("jvm-discovery"), signal)
             : step.stepId === "jvm-class-inspect"
               ? await this.executeClassInspectFanout(preset, presetRunId, step, outcomes.get("tomcat-inventory"), signal)
+            : step.stepId === "jvm-class-bytecode"
+              ? await this.executeClassDumpFanout(preset, presetRunId, step, outcomes.get("jvm-class-inspect"), signal)
             : await this.executeStep(preset, presetRunId, step, signal);
         outcomes.set(step.stepId, outcome);
       }
@@ -68,10 +95,9 @@ export class PresetExecutorV2 {
           this.deps.store.putTaskGrant(grant);
           this.deps.store.appendAudit({ taskId: this.deps.task.taskId, event: "protocol_v2_initial_scope_grant", level: "info", data: { grantId: grant.grantId, bindingDigest: digestObject(binding), policyRoot: requestedRoot } });
         }
-        const toolCallId = `PRESET-${randomUUID()}`;
-        const result = await tool.execute(toolCallId, { ...step.params, scopeRef: grant.grantId, limit: perRootLimit } as never, signal) as AgentToolResult<{ status: "success" | "partial"; factRefs: string[]; objectRefs: string[] }>;
-        factRefs.push(...result.details.factRefs); objectRefs.push(...result.details.objectRefs);
-        partial = partial || result.details.status === "partial";
+        const result = await this.executePaged(tool, { ...step.params, scopeRef: grant.grantId, limit: perRootLimit }, signal);
+        factRefs.push(...(result.factRefs ?? [])); objectRefs.push(...(result.objectRefs ?? []));
+        partial = partial || result.status === "partial";
       } catch (error) {
         partial = true;
         this.deps.store.appendAudit({ taskId: this.deps.task.taskId, event: "protocol_v2_initial_scope_failed", level: "warn", data: { requestedRoot, reason: error instanceof Error ? error.message : String(error) } });
@@ -112,11 +138,10 @@ export class PresetExecutorV2 {
     const factRefs: string[] = []; const objectRefs: string[] = []; const fanout: NonNullable<StepOutcome["fanout"]> = [];
     let partial = false;
     for (const value of selected) {
-      const toolCallId = `PRESET-${randomUUID()}`;
       try {
-        const result = await tool.execute(toolCallId, { ref: value.ref, relation: "owns_file", limit: Number(step.params.limit ?? 20) } as never, signal) as AgentToolResult<{ status: "success" | "partial"; factRefs: string[]; objectRefs: string[] }>;
-        factRefs.push(...result.details.factRefs); objectRefs.push(...result.details.objectRefs); fanout.push({ sourceRef: value.ref, objectRefs: result.details.objectRefs });
-        partial = partial || result.details.status === "partial";
+        const result = await this.executePaged(tool, { ref: value.ref, relation: "owns_file", limit: Number(step.params.limit ?? 20) }, signal);
+        factRefs.push(...(result.factRefs ?? [])); objectRefs.push(...(result.objectRefs ?? [])); fanout.push({ sourceRef: value.ref, objectRefs: result.objectRefs ?? [] });
+        partial = partial || result.status === "partial";
       } catch { partial = true; }
     }
     if (objectRefs.length === 0) partial = true;
@@ -134,8 +159,8 @@ export class PresetExecutorV2 {
     const factRefs: string[] = []; const objectRefs: string[] = [];
     let partial = false;
     for (const ref of refs) {
-      const toolCallId = `PRESET-${randomUUID()}`;
       try {
+        const toolCallId = `PRESET-${randomUUID()}`;
         const result = await tool.execute(toolCallId, { ref, baseline: step.params.baseline } as never, signal) as AgentToolResult<{ status: "success" | "partial"; factRefs: string[]; objectRefs: string[] }>;
         factRefs.push(...result.details.factRefs); objectRefs.push(...result.details.objectRefs);
         partial = partial || result.details.status === "partial";
@@ -150,13 +175,53 @@ export class PresetExecutorV2 {
     const tools = createV2SecurityTools({ ...this.deps, budgetOwner: "PRESET", factSource: { kind: "PRESET", presetRunId, presetId: preset.presetId, presetVersion: preset.version, stepId: step.stepId } });
     const tool = tools.find((item) => item.name === step.verb) as SecurityToolDefinition | undefined;
     if (!tool) return { status: "error" as const, reason: "TOOL_NOT_REGISTERED" };
-    const toolCallId = `PRESET-${randomUUID()}`;
     try {
-      const result = await tool.execute(toolCallId, step.params as never, signal) as AgentToolResult<{ status: "success" | "partial"; factRefs: string[]; objectRefs: string[] }>;
-      return { status: result.details.status, runId: toolCallId, factRefs: result.details.factRefs, objectRefs: result.details.objectRefs };
+      const params = step.verb === "enumerate" && step.params.sinceHours !== undefined && this.deps.task.timeWindowHours !== undefined
+        ? { ...step.params, sinceHours: this.deps.task.timeWindowHours }
+        : step.params;
+      return await this.executePaged(tool, params, signal);
     } catch (error) {
-      return { status: "error" as const, runId: toolCallId, reason: error instanceof Error ? error.message : String(error) };
+      return { status: "error" as const, reason: error instanceof Error ? error.message : String(error) };
     }
+  }
+
+  private async executePaged(tool: SecurityToolDefinition, baseParams: Record<string, unknown>, signal?: AbortSignal): Promise<StepOutcome> {
+    const factRefs: string[] = [];
+    const objectRefs: string[] = [];
+    let partial = false;
+    let cursorRef: string | undefined;
+    let firstRunId: string | undefined;
+    for (let page = 0; page < PRESET_MAX_PAGES; page += 1) {
+      signal?.throwIfAborted();
+      const toolCallId = `PRESET-${randomUUID()}`;
+      firstRunId ??= toolCallId;
+      try {
+        const result = await tool.execute(toolCallId, { ...baseParams, ...(cursorRef ? { cursorRef } : {}) } as never, signal) as AgentToolResult<{ status: "success" | "partial"; factRefs: string[]; objectRefs: string[]; cursorRef?: string }>;
+        factRefs.push(...result.details.factRefs);
+        objectRefs.push(...result.details.objectRefs);
+        partial = partial || result.details.status === "partial";
+        // 每个远程页已经作为独立 FactBatch 原子提交。此时立即唤醒持久化调度器，
+        // 让首屏的易失对象先建 Lead 和保全动作，而不等待大型枚举耗尽 Cursor。
+        await this.afterPageCommitted?.();
+        cursorRef = result.details.cursorRef;
+        if (!cursorRef) return { status: partial ? "partial" : "success", runId: firstRunId!, factRefs, objectRefs };
+      } catch (error) {
+        if (!cursorRef && factRefs.length === 0) throw error;
+        const reason = error instanceof Error ? error.message : String(error);
+        this.limitDiscoveryCheckpoint(cursorRef, `Preset 分页中断：${reason}`);
+        return { status: "partial", runId: firstRunId!, factRefs, objectRefs, reason };
+      }
+    }
+    this.limitDiscoveryCheckpoint(cursorRef, `Preset 分页达到 ${PRESET_MAX_PAGES} 页上限`);
+    return { status: "partial", runId: firstRunId!, factRefs, objectRefs, reason: "PRESET_PAGE_LIMIT" };
+  }
+
+  private limitDiscoveryCheckpoint(cursorRef: string | undefined, reason: string): void {
+    if (!cursorRef) return;
+    const checkpoint = this.deps.store.listDiscoveryCheckpoints(this.deps.task.taskId, this.deps.epoch.epochId)
+      .find((item) => item.cursorRef === cursorRef);
+    if (!checkpoint) return;
+    this.deps.store.putDiscoveryCheckpoint({ ...checkpoint, status: "LIMITED", remainingDescription: reason, updatedAt: new Date().toISOString() });
   }
 
   private async executeWebFileFanout(preset: PresetDefinition, presetRunId: string, step: PresetStep, roots: StepOutcome | undefined, signal?: AbortSignal): Promise<StepOutcome> {
@@ -170,7 +235,6 @@ export class PresetExecutorV2 {
     const factRefs: string[] = []; const objectRefs: string[] = [];
     let partial = roots?.status === "partial" || (roots?.objectRefs?.length ?? 0) > refs.length;
     const perRootLimit = Math.max(1, Math.floor(Number(step.params.limit ?? 500) / refs.length));
-    const cutoff = new Date(Date.now() - this.deps.config.webshell.modifiedWithinHours * 3_600_000).toISOString();
     for (const ref of refs) {
       signal?.throwIfAborted();
       const object = this.deps.store.getObjectReference(this.deps.task.taskId, this.deps.epoch.epochId, ref, "web_root");
@@ -184,11 +248,12 @@ export class PresetExecutorV2 {
         this.deps.store.putTaskGrant(grant);
         this.deps.store.appendAudit({ taskId: this.deps.task.taskId, event: "protocol_v2_initial_scope_grant", level: "info", data: { grantId: grant.grantId, bindingDigest: digestObject(binding), sourceRef: ref } });
       }
-      const toolCallId = `PRESET-${randomUUID()}`;
       try {
-        const result = await tool.execute(toolCallId, { ...step.params, scopeRef: grant.grantId, limit: perRootLimit, predicate: { op: "gte", field: "mtime", value: cutoff } } as never, signal) as AgentToolResult<{ status: "success" | "partial"; factRefs: string[]; objectRefs: string[] }>;
-        factRefs.push(...result.details.factRefs); objectRefs.push(...result.details.objectRefs);
-        partial = partial || result.details.status === "partial";
+        // 深度取证的首轮 Web 候选必须覆盖整个站点。mtime 仅可用于后续排序或增量优化，
+        // 不能把任务日志时间窗变成文件排除条件，否则回改时间戳和长期驻留脚本会被漏掉。
+        const result = await this.executePaged(tool, { ...step.params, scopeRef: grant.grantId, limit: perRootLimit }, signal);
+        factRefs.push(...(result.factRefs ?? [])); objectRefs.push(...(result.objectRefs ?? []));
+        partial = partial || result.status === "partial";
       } catch { partial = true; }
     }
     return { status: partial ? "partial" : "success", factRefs, objectRefs };
@@ -202,23 +267,65 @@ export class PresetExecutorV2 {
     if (!tool) return { status: "error", reason: "TOOL_NOT_REGISTERED" };
     const facts = this.deps.store.listFacts(this.deps.task.taskId, this.deps.epoch.epochId);
     const factRefs: string[] = []; const objectRefs: string[] = [];
+    const fanout: NonNullable<StepOutcome["fanout"]> = [];
     let partial = inventory?.status === "partial";
     let inspected = 0;
     for (const binding of inventory?.fanout ?? []) {
-      const names = [...new Set(binding.objectRefs.flatMap((ref) => facts.filter((fact) => fact.subjectRef === ref && fact.namespace === "java_component").map((fact) => fact.privatePayload.className).filter((value): value is string => typeof value === "string" && value.length > 0)))].slice(0, 20);
-      if (names.length === 0) { partial = true; continue; }
-      for (const className of names) {
+      const boundObjectRefs: string[] = [];
+      const classEntries = binding.objectRefs.flatMap((ref) => facts
+        .filter((fact) => fact.subjectRef === ref && fact.namespace === "java_component")
+        .flatMap((fact) => {
+          const className = fact.privatePayload.className;
+          const classLoaderId = fact.privatePayload.classLoaderId;
+          return typeof className === "string" && className.length > 0 && typeof classLoaderId === "string" && classLoaderId.length > 0
+            ? [[`${className}\0${classLoaderId}`, { className, classLoaderId }] as const]
+            : [];
+        }));
+      const classes = [...new Map(classEntries).values()].slice(0, 20);
+      if (classes.length === 0) { partial = true; continue; }
+      for (const { className, classLoaderId } of classes) {
         signal?.throwIfAborted();
         const toolCallId = `PRESET-${randomUUID()}`;
         try {
-          const result = await tool.execute(toolCallId, { ref: binding.sourceRef, probeKind: "jvm.class.inspect", parameters: { className } } as never, signal) as AgentToolResult<{ status: "success" | "partial"; factRefs: string[]; objectRefs: string[] }>;
+          const result = await tool.execute(toolCallId, { ref: binding.sourceRef, probeKind: "jvm.class.inspect", parameters: { className, classLoaderId } } as never, signal) as AgentToolResult<{ status: "success" | "partial"; factRefs: string[]; objectRefs: string[] }>;
           factRefs.push(...result.details.factRefs); objectRefs.push(...result.details.objectRefs); inspected += 1;
+          boundObjectRefs.push(...result.details.objectRefs);
           partial = partial || result.details.status === "partial";
         } catch { partial = true; }
       }
+      if (boundObjectRefs.length > 0) fanout.push({ sourceRef: binding.sourceRef, objectRefs: [...new Set(boundObjectRefs)] });
     }
     if (inspected === 0) return { status: partial ? "partial" : "success", factRefs, objectRefs, ...(partial ? { reason: "NO_INSPECTABLE_CLASS" } : {}) };
-    return { status: partial ? "partial" : "success", factRefs, objectRefs };
+    return { status: partial ? "partial" : "success", factRefs, objectRefs, fanout };
+  }
+
+  private async executeClassDumpFanout(preset: PresetDefinition, presetRunId: string, step: PresetStep, inspected: StepOutcome | undefined, signal?: AbortSignal): Promise<StepOutcome> {
+    if (inspected?.status === "error") return { status: "error", reason: "CLASS_INSPECTION_FAILED" };
+    if (!this.deps.capabilities.probes.has("jvm.class.dump")) return { status: "error", reason: "CAPABILITY_UNAVAILABLE" };
+    const tools = createV2SecurityTools({ ...this.deps, budgetOwner: "PRESET", factSource: { kind: "PRESET", presetRunId, presetId: preset.presetId, presetVersion: preset.version, stepId: step.stepId } });
+    const tool = tools.find((item) => item.name === "probe") as SecurityToolDefinition | undefined;
+    if (!tool) return { status: "error", reason: "TOOL_NOT_REGISTERED" };
+    const facts = this.deps.store.listFacts(this.deps.task.taskId, this.deps.epoch.epochId);
+    const factRefs: string[] = []; const objectRefs: string[] = [];
+    let partial = inspected?.status === "partial";
+    let captured = 0;
+    for (const binding of inspected?.fanout ?? []) {
+      const classes = binding.objectRefs.flatMap((ref) => facts.filter((fact) => fact.subjectRef === ref && fact.namespace === "class").slice(-1)).slice(0, 20);
+      for (const fact of classes) {
+        const className = fact.privatePayload.className;
+        const classLoaderId = fact.privatePayload.loaderId;
+        if (typeof className !== "string" || typeof classLoaderId !== "string") { partial = true; continue; }
+        signal?.throwIfAborted();
+        try {
+          const result = await tool.execute(`PRESET-${randomUUID()}`, { ref: binding.sourceRef, probeKind: "jvm.class.dump", parameters: { className, classLoaderId } } as never, signal) as AgentToolResult<{ status: "success" | "partial"; factRefs: string[]; objectRefs: string[]; evidenceRefs: string[] }>;
+          factRefs.push(...result.details.factRefs); objectRefs.push(...result.details.objectRefs);
+          captured += result.details.evidenceRefs.length;
+          partial = partial || result.details.status === "partial" || result.details.evidenceRefs.length === 0;
+        } catch { partial = true; }
+      }
+    }
+    if (captured === 0 && (inspected?.objectRefs?.length ?? 0) > 0) partial = true;
+    return { status: partial ? "partial" : "success", factRefs, objectRefs, ...(captured === 0 && partial ? { reason: "NO_CLASS_BYTECODE_EVIDENCE" } : {}) };
   }
 
   private async executeProbeFanout(preset: PresetDefinition, presetRunId: string, step: PresetStep, discovery: StepOutcome | undefined, signal?: AbortSignal): Promise<StepOutcome> {

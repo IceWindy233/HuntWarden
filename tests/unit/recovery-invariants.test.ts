@@ -23,7 +23,7 @@ afterEach(async () => {
 });
 
 const helper: HelperCapabilitiesV2 = {
-  protocolVersion: 2, manifestVersion: "2.1.0", helper: { name: "helper", version: "2.1.0" },
+  protocolVersion: 2, manifestVersion: "3.0.0", helper: { name: "helper", version: "3.0.0" },
   namespaces: { account: { fields: ["uid", "username", "gid", "home", "shell", "locked"], relations: [], verbs: ["enumerate"] } },
   matchers: [], probes: [], verbs: ["enumerate"],
   limits: { maxObjects: 100, maxOutputBytes: 1_572_864, maxReadBytes: 65_536, maxCollectBytes: 104_857_600 },
@@ -39,7 +39,7 @@ async function fixture(remoteStatus: "SUCCEEDED" | "STARTED" | "UNKNOWN") {
   task.checks = ["backdoor_account"];
   task.activeEpochId = "EPOCH-00000000-0000-4000-8000-000000000031";
   store.createTask(task);
-  const epoch: ScanEpoch = { epochId: task.activeEpochId, taskId: task.taskId, targetFingerprint: task.target.hostFingerprint, protocolVersion: 2, manifestVersion: "2.1.0", helperVersion: "2.1.0", reason: "RECOVERY_REOBSERVE", status: "RUNNING", startedAt: new Date().toISOString() };
+  const epoch: ScanEpoch = { epochId: task.activeEpochId, taskId: task.taskId, targetFingerprint: task.target.hostFingerprint, protocolVersion: 2, manifestVersion: "3.0.0", helperVersion: "3.0.0", reason: "RECOVERY_REOBSERVE", status: "RUNNING", startedAt: new Date().toISOString() };
   store.createScanEpoch(epoch);
   const grant: TaskGrant = { grantId: "GRANT-RECOVERY", taskId: task.taskId, targetFingerprint: task.target.hostFingerprint, kind: "CATEGORY", status: "ACTIVE", binding: { category: "backdoor_account" }, createdAt: new Date().toISOString() };
   store.putTaskGrant(grant);
@@ -54,10 +54,10 @@ async function fixture(remoteStatus: "SUCCEEDED" | "STARTED" | "UNKNOWN") {
   const ticket = approvals.request(task, "disable_account", args);
   approvals.decide(ticket.approvalId, true);
   approvals.consume(task, "disable_account", args);
-  store.putActionReceipt({ actionId: ticket.actionId, taskId: task.taskId, tool: "disable_account", targetFingerprint: task.target.hostFingerprint, status: "STARTED", startedAt: new Date().toISOString() });
+  store.putActionReceipt({ actionId: ticket.actionId, taskId: task.taskId, epochId: epoch.epochId, tool: "disable_account", targetFingerprint: task.target.hostFingerprint, status: "STARTED", startedAt: new Date().toISOString() });
   const call = fauxToolCall("disable_account", args, { id: "WRITE-RECOVERY-31" });
-  store.appendMessage(task.taskId, fauxAssistantMessage(call, { stopReason: "toolUse" }));
-  store.startToolRun({ toolCallId: call.id, taskId: task.taskId, toolName: call.name, risk: "WRITE", replayPolicy: "NEVER", args });
+  store.appendMessage(task.taskId, fauxAssistantMessage(call, { stopReason: "toolUse" }), epoch.epochId);
+  store.startToolRun({ toolCallId: call.id, taskId: task.taskId, epochId: epoch.epochId, toolName: call.name, risk: "WRITE", replayPolicy: "NEVER", args });
 
   const executor = new FakeProtocolV2Executor(helper, async () => { throw new Error("恢复不得调用取证原语"); }, {}, async (verb) => {
     if (verb !== "get_action_receipt") throw new Error("恢复不得自动重放写操作");
@@ -82,8 +82,26 @@ function denyRecoveryApproval(approvals: ApprovalService): ApprovalTicket[] {
 }
 
 describe("v2 崩溃恢复不变量", () => {
+  it("迁移前未绑定 Epoch 的活动 ToolRun 阻止自动恢复", async () => {
+    const { store, task, runtime, executor } = await fixture("SUCCEEDED");
+    store.startToolRun({ toolCallId: "LEGACY-UNBOUND-RUN", taskId: task.taskId, toolName: "enumerate", risk: "READ", replayPolicy: "SAFE_REOBSERVE", args: {} });
+    await expect(runtime.recover()).rejects.toThrow(/未绑定当前 Epoch/);
+    expect(executor.maintenanceCalls).toHaveLength(0);
+    expect(store.getTask(task.taskId)).toMatchObject({ status: "ABORTED", interruption: { recoveryRequired: true } });
+    expect(store.listAudit(task.taskId).at(-1)?.event).toBe("recovery_unbound_tool_runs");
+  });
+
   it("INV-23：远端回执已成功时只补记结果，不重放写动作", async () => {
-    const { store, ticket, call, executor, runtime, approvals } = await fixture("SUCCEEDED");
+    const { store, task, ticket, call, executor, runtime, approvals } = await fixture("SUCCEEDED");
+    store.putActionReceipt({
+      actionId: "ACTION-OLD-EPOCH",
+      taskId: task.taskId,
+      epochId: "EPOCH-OLD",
+      tool: "disable_account",
+      targetFingerprint: task.target.hostFingerprint,
+      status: "UNKNOWN",
+      startedAt: new Date().toISOString(),
+    });
     const requested = denyRecoveryApproval(approvals);
     await runtime.recover();
 
@@ -91,7 +109,8 @@ describe("v2 崩溃恢复不变量", () => {
     expect(requested).toHaveLength(0);
     expect(store.getToolRun(call.id)?.status).toBe("SUCCEEDED");
     expect(store.getActionReceipt(ticket.actionId)?.status).toBe("SUCCEEDED");
-    expect(store.listActionReceipts(ticket.taskId)).toHaveLength(1);
+    expect(store.listActionReceipts(ticket.taskId)).toHaveLength(2);
+    expect(store.getTask(task.taskId)?.status).toBe("COMPLETED");
   });
 
   it.each(["STARTED", "UNKNOWN"] as const)("INV-23：远端回执为 %s 时标记 UNKNOWN、要求重新审批且不得完成任务", async (status) => {

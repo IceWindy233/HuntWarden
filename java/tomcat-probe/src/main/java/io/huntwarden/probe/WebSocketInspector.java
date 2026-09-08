@@ -97,6 +97,14 @@ final class WebSocketInspector {
         Method getEndpointClass = publicNoArg(value.getClass(), "getEndpointClass");
         if (getPath == null || getEndpointClass == null) return;
         try {
+            // Tomcat/JSR356 may return a package-private implementation class whose getter is
+            // public. Method.invoke still rejects that declaring class unless accessibility is
+            // opened explicitly; these are the two fixed, read-only getters selected above.
+            if ((!getPath.canAccess(value) && !getPath.trySetAccessible())
+                    || (!getEndpointClass.canAccess(value) && !getEndpointClass.trySetAccessible())) {
+                addError(errors, describe(value.getClass()) + " endpoint getters: inaccessible");
+                return;
+            }
             Object rawPath = getPath.invoke(value);
             Object rawClass = getEndpointClass.invoke(value);
             if (!(rawPath instanceof String path) || path.isBlank() || !(rawClass instanceof Class<?> endpointClass)) return;

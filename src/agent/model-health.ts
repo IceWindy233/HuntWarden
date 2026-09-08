@@ -1,5 +1,6 @@
 import { Type, type Context, type Model, type Api, type Models, type Tool } from "@earendil-works/pi-ai";
 import type { AppConfig } from "../config/schema.js";
+import { providerRequestSignal } from "./provider-observer.js";
 
 export interface ModelHealthResult {
   ok: boolean;
@@ -46,8 +47,9 @@ export async function smokeModel(config: AppConfig, models: Models, model: Model
     maxTokens: 1024,
     timeoutMs: 60_000,
     maxRetries: 0,
+    signal: providerRequestSignal(60_000),
   });
-  if (response.stopReason === "error") throw new Error(response.errorMessage ?? "模型请求失败");
+  if (response.stopReason === "error" || response.stopReason === "aborted") throw new Error(response.errorMessage ?? `模型请求未完整结束: ${response.stopReason}`);
   const toolCall = response.content.find((item) => item.type === "toolCall");
   const verified = Boolean(toolCall && toolCall.name === probe.name && toolCall.arguments.marker === marker);
   return {

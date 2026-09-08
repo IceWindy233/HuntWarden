@@ -171,9 +171,9 @@ export function evaluateModelCapability(store: RuntimeStore, manifest: ModelCapa
       }
     }
 
-    allModelToolRuns.push(...store.listToolRuns(task.taskId, 100_000).filter((run) => !run.toolCallId.startsWith("PRESET-")));
-    unknownToolCalls.push(...store.listAudit(task.taskId, 100_000).filter((event) => event.event === "model_invalid_tool_call").map(() => 1));
-    addMessageUsage(tokens, store.loadMessages(task.taskId));
+    allModelToolRuns.push(...store.listToolRuns(task.taskId, 100_000).filter((run) => run.epochId === epochId && !run.toolCallId.startsWith("PRESET-")));
+    unknownToolCalls.push(...store.listAudit(task.taskId, 100_000).filter((event) => event.event === "model_invalid_tool_call" && event.data.epochId === epochId).map(() => 1));
+    addMessageUsage(tokens, store.loadMessages(task.taskId, epochId));
     results.push({
       caseId: definition.caseId, taskId: task.taskId, epochId, disposition: definition.disposition, novel: definition.novel,
       expectedFactLabels: definition.expectedFacts.length, availableFactLabels: caseAvailable, reachedFactLabels: caseReached,

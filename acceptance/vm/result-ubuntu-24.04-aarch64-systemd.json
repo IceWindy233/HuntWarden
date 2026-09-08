@@ -1,0 +1,20 @@
+{
+  "status": "PASS",
+  "environment": {
+    "distribution": "ubuntu",
+    "version": "24.04",
+    "architecture": "aarch64"
+  },
+  "unit": {
+    "name": "huntwarden-transient-acceptance.service",
+    "path": "/run/systemd/transient/huntwarden-transient-acceptance.service",
+    "transient": true,
+    "active": true,
+    "user": "root",
+    "execStart": "\n\"/usr/bin/sleep\" \"300\""
+  },
+  "relation": {
+    "executes": "/usr/bin/sleep"
+  },
+  "cleanup": "systemctl stop in afterAll"
+}

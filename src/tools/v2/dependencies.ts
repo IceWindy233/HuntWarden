@@ -20,6 +20,6 @@ export interface V2ToolDependencies {
   approvals: ApprovalService;
   checkpoint?: (name: string) => void;
   threatIntel?: ThreatIntelClient;
-  budgetOwner: "MODEL" | "PRESET";
+  budgetOwner: "MODEL" | "PRESET" | "DISCOVERY";
   factSource?: FactSource;
 }

@@ -43,12 +43,13 @@ ARTIFACT_TOKEN = re.compile(r"^[a-f0-9]{64}$")
 ARTIFACT_MAX_BYTES = 100 * 1024 * 1024
 ARTIFACT_TTL_SECONDS = 15 * 60
 LOG_SCAN_MAX_BYTES = 64 * 1024 * 1024
-HELPER_VERSION = "2.1.0"
+HELPER_VERSION = "3.0.0"
 PROTOCOL_VERSION = 2
-MANIFEST_VERSION = "2.1.0"
+MANIFEST_VERSION = "3.0.0"
 PROBE_JAR = pathlib.Path("/opt/huntwarden/huntwarden-tomcat-probe.jar")
 USERNAME = re.compile(r"^[a-z_][a-z0-9_-]{0,31}$", re.I)
 CLASS_NAME = re.compile(r"^[A-Za-z_$][A-Za-z0-9_$.]{0,511}$")
+CLASS_LOADER_ID = re.compile(r"^[^\x00-\x1f\x7f]{1,1024}$")
 SYSTEM_PERSISTENCE_ROOTS = {
     "cron": ("/etc/crontab", "/etc/cron.d", "/etc/cron.hourly", "/etc/cron.daily", "/etc/cron.weekly", "/etc/cron.monthly", "/var/spool/cron"),
     "systemd": ("/etc/systemd", "/usr/lib/systemd", "/lib/systemd", "/run/systemd/system", "/run/systemd/transient",
@@ -69,6 +70,10 @@ DEADLINE_WARNING = "达到时间预算，结果不完整"
 TRANSPORT_KEYS = frozenset({"deadlineMs"})
 WALK_MAX_DEPTH = 12
 WALK_VISIT_LIMIT = 200000
+# 单次谓词页最多访问的对象数。没有匹配时也必须尽快返回可续 Cursor，
+# 否则一次 late-hit 查询会在一个远程调用里扫描完整个 20 万节点上限，
+# 控制端既无法保守预留成本，也无法及时取消。
+ENUMERATE_SCAN_PAGE_LIMIT = 5000
 PSEUDO_FILESYSTEM_ROOTS = frozenset({"/proc", "/sys", "/dev", "/run"})
 PROCESS_CGROUP_MAX_ENTRIES = 32
 PROCESS_CGROUP_MAX_BYTES = 512
@@ -81,7 +86,11 @@ SKIP_LOG_RECORD = "日志行因无法解析时间被跳过"
 JOURNAL_MAX_RECORDS = 5000
 JOURNAL_AUTH_FACILITIES = ("SYSLOG_FACILITY=4", "SYSLOG_FACILITY=10")
 JOURNAL_AUTH_COMMANDS = ("sshd", "sudo", "su", "login", "systemd-logind", "polkitd")
-AUTH_LOG_PATTERNS = ("/var/log/auth.log", "/var/log/auth.log.*", "/var/log/secure", "/var/log/secure-*", "/var/log/secure.*")
+AUTH_LOG_PATTERNS = (
+    "/var/log/auth.log", "/var/log/auth.log.*", "/var/log/secure", "/var/log/secure-*", "/var/log/secure.*",
+    "/var/log/sudo.log", "/var/log/sudo.log.*", "/var/log/sudo-io.log", "/var/log/sudo-io.log.*",
+)
+LOGIN_DATABASE_PATHS = ("/var/log/wtmp", "/var/log/btmp")
 AUDIT_LOG_PATTERNS = ("/var/log/audit/audit.log", "/var/log/audit/audit.log.*")
 SYSTEM_LOG_PATTERNS = (
     "/var/log/syslog", "/var/log/syslog.*", "/var/log/messages", "/var/log/messages-*", "/var/log/messages.*",
@@ -252,6 +261,34 @@ def host_timezone() -> tuple[str, int]:
         name = f"{'+' if offset >= 0 else '-'}{abs(offset) // 3600:02d}:{abs(offset) % 3600 // 60:02d}"
     _HOST_TIMEZONE = (name[:64], offset)
     return _HOST_TIMEZONE
+
+
+def host_init_system() -> str:
+    """Report the real PID 1 identity; a systemctl binary alone does not prove a systemd VM."""
+    try:
+        value = pathlib.Path("/proc/1/comm").read_text("utf-8", errors="replace").strip()
+    except OSError:
+        return "unknown"
+    return value[:64] if re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", value) else "unknown"
+
+
+def host_selinux_mode() -> str:
+    """Prefer the kernel enforcement bit, then the fixed getenforce command if installed."""
+    try:
+        value = pathlib.Path("/sys/fs/selinux/enforce").read_text("ascii", errors="strict").strip()
+        if value == "1":
+            return "Enforcing"
+        if value == "0":
+            return "Permissive"
+    except (OSError, UnicodeError):
+        pass
+    for candidate in ("/usr/sbin/getenforce", "/sbin/getenforce"):
+        if not pathlib.Path(candidate).is_file():
+            continue
+        value = run([candidate], check=False, timeout=2).stdout.strip()
+        if value in {"Enforcing", "Permissive", "Disabled"}:
+            return value
+    return "Unavailable"
 
 
 def local_naive_to_utc(value: dt.datetime) -> dt.datetime | None:
@@ -541,7 +578,10 @@ def log_file_set(patterns: tuple[str, ...], ledger: SkipLedger) -> list[pathlib.
     """Collect a log plus its rotated and gzip siblings, newest first, so rotation is never missed."""
     found: dict[str, float] = {}
     for pattern in patterns:
-        for name in sorted(glob.glob(pattern))[:200]:
+        names = sorted(glob.glob(pattern))
+        if len(names) > 200:
+            ledger.note(f"日志模式 {pattern} 匹配 {len(names)} 个路径，仅检查前 200 个，剩余来源未扫描")
+        for name in names[:200]:
             try:
                 info = pathlib.Path(name).lstat()
             except OSError:
@@ -550,6 +590,8 @@ def log_file_set(patterns: tuple[str, ...], ledger: SkipLedger) -> list[pathlib.
             if stat.S_ISREG(info.st_mode):
                 found[name] = info.st_mtime
     ordered = sorted(found.items(), key=lambda item: item[1], reverse=True)
+    if len(ordered) > LOG_FILE_LIMIT:
+        ledger.note(f"发现 {len(ordered)} 个日志文件，仅扫描 {LOG_FILE_LIMIT} 个，剩余 {len(ordered) - LOG_FILE_LIMIT} 个来源未扫描")
     return [pathlib.Path(name) for name, _ in ordered[:LOG_FILE_LIMIT]]
 
 
@@ -712,10 +754,25 @@ def inventory_web_stacks(_: dict[str, Any]) -> dict[str, Any]:
     binaries = {name: shutil.which(name) for name in ("nginx", "apache2", "httpd", "apachectl", "php", "php-fpm")}
     configs = [path for pattern in ("/etc/nginx/**/*.conf", "/etc/apache2/**/*.conf", "/etc/httpd/**/*.conf", "/etc/php/**/php.ini")
                for path in glob.glob(pattern, recursive=True)[:1000] if pathlib.Path(path).is_file()]
+    effective_configs: list[str] = []
     warnings: list[str] = []
+    nginx_binary = shutil.which("nginx")
+    if nginx_binary:
+        effective = run([nginx_binary, "-T"], timeout=20, check=False)
+        for line in (effective.stdout + "\n" + effective.stderr).splitlines():
+            marker = re.match(r"^# configuration file (/.+):$", line.strip())
+            if marker and pathlib.Path(marker.group(1)).is_file():
+                effective_configs.append(str(pathlib.Path(marker.group(1)).resolve()))
+        if effective.returncode != 0:
+            warnings.append("nginx -T 未完整成功，运行实例配置来源不完整")
+    apache_configs, apache_warnings = apache_runtime_config_paths()
+    effective_configs.extend(apache_configs)
+    warnings.extend(apache_warnings)
     if len(processes) >= 2000:
         warnings.append("Web 进程清单达到上限")
-    return {"items": processes[:2000], "processes": processes[:2000], "binaries": binaries, "configPaths": sorted(set(configs))[:2000],
+    return {"items": processes[:2000], "processes": processes[:2000], "binaries": binaries,
+            "configPaths": sorted(set(configs) | set(effective_configs))[:2000],
+            "effectiveConfigPaths": sorted(set(effective_configs))[:2000],
             "partial": bool(warnings), "warnings": warnings}
 
 
@@ -724,12 +781,15 @@ def web_root_inventory() -> tuple[list[dict[str, Any]], list[str]]:
     warnings: list[str] = []
     directive = re.compile(r"^\s*(root|alias|DocumentRoot)\s+['\"]?([^;'\"\s]+)", re.I)
 
-    sources: list[tuple[str, str, str]] = []
+    sources: list[tuple[str, str, str, bool]] = []
     if shutil.which("nginx"):
         effective = run([shutil.which("nginx") or "nginx", "-T"], timeout=20, check=False)
-        sources.append((effective.stdout + "\n" + effective.stderr, "nginx", "nginx -T"))
+        sources.append((effective.stdout + "\n" + effective.stderr, "nginx", "nginx -T", True))
         if effective.returncode != 0:
             warnings.append("nginx -T 未完整成功，已同时解析固定配置目录")
+    apache_configs, apache_warnings = apache_runtime_config_paths()
+    apache_effective = set(apache_configs)
+    warnings.extend(apache_warnings)
     for expression in ("/etc/nginx/**/*.conf", "/etc/apache2/**/*.conf", "/etc/httpd/**/*.conf"):
         names = glob.glob(expression, recursive=True)
         if len(names) > 1000:
@@ -739,12 +799,19 @@ def web_root_inventory() -> tuple[list[dict[str, Any]], list[str]]:
                 warnings.append(DEADLINE_WARNING)
                 break
             try:
-                sources.append((text_file(pathlib.Path(name), 1024 * 1024), "nginx" if "nginx" in name else "apache", name))
+                resolved_name = str(pathlib.Path(name).resolve(strict=False))
+                sources.append((text_file(pathlib.Path(name), 1024 * 1024), "nginx" if "nginx" in name else "apache", resolved_name, resolved_name in apache_effective))
             except OSError:
                 warnings.append(f"无法读取 Web 配置: {name}")
 
-    for text, server, source in sources:
+    for text, server, source, runtime_effective in sources:
+        current_source = source
         for line in text.splitlines():
+            if runtime_effective:
+                marker = re.match(r"^# configuration file (/.+):$", line.strip())
+                if marker:
+                    current_source = str(pathlib.Path(marker.group(1)).resolve(strict=False))
+                    continue
             match = directive.search(line)
             if not match:
                 continue
@@ -754,13 +821,41 @@ def web_root_inventory() -> tuple[list[dict[str, Any]], list[str]]:
             candidate = pathlib.Path(value).resolve(strict=False)
             if not candidate.is_dir():
                 continue
-            roots[str(candidate)] = {"path": str(candidate), "server": server, "directive": match.group(1).lower(), "configSource": source}
+            value_row = {"path": str(candidate), "server": server, "directive": match.group(1).lower(),
+                         "configSource": current_source, "runtimeEffective": runtime_effective}
+            # 静态目录遍历不得覆盖 nginx -T 已证明的运行态来源。
+            if str(candidate) not in roots or runtime_effective:
+                roots[str(candidate)] = value_row
     for path, server in (("/var/www/html", "common"), ("/usr/local/tomcat/webapps", "tomcat"), ("/opt/tomcat/webapps", "tomcat")):
         candidate = pathlib.Path(path)
         if candidate.is_dir():
             resolved = str(candidate.resolve())
-            roots.setdefault(resolved, {"path": resolved, "server": server, "directive": "fallback", "configSource": "fixed common root"})
+            roots.setdefault(resolved, {"path": resolved, "server": server, "directive": "fallback",
+                                        "configSource": "fixed common root", "runtimeEffective": False})
     return [roots[path] for path in sorted(roots)], warnings
+
+
+def apache_runtime_config_paths() -> tuple[list[str], list[str]]:
+    """Return Apache's effective include graph without treating every file under /etc as active."""
+    binary = next((value for name in ("apache2ctl", "apachectl", "httpd")
+                   if (value := shutil.which(name)) is not None), None)
+    if binary is None:
+        return [], []
+    output = run([binary, "-t", "-D", "DUMP_INCLUDES"], timeout=20, check=False)
+    paths: list[str] = []
+    for raw in (output.stdout + "\n" + output.stderr).splitlines():
+        match = re.search(r"(/[^\s()]+(?:\.conf|/apache2\.conf|/httpd\.conf))\s*$", raw.strip())
+        if match is None:
+            continue
+        candidate = pathlib.Path(match.group(1)).resolve(strict=False)
+        if candidate.is_file():
+            paths.append(str(candidate))
+    if output.returncode != 0:
+        detail = output.stderr.strip() or f"状态 {output.returncode}"
+        return sorted(set(paths)), [f"Apache DUMP_INCLUDES 未完整成功: {detail[:4096]}"]
+    if not paths:
+        return [], ["Apache 未返回可验证的运行态 Include 图"]
+    return sorted(set(paths)), []
 
 
 def search_web_access_log(request: dict[str, Any]) -> dict[str, Any]:
@@ -822,6 +917,11 @@ def run_tomcat_probe(request: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(class_name, str) or not CLASS_NAME.fullmatch(class_name):
             raise HelperError("INVALID_ARGUMENT", "invalid className")
         argv.append(class_name)
+        class_loader_id = request.get("classLoaderId")
+        if class_loader_id is not None:
+            if not isinstance(class_loader_id, str) or not CLASS_LOADER_ID.fullmatch(class_loader_id):
+                raise HelperError("INVALID_ARGUMENT", "invalid classLoaderId")
+            argv.append(class_loader_id)
     # 前面的前置检查负责「目标没有这项能力」（jar/JVM 缺失）；到这里失败的是 Attach 与
     # 探针本身的执行，设计 §5.2 要求它表现为 PROBE_FAILED，而不是被当成能力缺失。
     try:
@@ -971,6 +1071,7 @@ def parse_systemd_unit(path: pathlib.Path) -> dict[str, Any]:
     return {
         "unitType": path.suffix.lstrip("."), "execStart": exec_start,
         "runAs": (values.get("Service.User") or ["root"])[-1],
+        "runAsConfigured": "Service.User" in values,
         "wantedBy": values.get("Install.WantedBy", []),
         "onCalendar": values.get("Timer.OnCalendar", []),
         "environmentFiles": values.get("Service.EnvironmentFile", []),
@@ -1007,7 +1108,9 @@ def list_systemd_units(request: dict[str, Any]) -> dict[str, Any]:
                 continue
             seen.add(str(resolved))
             try:
-                enabled_links = [str(link) for link in pathlib.Path("/etc/systemd").rglob(path.name)
+                enabled_links = [str(link) for enabled_root in roots
+                                 if path_kind(enabled_root, ledger, follow=True) == "directory"
+                                 for link in enabled_root.rglob(path.name)
                                  if path_kind(link, ledger) == "symlink"][:20]
                 drop_ins: list[dict[str, Any]] = []
                 dropin_dirs = [resolved.parent / f"{path.name}.d"]
@@ -1329,15 +1432,46 @@ def process_scope_metadata(pid: int) -> dict[str, Any]:
     return {**links, "namespaces": namespaces, "cgroups": cgroups, "cgroupsTruncated": cgroups_truncated}
 
 
-def stable_process(pid: int, digest_cache: dict[tuple[int, int], str] | None = None) -> dict[str, Any]:
+def process_maps_summary(pid: int) -> dict[str, Any]:
+    executable_paths: list[str] = []
+    deleted_executable_mappings = 0
+    scanned = 0
+    partial = False
+    try:
+        with pathlib.Path(f"/proc/{pid}/maps").open("r", encoding="utf-8", errors="replace") as handle:
+            for line in handle:
+                scanned += 1
+                if scanned > 4096:
+                    partial = True
+                    break
+                parts = line.rstrip().split(maxsplit=5)
+                if len(parts) < 2 or "x" not in parts[1]:
+                    continue
+                path = parts[5] if len(parts) == 6 and parts[5].startswith("/") else ""
+                if not path:
+                    continue
+                if path.endswith(" (deleted)"):
+                    deleted_executable_mappings += 1
+                if len(executable_paths) < 64:
+                    executable_paths.append(path[:4096])
+                else:
+                    partial = True
+    except OSError:
+        partial = True
+    return {"scannedMappings": min(scanned, 4096), "executablePaths": sorted(set(executable_paths)),
+            "deletedExecutableMappings": deleted_executable_mappings, "partial": partial}
+
+
+def stable_process(pid: int, digest_cache: dict[tuple[int, int], str] | None = None,
+                   include_hash: bool = True) -> dict[str, Any]:
     before = proc_stat_fields(pid)
     proc_exe = pathlib.Path(f"/proc/{pid}/exe")
     try:
         info = proc_exe.stat()
         raw_path = os.readlink(proc_exe)
         key = (info.st_dev, info.st_ino)
-        digest = digest_cache.get(key) if digest_cache is not None else None
-        if digest is None:
+        digest = digest_cache.get(key) if include_hash and digest_cache is not None else None
+        if include_hash and digest is None:
             digest = sha256_file(proc_exe)
             if digest_cache is not None:
                 digest_cache[key] = digest
@@ -1360,12 +1494,11 @@ def stable_process(pid: int, digest_cache: dict[tuple[int, int], str] | None = N
         command = redact_secret_text(pathlib.Path(f"/proc/{pid}/cmdline").read_bytes()[:65536].replace(b"\0", b" ").decode("utf-8", errors="replace"), 4096).strip()
     except OSError:
         command = before["comm"]
-    return {
+    result = {
         "bootId": boot_id(),
         "pid": pid,
         "startTicks": before["startTicks"],
         "exeInode": str(info.st_ino),
-        "exeSha256": digest,
         "ppid": before["ppid"],
         "state": before["state"],
         "comm": before["comm"],
@@ -1380,6 +1513,9 @@ def stable_process(pid: int, digest_cache: dict[tuple[int, int], str] | None = N
         "environment": process_environment_metadata(pid),
         **scope,
     }
+    if digest is not None:
+        result["exeSha256"] = digest
+    return result
 
 
 def process_request(request: dict[str, Any]) -> dict[str, Any]:
@@ -1390,20 +1526,19 @@ def process_request(request: dict[str, Any]) -> dict[str, Any]:
     digest = request.get("exeSha256")
     if not isinstance(expected_boot, str) or not re.fullmatch(r"[0-9a-fA-F-]{36}", expected_boot) or not isinstance(start_ticks, str) or not start_ticks.isdigit():
         raise HelperError("INVALID_ARGUMENT", "invalid stable process identity")
-    if not isinstance(inode, str) or not inode.isdigit() or not isinstance(digest, str) or not SHA256.fullmatch(digest):
-        raise HelperError("INVALID_ARGUMENT", "invalid stable process executable identity")
+    if inode is not None and (not isinstance(inode, str) or not inode.isdigit()):
+        raise HelperError("INVALID_ARGUMENT", "invalid stable process executable inode")
+    if digest is not None and (not isinstance(digest, str) or not SHA256.fullmatch(digest)):
+        raise HelperError("INVALID_ARGUMENT", "invalid stable process executable digest")
     current = stable_process(pid)
-    if any((
-        current["bootId"] != expected_boot.lower(),
-        current["startTicks"] != start_ticks,
-        current["exeInode"] != inode,
-        current["exeSha256"] != digest,
-    )):
+    if (current["bootId"] != expected_boot.lower() or current["startTicks"] != start_ticks
+            or inode is not None and current["exeInode"] != inode
+            or digest is not None and current["exeSha256"] != digest):
         raise HelperError("EVIDENCE_COLLECTION", "stable process identity changed; refusing PID reuse")
     return current
 
 
-def enumerate_stable_processes(maximum: int) -> tuple[list[dict[str, Any]], list[str], bool]:
+def enumerate_stable_processes(maximum: int, include_hash: bool = True) -> tuple[list[dict[str, Any]], list[str], bool]:
     items: list[dict[str, Any]] = []
     warnings: list[str] = []
     cache: dict[tuple[int, int], str] = {}
@@ -1415,7 +1550,7 @@ def enumerate_stable_processes(maximum: int) -> tuple[list[dict[str, Any]], list
         if deadline_exceeded():
             return items, warnings[:100] + [DEADLINE_WARNING], True
         try:
-            record = stable_process(int(entry.name), cache)
+            record = stable_process(int(entry.name), cache, include_hash)
         except HelperError as exc:
             # Kernel threads and racing processes are expected, but inability to collect is explicit.
             warnings.append(f"PID {entry.name}: {str(exc)}")
@@ -1426,6 +1561,62 @@ def enumerate_stable_processes(maximum: int) -> tuple[list[dict[str, Any]], list
     if truncated:
         warnings.append(f"{truncated} 个进程的 cgroups 或环境变量名列表因单条体积上限被截断")
     return items, warnings[:100], bool(warnings)
+
+
+def v2_process_inventory(params: dict[str, Any], start_after_pid: int, maximum: int,
+                         include_hash: bool, upper_bound: int | None = None) -> tuple[list[dict[str, Any]], list[str], bool, dict[str, Any]]:
+    """Keyset-page volatile processes without a hidden 5000-process ceiling.
+
+    The cursor stores the last visited PID rather than an array offset. Process creation and
+    exit can still make a multi-call walk best effort, but deleting an earlier PID no longer
+    shifts every later row and silently skips one. Stable boot/pid/startTicks identity is
+    re-read for every returned row.
+    """
+    rows: list[dict[str, Any]] = []
+    warnings: list[str] = []
+    cache: dict[tuple[int, int], str] = {}
+    scanned = 0
+    matched = 0
+    next_pid = start_after_pid
+    complete = True
+    all_entries = [item for item in pathlib.Path("/proc").iterdir() if item.name.isdigit()]
+    if upper_bound is None:
+        upper_bound = max((int(item.name) for item in all_entries), default=start_after_pid)
+    proc_entries = sorted((item for item in all_entries
+                           if start_after_pid < int(item.name) <= upper_bound),
+                          key=lambda item: int(item.name))
+    for entry in proc_entries:
+        if scanned >= ENUMERATE_SCAN_PAGE_LIMIT:
+            complete = False
+            break
+        if deadline_exceeded():
+            warnings.append(DEADLINE_WARNING)
+            complete = False
+            break
+        scanned += 1
+        next_pid = int(entry.name)
+        try:
+            value = stable_process(next_pid, cache, include_hash)
+        except HelperError as exc:
+            warnings.append(f"PID {entry.name}: {str(exc)}")
+            continue
+        row = {**value, "exe": value.get("exePath"), "command": value.get("command", value.get("comm"))}
+        if params.get("predicate") is not None and not v2_predicate("process", params.get("predicate"), row):
+            continue
+        matched += 1
+        rows.append(row)
+        if len(rows) >= maximum:
+            complete = False
+            break
+    if len(proc_entries) == scanned:
+        complete = True
+    return rows, warnings[:100], bool(warnings), {
+        "scannedCount": scanned,
+        "matchedCount": matched,
+        "nextOffset": next_pid,
+        "upperBound": upper_bound,
+        "complete": complete,
+    }
 
 
 def read_global_connections(maximum: int) -> tuple[list[dict[str, Any]], list[str], bool]:
@@ -1892,6 +2083,19 @@ def query_auth_events(request: dict[str, Any]) -> dict[str, Any]:
             absorb(record, source)
             if limited:
                 break
+    binary_events, binary_warnings, binary_sources = binary_login_events(cutoff, ceiling - len(collected))
+    sources.extend(binary_sources)
+    warnings.extend(binary_warnings)
+    for moment, event in binary_events:
+        if limited:
+            break
+        key = (str(event["sourceId"]), str(event["cursor"]), "", "")
+        if key in seen:
+            continue
+        seen.add(key)
+        collected.append((moment, event))
+        if len(collected) >= ceiling:
+            limited = True
     if not sources:
         warnings.append("认证事件数据源不可用：journald 与 auth.log/secure 均不存在，本次结果不代表无异常")
     if limited:
@@ -1903,6 +2107,65 @@ def query_auth_events(request: dict[str, Any]) -> dict[str, Any]:
         warnings.append("认证事件达到配置上限")
     return {"items": items, "partial": bool(warnings) or ledger.partial,
             "warnings": (warnings + ledger.warnings())[:200], "sources": sources[:LOG_FILE_LIMIT + 1]}
+
+
+def binary_login_events(cutoff: dt.datetime, maximum: int) -> tuple[list[tuple[dt.datetime, dict[str, Any]]], list[str], list[str]]:
+    """Read util-linux wtmp/btmp through fixed argv and project stable auth events."""
+    if maximum <= 0:
+        return [], ["登录数据库采集达到内部上限"], []
+    binary = shutil.which("last")
+    present = [pathlib.Path(value) for value in LOGIN_DATABASE_PATHS if pathlib.Path(value).is_file()]
+    if not present:
+        return [], [], []
+    if binary is None:
+        return [], ["wtmp/btmp 存在但 util-linux last 不可用"], [log_source_key(path) for path in present]
+    rows: list[tuple[dt.datetime, dict[str, Any]]] = []
+    warnings: list[str] = []
+    sources: list[str] = []
+    stamp = re.compile(r"\b(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:[+-]\d{2}:?\d{2}|Z))\b")
+    for path in present:
+        source = log_source_key(path)
+        sources.append(source)
+        try:
+            output = run([binary, "--time-format", "iso", "-w", "-f", source], timeout=20, check=False)
+        except HelperError as exc:
+            warnings.append(f"登录数据库读取失败: {source}: {exc.code}")
+            continue
+        if output.returncode != 0:
+            warnings.append(f"登录数据库读取失败: {source}: last 返回 {output.returncode}")
+            continue
+        failed = path.name == "btmp"
+        for line in output.stdout.splitlines():
+            found = stamp.search(line)
+            if found is None:
+                continue
+            moment = parse_iso_time(found.group(1))
+            prefix = line[:found.start()].split()
+            if moment is None or moment < cutoff or len(prefix) < 2:
+                continue
+            username = prefix[0]
+            if USERNAME.fullmatch(username) is None or username in {"reboot", "shutdown", "runlevel"}:
+                continue
+            address = None
+            for candidate in reversed(prefix[2:]):
+                try:
+                    socket.inet_pton(socket.AF_INET6 if ":" in candidate else socket.AF_INET, candidate)
+                    address = candidate
+                    break
+                except OSError:
+                    continue
+            timestamp = utc_iso(moment)
+            event_type = "authentication_failure" if failed else "session_login"
+            rows.append((moment, {
+                "timestamp": timestamp, "eventType": event_type, "username": username,
+                "sourceAddress": address, "program": path.name, "success": not failed,
+                "source": source, "sourceId": log_source_id(source),
+                "cursor": log_event_cursor(source, timestamp, path.name, line),
+            }))
+            if len(rows) >= maximum:
+                warnings.append("wtmp/btmp 登录事件达到内部上限")
+                return rows, warnings, sources
+    return rows, warnings, sources
 
 
 def query_log_events(request: dict[str, Any]) -> dict[str, Any]:
@@ -1975,6 +2238,102 @@ def query_log_events(request: dict[str, Any]) -> dict[str, Any]:
         warnings.append("通用日志事件达到配置上限")
     return {"items": items, "partial": bool(warnings) or ledger.partial,
             "warnings": (warnings + ledger.warnings())[:200], "sources": sources[:LOG_FILE_LIMIT + 1]}
+
+
+def v2_log_event_inventory(params: dict[str, Any], start_offset: int, maximum: int,
+                           predicate: dict[str, Any] | None) -> tuple[list[dict[str, Any]], list[str], bool, dict[str, Any]]:
+    """Page log events without first truncating history to a fixed result window."""
+    hours = safe_int(params.get("sinceHours", 24), 1, 24 * 365, "sinceHours")
+    sort_values = params.get("sort", [])
+    if sort_values not in ([], None):
+        raise HelperError("INVALID_ARGUMENT", "large log scans only support collector traversal order")
+    cutoff = now_utc() - dt.timedelta(hours=hours)
+    ledger = SkipLedger()
+    warnings: list[str] = []
+    rows: list[dict[str, Any]] = []
+    seen: set[tuple[int, str, str]] = set()
+    logical_offset = 0
+    scanned = 0
+    matched = 0
+    complete = True
+    stopped = False
+    sources_found = False
+
+    def absorb(record: dict[str, Any], source: str) -> None:
+        nonlocal logical_offset, scanned, matched, complete, stopped
+        if stopped or record["timestamp"] < cutoff:
+            return
+        key = log_record_key(record)
+        if key in seen:
+            return
+        seen.add(key)
+        if logical_offset < start_offset:
+            logical_offset += 1
+            return
+        if scanned >= ENUMERATE_SCAN_PAGE_LIMIT or len(rows) >= maximum:
+            complete = False
+            stopped = True
+            return
+        raw_message = str(record.get("message", ""))
+        timestamp = utc_iso(record["timestamp"])
+        metadata = {"pid": record.get("pid"), "auditType": record.get("auditType")}
+        row = {
+            "sourceId": log_source_id(source),
+            "cursor": log_event_cursor(source, timestamp, record.get("program"), raw_message),
+            "timestamp": timestamp,
+            "program": record.get("program"),
+            "message": redact_secret_text(raw_message, 8192),
+            "fields": {name: value for name, value in metadata.items() if value not in {None, ""}},
+        }
+        logical_offset += 1
+        scanned += 1
+        if predicate is None or v2_predicate("log_event", predicate, row):
+            rows.append(row)
+            matched += 1
+        if scanned >= ENUMERATE_SCAN_PAGE_LIMIT or len(rows) >= maximum:
+            complete = False
+            stopped = True
+
+    if journal_binary() is not None:
+        sources_found = True
+        for record in journal_records(cutoff, JOURNAL_MAX_RECORDS, (), ledger):
+            absorb(record, JOURNAL_SOURCE)
+            if stopped:
+                break
+    if not stopped:
+        for path in log_file_set((*SYSTEM_LOG_PATTERNS, *AUTH_LOG_PATTERNS), ledger):
+            sources_found = True
+            if deadline_exceeded():
+                ledger.expire()
+                complete = scanned == 0
+                break
+            source = log_source_key(path)
+            try:
+                reference = dt.datetime.fromtimestamp(path.stat().st_mtime, dt.timezone.utc)
+            except OSError:
+                ledger.add(SKIP_UNREADABLE)
+                continue
+            for line in bounded_log_lines(path, ledger):
+                record = parse_log_record(line, reference)
+                if record is None:
+                    ledger.add(SKIP_LOG_RECORD)
+                    continue
+                absorb(record, source)
+                if stopped:
+                    break
+            if stopped:
+                break
+            if ledger.expired:
+                complete = scanned == 0
+                break
+    if not sources_found:
+        warnings.append("通用日志数据源不可用：journald 与 syslog/messages 均不存在")
+    return rows, (warnings + ledger.warnings())[:200], bool(warnings) or ledger.partial, {
+        "scannedCount": scanned,
+        "matchedCount": matched,
+        "nextOffset": start_offset + scanned,
+        "complete": complete,
+    }
 
 
 def audit_field(text: str, name: str) -> str | None:
@@ -2144,8 +2503,8 @@ def disable_account(request: dict[str, Any]) -> dict[str, Any]:
 # v2 只暴露通用取证原语。下方适配器复用 collector 函数，但不会把旧的检测问题、
 # suspicious 标签或 operation map 暴露给模型。
 V2_NAMESPACE_FIELDS: dict[str, tuple[str, ...]] = {
-    "host": ("bootId", "hostname", "os", "release", "architecture", "timezone", "observedAt"),
-    "process": ("bootId", "pid", "startTicks", "ppid", "uid", "username", "comm", "exe", "exeInode", "exeSha256", "command", "state", "startedAt"),
+    "host": ("bootId", "hostname", "os", "distribution", "distributionVersion", "release", "architecture", "timezone", "initSystem", "selinuxMode", "observedAt"),
+    "process": ("bootId", "pid", "startTicks", "ppid", "uid", "username", "comm", "exe", "exeDeleted", "exeSize", "exeInode", "exeSha256", "command", "launcherPath", "cwd", "root", "environment", "namespaces", "cgroups", "cgroupsTruncated", "mapsSummary", "state", "startedAt"),
     "socket": ("protocol", "localAddress", "localPort", "remoteAddress", "remotePort", "state", "inode", "pid"),
     "file": ("mountId", "device", "inode", "path", "canonicalPath", "kind", "size", "mode", "uid", "gid", "mtime", "sha256", "contentClass", "content", "baseline", "baselineStatus"),
     "account": ("uid", "username", "gid", "home", "shell", "groups", "locked", "passwordHash"),
@@ -2153,7 +2512,7 @@ V2_NAMESPACE_FIELDS: dict[str, tuple[str, ...]] = {
     "delegation_rule": ("mechanism", "sourceDigest", "line", "ruleDigest", "source", "effect", "subject", "runAs", "statement"),
     "ssh_trust_config": ("scope", "directive", "valueDigest", "value", "source", "effective"),
     "cron_entry": ("source", "line", "digest", "schedule", "user", "command"),
-    "unit": ("name", "fragmentDigest", "path", "enabled", "active", "execStart", "user"),
+    "unit": ("scope", "ownerUid", "name", "fragmentDigest", "path", "enabled", "active", "generated", "transient", "execStart", "user"),
     "persistence": ("kind", "sourceDigest", "source", "user", "command", "enabled"),
     "module": ("name", "address", "size", "path", "sha256"),
     "log_source": ("sourceId", "generation", "kind", "path", "firstEventAt", "lastEventAt"),
@@ -2163,14 +2522,15 @@ V2_NAMESPACE_FIELDS: dict[str, tuple[str, ...]] = {
     "web_stack": ("kind", "instanceId", "version", "pid", "configPaths"),
     "web_root": ("mountId", "device", "inode", "path", "server", "effective"),
     "jvm": ("bootId", "pid", "startTicks", "version", "command", "attachSupported", "container"),
-    "java_component": ("jvmDigest", "componentKind", "name", "className", "mappings"),
+    "java_component": ("jvmDigest", "context", "componentKind", "name", "className", "classLoaderId", "mappings"),
     "class": ("jvmDigest", "className", "loaderId", "codeSource", "bytecodeSha256", "modifiable"),
     "package": ("manager", "name", "version", "architecture", "installedAt", "integrity"),
 }
 V2_RELATIONS: dict[str, tuple[str, ...]] = {
-    "process": ("parent", "children", "opens", "connects"), "socket": ("owned_by",),
+    "process": ("parent", "children", "opens", "connects", "executable", "command_file", "started_by"), "socket": ("owned_by",),
     "file": ("opened_by", "referenced_by_persistence", "requested_in"),
     "account": ("authorized_key", "login_event"), "ssh_key": ("owned_by",),
+    "ssh_trust_config": ("references",),
     "cron_entry": ("executes",), "unit": ("executes",), "persistence": ("executes",),
     "log_source": ("contains",), "web_stack": ("serves_root",), "web_root": ("served_by",),
     "package": ("owns_file",),
@@ -2180,18 +2540,18 @@ V2_PROBE_RELATIONS: dict[str, tuple[str, ...]] = {
     "class": ("loaded_by",),
 }
 V2_IDENTITY_FIELDS: dict[str, tuple[str, ...]] = {
-    "host": ("bootId",), "process": ("bootId", "pid", "startTicks", "exeInode", "exeSha256"),
+    "host": ("bootId",), "process": ("bootId", "pid", "startTicks"),
     "socket": ("protocol", "localAddress", "localPort", "remoteAddress", "remotePort", "inode"),
     "file": ("mountId", "device", "inode"), "account": ("uid", "username"),
     "ssh_key": ("fingerprint", "ownerUid"), "cron_entry": ("source", "line", "digest"),
     "delegation_rule": ("mechanism", "sourceDigest", "line", "ruleDigest"),
     "ssh_trust_config": ("scope", "directive", "valueDigest"),
-    "unit": ("name", "fragmentDigest"), "persistence": ("kind", "sourceDigest"),
+    "unit": ("scope", "ownerUid", "name", "fragmentDigest"), "persistence": ("kind", "sourceDigest"),
     "module": ("name", "address"), "log_source": ("sourceId", "generation"),
     "log_event": ("sourceId", "cursor"), "auth_event": ("sourceId", "cursor"),
     "exec_event": ("sourceId", "cursor"), "web_stack": ("kind", "instanceId"),
     "web_root": ("mountId", "device", "inode"), "jvm": ("bootId", "pid", "startTicks"),
-    "java_component": ("jvmDigest", "componentKind", "name"),
+    "java_component": ("jvmDigest", "context", "componentKind", "name", "classLoaderId"),
     "class": ("jvmDigest", "className", "loaderId"),
     "package": ("manager", "name", "version", "architecture"),
 }
@@ -2218,6 +2578,12 @@ V2_NAMESPACE_VERBS: dict[str, tuple[str, ...]] = {
     "socket": ("enumerate", "relate"),
     "file": ("enumerate", "project", "read", "match", "verify", "collect"),
     "account": ("enumerate", "project"),
+    "ssh_key": ("enumerate", "project", "relate"),
+    "delegation_rule": ("enumerate", "project"),
+    "ssh_trust_config": ("enumerate", "project"),
+    "cron_entry": ("enumerate", "project", "relate"),
+    "unit": ("enumerate", "project", "relate"),
+    "persistence": ("enumerate", "project", "relate"),
     "jvm": ("enumerate", "probe"),
     "java_component": (), "class": (),
 }
@@ -2309,18 +2675,21 @@ def v2_source_generation(namespace: str, params: dict[str, Any]) -> str:
     return hashlib.sha256(json.dumps(values, separators=(",", ":")).encode()).hexdigest()
 
 
-def v2_encode_cursor(namespace: str, offset: int, binding: str, source_generation: str) -> str:
+def v2_encode_cursor(namespace: str, offset: int, binding: str, source_generation: str,
+                     extra: dict[str, Any] | None = None) -> str:
     body = {"v": 1, "namespace": namespace, "offset": offset, "binding": binding, "sourceGeneration": source_generation}
+    if extra:
+        body.update(extra)
     body["integrity"] = hashlib.sha256(json.dumps(body, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
     return base64.urlsafe_b64encode(json.dumps(body, sort_keys=True, separators=(",", ":")).encode()).decode().rstrip("=")
 
 
 def v2_cursor_start(namespace: str, params: dict[str, Any], epoch_id: str,
-                    tolerate_source_change: bool = False) -> tuple[int, str, str, bool]:
+                    tolerate_source_change: bool = False) -> tuple[int, str, str, bool, dict[str, Any]]:
     binding, generation = v2_cursor_binding(params, epoch_id), v2_source_generation(namespace, params)
     token = params.get("cursor")
     if token is None:
-        return 0, binding, generation, False
+        return 0, binding, generation, False, {}
     if not isinstance(token, str) or not 1 <= len(token) <= 4096:
         raise HelperError("INVALID_ARGUMENT", "invalid opaque cursor")
     try:
@@ -2337,7 +2706,7 @@ def v2_cursor_start(namespace: str, params: dict[str, Any], epoch_id: str,
     source_changed = payload.get("sourceGeneration") != generation
     if source_changed and not tolerate_source_change:
         raise HelperError("SOURCE_CHANGED", "cursor source generation changed")
-    return safe_int(payload.get("offset"), 0, 10_000_000, "cursor offset"), binding, generation, source_changed
+    return safe_int(payload.get("offset"), 0, 10_000_000, "cursor offset"), binding, generation, source_changed, payload
 
 
 def v2_cost(started: float, nodes: int = 0, byte_count: int = 0, probe_calls: int = 0) -> dict[str, int]:
@@ -2365,10 +2734,11 @@ def v2_capabilities() -> dict[str, Any]:
             pass
         else:
             matchers.append("yara")
-    probes = ["jvm.tomcat.inventory", "jvm.class.inspect"] if probe_ready else []
+    probes = ["jvm.tomcat.inventory", "jvm.class.inspect", "jvm.class.dump"] if probe_ready else []
     return {
         "protocolVersion": PROTOCOL_VERSION, "manifestVersion": MANIFEST_VERSION,
-        "helper": {"name": "huntwarden-helper-v2", "version": HELPER_VERSION},
+        "helper": {"name": "huntwarden-helper-v2", "version": HELPER_VERSION,
+                   "sha256": sha256_file(pathlib.Path(__file__).resolve())},
         "namespaces": available, "matchers": matchers,
         "probes": probes,
         "verbs": ["enumerate", "project", "read", "match", "relate", "verify", "collect", "probe"],
@@ -2599,26 +2969,62 @@ def v2_scope_root(params: dict[str, Any]) -> pathlib.Path:
     return root
 
 
-def v2_file_inventory(params: dict[str, Any], maximum: int) -> tuple[list[dict[str, Any]], list[str], bool]:
+def v2_file_inventory(params: dict[str, Any], start_offset: int, maximum: int) -> tuple[list[dict[str, Any]], list[str], bool, dict[str, Any]]:
     root = v2_scope_root(params)
     ledger = SkipLedger()
     rows: list[dict[str, Any]] = []
-    for directory, files in bounded_walk(root, ledger):
+    visited = 0
+    scanned = 0
+    matched = 0
+    complete = True
+    stop = False
+    try:
+        root_info = root.stat()
+    except OSError:
+        ledger.add(SKIP_UNREADABLE)
+        return rows, ledger.warnings(), True, {"scannedCount": 0, "matchedCount": 0, "nextOffset": start_offset, "complete": True}
+    base = len(root.parts)
+    for directory, directories, files in os.walk(root, followlinks=False, onerror=lambda _error: ledger.add(SKIP_UNREADABLE)):
+        if deadline_exceeded():
+            ledger.expire(); complete = False; break
+        current = pathlib.Path(directory)
+        depth = len(current.parts) - base
+        keep: list[str] = []
+        for name in sorted(directories):
+            child = current / name
+            try:
+                info = child.lstat()
+            except OSError:
+                ledger.add(SKIP_UNREADABLE); continue
+            if depth + 1 > WALK_MAX_DEPTH: ledger.add(SKIP_DEPTH)
+            elif stat.S_ISLNK(info.st_mode): ledger.add(SKIP_SYMLINK)
+            elif info.st_dev != root_info.st_dev or str(child) in PSEUDO_FILESYSTEM_ROOTS: ledger.add(SKIP_BOUNDARY)
+            else: keep.append(name)
+        directories[:] = keep
         for filename in sorted(files):
-            path = directory / filename
+            visited += 1
+            if visited <= start_offset:
+                continue
+            if scanned >= min(WALK_VISIT_LIMIT, ENUMERATE_SCAN_PAGE_LIMIT):
+                complete = False; stop = True; break
+            scanned += 1
+            path = current / filename
             try:
                 info = path.lstat()
                 if not stat.S_ISREG(info.st_mode):
                     continue
                 facts = v2_file_fields(path)
                 if params.get("predicate") is None or v2_predicate("file", params.get("predicate"), facts):
+                    matched += 1
                     rows.append(facts)
             except OSError:
                 ledger.add(SKIP_UNREADABLE)
             if len(rows) >= maximum:
-                ledger.note("文件枚举达到结果上限")
-                return rows, ledger.warnings(), True
-    return rows, ledger.warnings(), ledger.partial
+                complete = False; stop = True; break
+        if stop:
+            break
+    next_offset = start_offset + scanned
+    return rows, ledger.warnings(), ledger.partial, {"scannedCount": scanned, "matchedCount": matched, "nextOffset": next_offset, "complete": complete}
 
 
 def v2_web_stack_rows() -> tuple[list[dict[str, Any]], list[str], bool]:
@@ -2634,7 +3040,18 @@ def v2_web_stack_rows() -> tuple[list[dict[str, Any]], list[str], bool]:
         # 未采集到的字段一律不产出：v2_observation 会把它写成 unavailableFields，
         # enumerate 再转成 FIELD_UNAVAILABLE gap。产出 "unknown" 之类占位值会让
         # 控制端把「没测到」当成「已观察到的值」。
-        rows.append({"kind": kind, "instanceId": instance, "pid": pid, "configPaths": config_paths})
+        command_tokens: list[str]
+        try:
+            command_tokens = shlex.split(command, comments=False, posix=True)
+        except ValueError:
+            command_tokens = []
+        custom_config = next((command_tokens[index + 1] for index, token in enumerate(command_tokens[:-1]) if token in {"-c", "-f", "--conf-path"}), None)
+        if custom_config is None:
+            custom_config = next((token.split("=", 1)[1] for token in command_tokens if token.startswith("--conf-path=")), None)
+        row = {"kind": kind, "instanceId": instance, "pid": pid, "configPaths": config_paths,
+               "_command": command, "_customConfig": custom_config,
+               "_effectiveConfigPaths": inventory.get("effectiveConfigPaths", [])}
+        rows.append(row)
     return rows, list(inventory.get("warnings", [])), bool(inventory.get("partial"))
 
 
@@ -2730,7 +3147,7 @@ def v2_ssh_key_rows(maximum: int) -> tuple[list[dict[str, Any]], list[str], bool
 
 
 def v2_unit_rows(maximum: int) -> tuple[list[dict[str, Any]], list[str], bool]:
-    output = list_systemd_units({"maxItems": maximum, "includeUserScope": False})
+    output = list_systemd_units({"maxItems": maximum, "includeUserScope": True})
     active_names: set[str] | None = None
     if shutil.which("systemctl"):
         runtime = run(["systemctl", "list-units", "--all", "--no-legend", "--plain"], check=False)
@@ -2740,14 +3157,50 @@ def v2_unit_rows(maximum: int) -> tuple[list[dict[str, Any]], list[str], bool]:
     rows: list[dict[str, Any]] = []
     for item in output.get("items", []):
         path = str(item.get("path", ""))
-        exec_start = item.get("execStart", [])
+        exec_start = list(item.get("execStart", [])) if isinstance(item.get("execStart"), list) else []
+        run_as = str(item.get("runAs", "root"))
+        dropin_digests: list[str] = []
+        drop_ins = item.get("dropIns", [])
+        if isinstance(drop_ins, list):
+            for drop_in in sorted((value for value in drop_ins if isinstance(value, dict)), key=lambda value: str(value.get("path", ""))):
+                digest = drop_in.get("sha256")
+                if isinstance(digest, str):
+                    dropin_digests.append(digest)
+                values = drop_in.get("execStart", [])
+                if isinstance(values, list):
+                    for value in values:
+                        if str(value) == "":
+                            exec_start = []
+                        else:
+                            exec_start.append(str(value))
+                if drop_in.get("runAsConfigured"):
+                    run_as = str(drop_in.get("runAs", "root")) or "root"
         name = str(item.get("unit", pathlib.Path(path).name))
-        row = {"name": name,
-                     "fragmentDigest": str(item.get("sha256", "")), "path": path,
+        scope = str(item.get("scope", "system"))
+        owner_uid = 0
+        if scope == "user":
+            owner_uid = next((account.pw_uid for account in interactive_accounts()
+                              if path == account.pw_dir or path.startswith(account.pw_dir.rstrip("/") + "/")), -1)
+            if owner_uid < 0:
+                try:
+                    owner_uid = pathlib.Path(path).stat().st_uid
+                except OSError:
+                    warnings = list(output.get("warnings", []))
+                    warnings.append(f"无法确定用户 Unit 所有者: {path}")
+                    output["warnings"] = warnings
+                    output["partial"] = True
+                    continue
+        fragment_digest = hashlib.sha256(json.dumps({
+            "fragment": item.get("sha256", ""), "dropIns": dropin_digests,
+            "execStart": exec_start, "user": run_as,
+        }, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+        row = {"scope": scope, "ownerUid": owner_uid, "name": name,
+                     "fragmentDigest": fragment_digest, "path": path,
                      "enabled": bool(item.get("enabled")),
+                     "generated": bool(item.get("generated")), "transient": bool(item.get("transient")),
                      "execStart": "\n".join(str(value) for value in exec_start) if isinstance(exec_start, list) else str(exec_start),
-                     "user": str(item.get("runAs", "root"))}
-        if active_names is not None:
+                     "user": run_as}
+        if active_names is not None and scope == "system":
             row["active"] = name in active_names
         rows.append(row)
     return rows, list(output.get("warnings", [])), bool(output.get("partial"))
@@ -2759,7 +3212,7 @@ def v2_persistence_rows(maximum: int) -> tuple[list[dict[str, Any]], list[str], 
     partial = False
     for collector in (list_extended_persistence, list_shell_startup_files):
         remaining = max(1, maximum - len(rows))
-        output = collector({"maxItems": remaining, "includeUserScope": False})
+        output = collector({"maxItems": remaining, "includeUserScope": True})
         warnings.extend(output.get("warnings", []))
         partial = partial or bool(output.get("partial"))
         for item in output.get("items", []):
@@ -2812,7 +3265,7 @@ def v2_journal_source_row() -> dict[str, Any] | None:
 
 
 def v2_log_source_rows(maximum: int) -> tuple[list[dict[str, Any]], list[str], bool]:
-    paths = sorted({path for pattern in (*SYSTEM_LOG_PATTERNS, *AUTH_LOG_PATTERNS, *AUDIT_LOG_PATTERNS, *WEB_ACCESS_LOG_PATTERNS) for path in glob.glob(pattern)})
+    paths = sorted({path for pattern in (*SYSTEM_LOG_PATTERNS, *AUTH_LOG_PATTERNS, *AUDIT_LOG_PATTERNS, *WEB_ACCESS_LOG_PATTERNS, *LOGIN_DATABASE_PATHS) for path in glob.glob(pattern)})
     rows: list[dict[str, Any]] = []; warnings: list[str] = []
     # An absent journal store is not a collection defect: the source simply does not exist on
     # this host. Reporting it as a warning would mark every non-systemd target PARTIAL.
@@ -2825,7 +3278,7 @@ def v2_log_source_rows(maximum: int) -> tuple[list[dict[str, Any]], list[str], b
             info = path.stat()
             if not stat.S_ISREG(info.st_mode) or path.is_symlink():
                 continue
-            kind = "audit" if "/audit/" in raw else "web_access" if "access" in path.name else "auth" if path.name.startswith(("auth", "secure")) else "system"
+            kind = "login_db" if path.name in {"wtmp", "btmp"} else "audit" if "/audit/" in raw else "web_access" if "access" in path.name else "auth" if path.name.startswith(("auth", "secure", "sudo")) else "system"
             source = log_source_key(path)
             generation = hashlib.sha256(f"{info.st_dev}:{info.st_ino}:{info.st_mtime_ns}:{info.st_size}".encode()).hexdigest()
             rows.append({"sourceId": log_source_id(source), "generation": generation, "kind": kind, "path": source})
@@ -2967,27 +3420,108 @@ V2_SSH_TRUST_DIRECTIVES = frozenset({
 })
 
 
+def v2_sshd_contexts(maximum: int = 32) -> tuple[list[tuple[str, str, str]], list[str], bool]:
+    """Build bounded Match contexts only from already observed SSH authentication events."""
+    output = query_auth_events({"sinceHours": 8760, "maxEvents": min(1000, max(32, maximum * 8))})
+    contexts: list[tuple[str, str, str]] = []
+    seen: set[tuple[str, str, str]] = set()
+    hostname = platform.node()[:253] or "localhost"
+    for event in reversed(output.get("items", [])):
+        if event.get("program") != "sshd":
+            continue
+        username, address = event.get("username"), event.get("sourceAddress")
+        if not isinstance(username, str) or USERNAME.fullmatch(username) is None:
+            continue
+        if not isinstance(address, str):
+            continue
+        try:
+            socket.inet_pton(socket.AF_INET6 if ":" in address else socket.AF_INET, address)
+        except OSError:
+            continue
+        context = (username, address, hostname)
+        if context in seen:
+            continue
+        seen.add(context)
+        contexts.append(context)
+        if len(contexts) >= maximum:
+            break
+    warnings = list(output.get("warnings", []))
+    if len(contexts) >= maximum:
+        warnings.append("sshd Match 上下文达到 32 个上限")
+    return contexts, warnings[:200], bool(output.get("partial")) or len(contexts) >= maximum
+
+
 def v2_ssh_trust_rows(maximum: int) -> tuple[list[dict[str, Any]], list[str], bool]:
     binary = shutil.which("sshd")
     if binary is None:
         return [], [], False
-    output = run([binary, "-T"], timeout=20, check=False)
-    if output.returncode != 0:
-        detail = output.stderr.strip() or f"sshd -T 返回状态 {output.returncode}"
-        return [], [detail[:4096]], True
     rows: list[dict[str, Any]] = []
-    for raw in output.stdout.splitlines():
-        key, separator, value = raw.strip().partition(" ")
-        directive = key.lower()
-        value = value.strip()
-        if not separator or directive not in V2_SSH_TRUST_DIRECTIVES:
+    contexts, warnings, partial = v2_sshd_contexts()
+    invocations: list[tuple[str, list[str]]] = [("default", [binary, "-T"])]
+    for username, address, hostname in contexts:
+        scope = f"user={username};addr={address};host={hostname}"
+        invocations.append((scope, [binary, "-T", "-C", f"user={username},addr={address},host={hostname}"]))
+    for scope, argv in invocations:
+        output = run(argv, timeout=20, check=False)
+        if output.returncode != 0:
+            detail = output.stderr.strip() or f"sshd -T 返回状态 {output.returncode}"
+            warnings.append(f"{scope}: {detail[:4096]}")
+            partial = True
             continue
-        rows.append({"scope": "default", "directive": directive,
-                     "valueDigest": hashlib.sha256(value.encode()).hexdigest(), "value": value,
-                     "source": "sshd -T", "effective": True})
-        if len(rows) >= maximum:
-            return rows, ["sshd 有效信任配置达到结果上限"], True
-    return rows, [], False
+        for raw in output.stdout.splitlines():
+            key, separator, value = raw.strip().partition(" ")
+            directive = key.lower()
+            value = value.strip()
+            if not separator or directive not in V2_SSH_TRUST_DIRECTIVES:
+                continue
+            rows.append({"scope": scope, "directive": directive,
+                         "valueDigest": hashlib.sha256(value.encode()).hexdigest(), "value": value,
+                         "source": "sshd -T" if scope == "default" else "sshd -T -C (observed auth context)",
+                         "effective": True})
+            if len(rows) >= maximum:
+                return rows, (warnings + ["sshd 有效信任配置达到结果上限"])[:200], True
+    return rows, warnings[:200], partial
+
+
+def v2_ssh_trust_files(row: dict[str, Any], maximum: int) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    directive = str(row.get("directive", ""))
+    if directive not in {"authorizedkeysfile", "trustedusercakeys", "authorizedprincipalsfile"}:
+        return [], []
+    try:
+        values = shlex.split(str(row.get("value", "")))
+    except ValueError as exc:
+        return [], [{"code": "COLLECTOR_ERROR", "detail": f"SSH 信任路径无法解析: {exc}", "resumable": False}]
+    context = dict(part.split("=", 1) for part in str(row.get("scope", "")).split(";") if "=" in part)
+    account = None
+    if context.get("user"):
+        try:
+            account = pwd.getpwnam(context["user"])
+        except KeyError:
+            account = None
+    files: list[dict[str, Any]] = []
+    gaps: list[dict[str, Any]] = []
+    for raw in values[:maximum]:
+        if raw.lower() == "none":
+            continue
+        value = raw.replace("%%", "%")
+        if account is not None:
+            value = value.replace("%h", account.pw_dir).replace("%u", account.pw_name).replace("%U", str(account.pw_uid))
+        if "%" in value:
+            gaps.append({"code": "CAPABILITY_UNAVAILABLE", "detail": f"SSH 信任路径含当前上下文无法展开的 token: {raw}", "resumable": False})
+            continue
+        path = pathlib.Path(value) if value.startswith("/") else pathlib.Path(account.pw_dir) / value if account is not None else None
+        if path is None:
+            gaps.append({"code": "CAPABILITY_UNAVAILABLE", "detail": f"SSH 相对信任路径缺少用户上下文: {raw}", "resumable": False})
+            continue
+        try:
+            descriptor, canonical = v2_open_regular(str(path))
+            try:
+                files.append(v2_file_fields_fd(descriptor, canonical))
+            finally:
+                os.close(descriptor)
+        except HelperError as exc:
+            gaps.append({"code": "SOURCE_CHANGED", "detail": f"SSH 信任文件不可绑定: {path}: {exc}", "resumable": False})
+    return files, gaps[:200]
 
 
 def v2_package_rows(maximum: int) -> tuple[list[dict[str, Any]], list[str], bool]:
@@ -3009,7 +3543,39 @@ def v2_package_rows(maximum: int) -> tuple[list[dict[str, Any]], list[str], bool
     return [], ["未发现受支持的 dpkg/rpm 软件包数据库"], True
 
 
-def v2_enumerate(params: dict[str, Any], epoch_id: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]], str | None, list[dict[str, Any]]]:
+def v2_account_base_rows() -> tuple[list[dict[str, Any]], list[str], bool]:
+    """Enumerate NSS accounts with a bounded subprocess when remote NSS is configured."""
+    external = False
+    try:
+        for raw in pathlib.Path("/etc/nsswitch.conf").read_text("utf-8", errors="replace").splitlines():
+            key, separator, value = raw.partition(":")
+            if separator and key.strip() == "passwd" and any(token in value.split() for token in ("sss", "ldap", "winbind")):
+                external = True
+                break
+    except OSError:
+        pass
+    if external and shutil.which("getent"):
+        try:
+            output = run([shutil.which("getent") or "getent", "passwd"], timeout=20, check=False)
+        except HelperError as exc:
+            return [], [f"外部 NSS 账户枚举超时或失败: {exc}"], True
+        rows: list[dict[str, Any]] = []
+        for line in output.stdout.splitlines():
+            fields = line.split(":")
+            if len(fields) < 7 or USERNAME.fullmatch(fields[0]) is None:
+                continue
+            try:
+                rows.append({"uid": int(fields[2]), "username": fields[0], "gid": int(fields[3]),
+                             "home": fields[5], "shell": fields[6]})
+            except ValueError:
+                continue
+        warnings = [] if output.returncode == 0 else [f"外部 NSS getent 返回 {output.returncode}，账户枚举不完整"]
+        return rows, warnings, bool(warnings)
+    return ([{"uid": value.pw_uid, "username": value.pw_name, "gid": value.pw_gid,
+              "home": value.pw_dir, "shell": value.pw_shell} for value in pwd.getpwall()], [], False)
+
+
+def v2_enumerate(params: dict[str, Any], epoch_id: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]], str | None, list[dict[str, Any]], dict[str, Any]]:
     namespace = params.get("namespace")
     if namespace == "task_ioc":
         raise HelperError("INVALID_ARGUMENT", "task_ioc is controller-local")
@@ -3023,47 +3589,66 @@ def v2_enumerate(params: dict[str, Any], epoch_id: str) -> tuple[list[dict[str, 
         # collector failure can mask an invalid Predicate as INTERNAL_ERROR, and an empty data
         # source can accidentally accept malformed input without evaluating it at all.
         v2_validate_predicate(str(namespace), predicate)
-    tolerate_cursor_drift = namespace in {"log_source", "log_event", "auth_event", "exec_event"}
-    offset, cursor_binding, source_generation, cursor_source_changed = v2_cursor_start(
+    tolerate_cursor_drift = namespace in {"process", "log_source", "log_event", "auth_event", "exec_event"}
+    offset, cursor_binding, source_generation, cursor_source_changed, cursor_payload = v2_cursor_start(
         str(namespace), params, epoch_id, tolerate_cursor_drift)
     rows: list[dict[str, Any]] = []
+    scan: dict[str, Any] | None = None
     partial = False
     warnings: list[str] = []
     if namespace == "host":
         info = get_host_info({})
-        rows = [{"bootId": boot_id(), "hostname": info.get("hostname", platform.node()), "os": info.get("system", platform.system()),
-                 "release": info.get("release", platform.release()), "architecture": info.get("machine", platform.machine()),
-                 "timezone": host_timezone()[0], "observedAt": utc_iso(now_utc())}]
+        os_release = info.get("osRelease", {})
+        rows = [{"bootId": boot_id(), "hostname": info.get("hostname", platform.node()), "os": info.get("platform", platform.system()),
+                 "distribution": os_release.get("ID", "unknown"), "distributionVersion": os_release.get("VERSION_ID", "unknown"),
+                 "release": info.get("kernel", platform.release()), "architecture": info.get("architecture", platform.machine()),
+                 "timezone": host_timezone()[0], "initSystem": host_init_system(), "selinuxMode": host_selinux_mode(),
+                 "observedAt": utc_iso(now_utc())}]
     elif namespace == "process":
-        values, warnings, partial = enumerate_stable_processes(min(5000, offset + limit + 1))
-        rows = [{**value, "exe": value.get("exePath"), "command": value.get("command", value.get("comm"))} for value in values]
+        sort_values = params.get("sort", [])
+        if sort_values not in ([], None, [{"field": "pid", "direction": "asc"}]):
+            raise HelperError("INVALID_ARGUMENT", "large process scans only support PID ascending keyset order")
+        cursor_upper_bound = cursor_payload.get("upperBound")
+        if cursor_upper_bound is not None:
+            cursor_upper_bound = safe_int(cursor_upper_bound, offset, 10_000_000, "process cursor upper bound")
+        rows, warnings, partial, process_scan = v2_process_inventory(
+            params, offset, limit, "exeSha256" in requested_fields, cursor_upper_bound)
+        scan = {**process_scan, "sourceGeneration": source_generation}
+        if "mapsSummary" in requested_fields:
+            for row in rows:
+                row["mapsSummary"] = process_maps_summary(int(row["pid"]))
     elif namespace == "socket":
-        values, warnings, partial = read_global_connections(min(20000, offset + limit + 1))
+        values, warnings, partial = read_global_connections(20000)
         rows = [v2_socket_row(value) for value in values]
     elif namespace == "account":
         needs_account_details = bool({"groups", "locked"}.intersection(requested_fields))
-        for value in pwd.getpwall():
-            row = {"uid": value.pw_uid, "username": value.pw_name, "gid": value.pw_gid, "home": value.pw_dir,
-                   "shell": value.pw_shell}
+        account_rows, account_warnings, account_partial = v2_account_base_rows()
+        warnings.extend(account_warnings)
+        partial = partial or account_partial
+        for row in account_rows:
             if needs_account_details:
                 try:
-                    inspected = inspect_account({"username": value.pw_name})
+                    inspected = inspect_account({"username": row["username"]})
                     if "groups" in requested_fields:
                         row["groups"] = inspected.get("groups", [])
                     if "locked" in requested_fields:
                         row["locked"] = bool(inspected.get("passwordLocked"))
                 except (HelperError, OSError) as exc:
-                    warnings.append(f"账户 {value.pw_name}: {str(exc)}")
+                    warnings.append(f"账户 {row['username']}: {str(exc)}")
                     partial = True
             rows.append(row)
     elif namespace == "ssh_key":
-        rows, warnings, partial = v2_ssh_key_rows(min(5000, offset + limit + 1))
+        rows, warnings, partial = v2_ssh_key_rows(5000)
     elif namespace == "delegation_rule":
-        rows, warnings, partial = v2_delegation_rows(min(5000, offset + limit + 1))
+        rows, warnings, partial = v2_delegation_rows(5000)
     elif namespace == "ssh_trust_config":
-        rows, warnings, partial = v2_ssh_trust_rows(min(5000, offset + limit + 1))
+        rows, warnings, partial = v2_ssh_trust_rows(5000)
     elif namespace == "file":
-        rows, warnings, partial = v2_file_inventory(params, min(5000, offset + limit + 1))
+        sort_values = params.get("sort", [])
+        if sort_values not in ([], None, [{"field": "path", "direction": "asc"}]):
+            raise HelperError("INVALID_ARGUMENT", "large file scans only support traversal order or path asc")
+        rows, warnings, partial, file_scan = v2_file_inventory(params, offset, limit)
+        scan = {**file_scan, "sourceGeneration": source_generation}
     elif namespace == "web_stack":
         rows, warnings, partial = v2_web_stack_rows()
     elif namespace == "web_root":
@@ -3079,20 +3664,23 @@ def v2_enumerate(params: dict[str, Any], epoch_id: str) -> tuple[list[dict[str, 
             except (HelperError, KeyError, ValueError):
                 partial = True
     elif namespace == "cron_entry":
-        rows, warnings, partial = v2_cron_rows(min(5000, offset + limit + 1))
+        rows, warnings, partial = v2_cron_rows(5000)
     elif namespace == "unit":
-        rows, warnings, partial = v2_unit_rows(min(5000, offset + limit + 1))
+        rows, warnings, partial = v2_unit_rows(5000)
     elif namespace == "persistence":
-        rows, warnings, partial = v2_persistence_rows(min(5000, offset + limit + 1))
+        rows, warnings, partial = v2_persistence_rows(5000)
     elif namespace == "module":
-        rows, warnings, partial = v2_module_rows(min(5000, offset + limit + 1))
+        rows, warnings, partial = v2_module_rows(5000)
     elif namespace == "log_source":
-        rows, warnings, partial = v2_log_source_rows(min(5000, offset + limit + 1))
+        rows, warnings, partial = v2_log_source_rows(5000)
     elif namespace == "package":
-        rows, warnings, partial = v2_package_rows(min(5000, offset + limit + 1))
-    elif namespace in {"log_event", "auth_event", "exec_event"}:
+        rows, warnings, partial = v2_package_rows(5000)
+    elif namespace == "log_event":
+        rows, warnings, partial, event_scan = v2_log_event_inventory(params, offset, limit, predicate)
+        scan = {**event_scan, "sourceGeneration": source_generation}
+    elif namespace in {"auth_event", "exec_event"}:
         hours = safe_int(params.get("sinceHours", 24), 1, 24 * 365, "sinceHours")
-        output = v2_query_events(str(namespace), hours, min(5000, offset + limit + 1))
+        output = v2_query_events(str(namespace), hours, 5000)
         # sourceId/cursor come from the collector, which derives both from the real originating
         # source. auth_event/exec_event used to get a hardcoded "auth"/"exec" string plus the
         # page-local array index, so no event could be joined back to its log_source and the
@@ -3101,24 +3689,45 @@ def v2_enumerate(params: dict[str, Any], epoch_id: str) -> tuple[list[dict[str, 
         partial, warnings = bool(output.get("partial")), list(output.get("warnings", []))
     else:
         raise HelperError("UNSUPPORTED_ENVIRONMENT", f"collector not available for namespace {namespace}")
-    if predicate is not None:
-        rows = [row for row in rows if v2_predicate(str(namespace), predicate, row)]
+    raw_count = len(rows)
     # 稳定身份是隐式末位排序键（设计 §5.4）：先按身份排序，再用稳定排序施加调用方排序键，
     # 同值行在分页之间才不会互换位置，offset 游标才有意义。
     identity_names = V2_IDENTITY_FIELDS[str(namespace)]
-    rows.sort(key=lambda row: tuple(str(row.get(name, "")) for name in identity_names))
+    if namespace not in {"file", "process", "log_event"}:
+        rows.sort(key=lambda row: tuple(str(row.get(name, "")) for name in identity_names))
     sort_values = params.get("sort", [])
     if not isinstance(sort_values, list) or len(sort_values) > 3:
         raise HelperError("INVALID_ARGUMENT", "invalid sort")
-    for sort_value in reversed(sort_values):
+    for sort_value in reversed(sort_values if namespace not in {"file", "process", "log_event"} else []):
         if (not isinstance(sort_value, dict) or sort_value.get("field") not in V2_NAMESPACE_FIELDS[str(namespace)]
                 or sort_value.get("field") in V2_NON_SORTABLE_FIELDS
                 or sort_value.get("direction") not in {"asc", "desc"}):
             raise HelperError("INVALID_ARGUMENT", "invalid sort")
         field = str(sort_value["field"])
         rows.sort(key=lambda row: (row.get(field) is None, str(row.get(field, ""))), reverse=sort_value["direction"] == "desc")
-    window = rows[offset:offset + limit]
-    more = offset + limit < len(rows)
+    if namespace in {"file", "process", "log_event"}:
+        window = rows
+        more = not bool(scan["complete"])
+    elif predicate is None:
+        window = rows[offset:offset + limit]
+        next_offset = offset + len(window)
+        more = next_offset < raw_count
+        scan = {"sourceGeneration": source_generation, "scannedCount": len(window),
+                "matchedCount": len(window), "nextOffset": next_offset, "complete": not more}
+    else:
+        # 谓词在采集器返回的稳定顺序上分段执行。空匹配页也必须前移 Cursor，且单次
+        # 最多访问 enumerateScanNodes 个逻辑节点，避免后段命中永远不可达。
+        window = []
+        next_offset = offset
+        scan_ceiling = min(raw_count, offset + ENUMERATE_SCAN_PAGE_LIMIT)
+        while next_offset < scan_ceiling and len(window) < limit:
+            row = rows[next_offset]
+            next_offset += 1
+            if v2_predicate(str(namespace), predicate, row):
+                window.append(row)
+        more = next_offset < raw_count
+        scan = {"sourceGeneration": source_generation, "scannedCount": next_offset - offset,
+                "matchedCount": len(window), "nextOffset": next_offset, "complete": not more}
     projected_rows = [{field: row[field] for field in requested_fields if field in row} for row in window]
     objects = [v2_observation(str(namespace), row, "CURSOR_BEST_EFFORT", requested_fields) for row in projected_rows]
     gaps = []
@@ -3134,8 +3743,12 @@ def v2_enumerate(params: dict[str, Any], epoch_id: str) -> tuple[list[dict[str, 
         if not objects:
             raise HelperError("SOURCE_CHANGED", "enumerate source changed before any object was produced")
         gaps.append({"code": "SOURCE_CHANGED", "detail": "分页期间数据源发生变化，本页为 CURSOR_BEST_EFFORT 结果", "resumable": True})
-    next_cursor = v2_encode_cursor(str(namespace), offset + len(window), cursor_binding, current_generation) if more else None
-    return objects, [], next_cursor, gaps
+    next_offset = int(scan["nextOffset"])
+    cursor_extra = {"upperBound": scan["upperBound"]} if namespace == "process" and scan is not None else None
+    next_cursor = v2_encode_cursor(str(namespace), next_offset, cursor_binding, current_generation, cursor_extra) if more else None
+    scan["returnedCount"] = len(objects)
+    scan["complete"] = not more
+    return objects, [], next_cursor, gaps, scan
 
 
 def v2_ref_params(params: dict[str, Any]) -> tuple[str, dict[str, Any], dict[str, Any]]:
@@ -3143,6 +3756,42 @@ def v2_ref_params(params: dict[str, Any]) -> tuple[str, dict[str, Any], dict[str
     if namespace not in V2_NAMESPACE_FIELDS or not isinstance(identity, dict) or not isinstance(locator, dict):
         raise HelperError("INVALID_ARGUMENT", "invalid object reference binding")
     return str(namespace), identity, locator
+
+
+def v2_probe_parameters(params: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+    kind = params.get("probeKind")
+    parameters = params.get("parameters")
+    if kind not in {"jvm.tomcat.inventory", "jvm.class.inspect", "jvm.class.dump"} or not isinstance(parameters, dict):
+        raise HelperError("INVALID_ARGUMENT", "invalid probeKind or parameters")
+    if kind == "jvm.tomcat.inventory":
+        if parameters:
+            raise HelperError("INVALID_ARGUMENT", "jvm.tomcat.inventory does not accept parameters")
+        return str(kind), {}
+    if set(parameters) - {"className", "classLoaderId"}:
+        raise HelperError("INVALID_ARGUMENT", f"{kind} received unknown parameters")
+    class_name = parameters.get("className")
+    if not isinstance(class_name, str) or not CLASS_NAME.fullmatch(class_name):
+        raise HelperError("INVALID_ARGUMENT", f"{kind} requires a valid className")
+    class_loader_id = parameters.get("classLoaderId")
+    if class_loader_id is not None and (not isinstance(class_loader_id, str) or not CLASS_LOADER_ID.fullmatch(class_loader_id)):
+        raise HelperError("INVALID_ARGUMENT", "invalid classLoaderId")
+    return str(kind), dict(parameters)
+
+
+def v2_bound_jvm(identity: dict[str, Any]) -> int:
+    expected_boot = identity.get("bootId")
+    pid = safe_int(identity.get("pid"), 1, 2**31 - 1, "pid")
+    expected_start = identity.get("startTicks")
+    if not isinstance(expected_boot, str) or not isinstance(expected_start, str) or not expected_start.isdigit():
+        raise HelperError("INVALID_ARGUMENT", "invalid stable jvm identity")
+    try:
+        current_boot = boot_id()
+        current_start = proc_stat_fields(pid)["startTicks"]
+    except (OSError, HelperError) as exc:
+        raise HelperError("STALE_REF", "jvm object is no longer observable") from exc
+    if current_boot != expected_boot.lower() or current_start != expected_start:
+        raise HelperError("STALE_REF", "stable jvm identity changed")
+    return pid
 
 
 def v2_project(params: dict[str, Any]) -> list[dict[str, Any]]:
@@ -3153,6 +3802,8 @@ def v2_project(params: dict[str, Any]) -> list[dict[str, Any]]:
     if namespace == "process":
         current = process_request({**identity, **locator})
         current = {**current, "exe": current.get("exePath"), "command": current.get("command", current.get("comm"))}
+        if "mapsSummary" in fields:
+            current["mapsSummary"] = process_maps_summary(int(current["pid"]))
     elif namespace == "file":
         descriptor, current = v2_bound_file(params, "sha256" in fields)
         os.close(descriptor)
@@ -3161,6 +3812,20 @@ def v2_project(params: dict[str, Any]) -> list[dict[str, Any]]:
         current = {**current, "locked": current.get("passwordLocked")}
         if current.get("uid") != identity.get("uid"):
             raise HelperError("EVIDENCE_COLLECTION", "stable account identity changed")
+    elif namespace in {"ssh_key", "delegation_rule", "ssh_trust_config", "cron_entry", "unit", "persistence"}:
+        if namespace == "ssh_key":
+            candidates, _warnings, _partial = v2_ssh_key_rows(5000)
+        elif namespace == "delegation_rule":
+            candidates, _warnings, _partial = v2_delegation_rows(5000)
+        elif namespace == "ssh_trust_config":
+            candidates, _warnings, _partial = v2_ssh_trust_rows(5000)
+        elif namespace == "cron_entry":
+            candidates, _warnings, _partial = v2_cron_rows(5000)
+        elif namespace == "unit":
+            candidates, _warnings, _partial = v2_unit_rows(5000)
+        else:
+            candidates, _warnings, _partial = v2_persistence_rows(5000)
+        current = v2_find_identity_row(namespace, identity, candidates)
     else:
         raise HelperError("UNSUPPORTED_ENVIRONMENT", f"project unavailable for {namespace}")
     selected = {name: current.get(name) for name in fields if name in current}
@@ -3225,6 +3890,44 @@ def v2_related_command_files(command: str, maximum: int = 500) -> list[dict[str,
     return rows
 
 
+V2_SCRIPT_LAUNCHERS = frozenset({
+    "awk", "bash", "dash", "env", "java", "node", "perl", "php", "python", "python2", "python3",
+    "ruby", "sh", "zsh",
+})
+
+
+def v2_process_command_files(current: dict[str, Any], maximum: int = 500) -> list[dict[str, Any]]:
+    """Resolve regular files named by the bound process command, excluding its executable.
+
+    This is intentionally based on file identity observed now. It does not infer a file from an
+    arbitrary string and it never executes the process command.
+    """
+    executable_identity = (str(current.get("exeInode", "")), str(current.get("exePath", "")))
+    rows: list[dict[str, Any]] = []
+    for row in v2_related_command_files(str(current.get("command", "")), maximum + 1):
+        if (str(row.get("inode", "")), str(row.get("path", ""))) == executable_identity:
+            continue
+        if str(row.get("inode", "")) == executable_identity[0] or str(row.get("path", "")) == executable_identity[1]:
+            continue
+        rows.append(row)
+        if len(rows) >= maximum:
+            break
+    return rows
+
+
+def v2_process_start_targets(current: dict[str, Any]) -> set[tuple[str, str]]:
+    command_files = v2_process_command_files(current, 100)
+    targets = {(str(row.get("device", "")), str(row.get("inode", ""))) for row in command_files}
+    executable = str(current.get("exePath", ""))
+    if not targets and pathlib.Path(executable).name.lower() not in V2_SCRIPT_LAUNCHERS and not current.get("exeDeleted"):
+        try:
+            row = v2_file_fields(safe_path(executable))
+            targets.add((str(row.get("device", "")), str(row.get("inode", ""))))
+        except (HelperError, OSError):
+            pass
+    return targets
+
+
 def v2_web_root_rows() -> tuple[list[dict[str, Any]], list[str], bool]:
     inventory, warnings = web_root_inventory()
     rows: list[dict[str, Any]] = []
@@ -3240,7 +3943,9 @@ def v2_web_root_rows() -> tuple[list[dict[str, Any]], list[str], bool]:
                    "path": str(path.resolve())}
             if isinstance(value.get("server"), str):
                 row["server"] = value["server"]
-            if value.get("configSource") == "nginx -T":
+            row["_configSource"] = value.get("configSource")
+            row["_runtimeEffective"] = value.get("runtimeEffective") is True
+            if value.get("runtimeEffective") is True:
                 row["effective"] = True
             rows.append(row)
         except (HelperError, OSError):
@@ -3262,6 +3967,26 @@ def v2_web_request_rows(path: str, maximum: int) -> tuple[list[dict[str, Any]], 
     return rows, list(output.get("warnings", [])), bool(output.get("partial"))
 
 
+def v2_web_stack_serves_root(stack: dict[str, Any], root: dict[str, Any], _: str = "") -> bool:
+    """Return true only for an exact runtime configuration binding.
+
+    A process kind match is insufficient when several nginx/apache instances use different
+    configuration trees. nginx -T gives an effective include graph for the default running
+    configuration. Apache DUMP_INCLUDES provides the equivalent active include graph. Bind only
+    roots whose exact source file belongs to the corresponding running server's graph.
+    """
+    kind = str(stack.get("kind", "")).lower()
+    server = str(root.get("server", "")).lower()
+    family_matches = (kind == "nginx" and server == "nginx") or (kind in {"apache2", "httpd"} and server == "apache")
+    if not family_matches or root.get("_runtimeEffective") is not True:
+        return False
+    if stack.get("_customConfig") not in {None, ""}:
+        return False
+    source = str(root.get("_configSource", ""))
+    effective_paths = stack.get("_effectiveConfigPaths")
+    return bool(source) and isinstance(effective_paths, list) and source in effective_paths
+
+
 def v2_relate(params: dict[str, Any], epoch_id: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]], str | None, list[dict[str, Any]]]:
     namespace, identity, locator = v2_ref_params(params)
     relation = params.get("relation")
@@ -3269,7 +3994,7 @@ def v2_relate(params: dict[str, Any], epoch_id: str) -> tuple[list[dict[str, Any
         raise HelperError("INVALID_ARGUMENT", "relation is not available for this namespace")
     limit = safe_int(params.get("limit"), 1, 500, "limit")
     tolerate_cursor_drift = namespace == "log_source" and relation == "contains"
-    offset, cursor_binding, source_generation, cursor_source_changed = v2_cursor_start(
+    offset, cursor_binding, source_generation, cursor_source_changed, _cursor_payload = v2_cursor_start(
         namespace, params, epoch_id, tolerate_cursor_drift)
     rows: list[tuple[str, dict[str, Any]]] = []
     gaps: list[dict[str, Any]] = []
@@ -3309,6 +4034,34 @@ def v2_relate(params: dict[str, Any], epoch_id: str) -> tuple[list[dict[str, Any
                     continue
             if output.get("partial"):
                 gaps.append({"code": "COLLECTOR_ERROR", "detail": "; ".join(output.get("warnings", [])[:20]), "resumable": False})
+        elif relation == "executable":
+            if current.get("exeDeleted"):
+                gaps.append({"code": "SOURCE_CHANGED", "detail": "进程可执行文件已删除；应通过 process collect 保全 /proc/pid/exe", "resumable": False})
+            else:
+                try:
+                    rows = [("file", v2_file_fields(safe_path(str(current.get("exePath", "")))))]
+                except (HelperError, OSError) as exc:
+                    gaps.append({"code": "SOURCE_CHANGED", "detail": f"进程可执行文件已变化或不可读: {exc}", "resumable": False})
+        elif relation == "command_file":
+            rows = [("file", row) for row in v2_process_command_files(current, 5000)]
+        elif relation == "started_by":
+            targets = v2_process_start_targets(current)
+            related: list[tuple[str, list[dict[str, Any]], list[str], bool]] = []
+            cron, cron_warnings, cron_partial = v2_cron_rows(5000)
+            units, unit_warnings, unit_partial = v2_unit_rows(5000)
+            persistence, persistence_warnings, persistence_partial = v2_persistence_rows(5000)
+            related.extend((("cron_entry", cron, cron_warnings, cron_partial),
+                            ("unit", units, unit_warnings, unit_partial),
+                            ("persistence", persistence, persistence_warnings, persistence_partial)))
+            for target_namespace, candidates, warnings, partial in related:
+                for candidate in candidates:
+                    command = str(candidate.get("command") or candidate.get("execStart") or "")
+                    command_targets = {(str(row.get("device", "")), str(row.get("inode", "")))
+                                       for row in v2_related_command_files(command, 100)}
+                    if targets.intersection(command_targets):
+                        rows.append((target_namespace, candidate))
+                if partial:
+                    gaps.append({"code": "COLLECTOR_ERROR", "detail": "; ".join(warnings[:20]), "resumable": False})
     elif namespace == "socket" and relation == "owned_by":
         current = dict(identity)
         processes, warnings, partial = enumerate_stable_processes(5000)
@@ -3392,6 +4145,14 @@ def v2_relate(params: dict[str, Any], epoch_id: str) -> tuple[list[dict[str, Any
             gaps.append({"code": "SOURCE_CHANGED", "detail": "SSH Key owner account no longer exists", "resumable": False})
         if partial:
             gaps.append({"code": "COLLECTOR_ERROR", "detail": "; ".join(warnings[:20]), "resumable": False})
+    elif namespace == "ssh_trust_config" and relation == "references":
+        trust, warnings, partial = v2_ssh_trust_rows(5000)
+        current = v2_find_identity_row("ssh_trust_config", identity, trust)
+        files, trust_gaps = v2_ssh_trust_files(current, limit)
+        rows = [("file", item) for item in files]
+        gaps.extend(trust_gaps)
+        if partial:
+            gaps.append({"code": "COLLECTOR_ERROR", "detail": "; ".join(warnings[:20]), "resumable": False})
     elif namespace in {"cron_entry", "unit", "persistence"} and relation == "executes":
         if namespace == "cron_entry":
             candidates, warnings, partial = v2_cron_rows(5000)
@@ -3471,12 +4232,12 @@ def v2_relate(params: dict[str, Any], epoch_id: str) -> tuple[list[dict[str, Any
             current = v2_find_identity_row("web_stack", identity, stacks)
             kind = str(current.get("kind", "")).lower()
             rows = [("web_root", root) for root in roots
-                    if kind in str(root.get("server", "")).lower() or str(root.get("server", "")).lower() in kind]
+                    if v2_web_stack_serves_root(current, root, kind)]
         elif namespace == "web_root" and relation == "served_by":
             current = v2_find_identity_row("web_root", identity, roots)
             server = str(current.get("server", "")).lower()
             rows = [("web_stack", stack) for stack in stacks
-                    if server in str(stack.get("kind", "")).lower() or str(stack.get("kind", "")).lower() in server]
+                    if v2_web_stack_serves_root(stack, current, server)]
         if stack_partial or root_partial:
             gaps.append({"code": "COLLECTOR_ERROR", "detail": "; ".join([*stack_warnings, *root_warnings][:20]), "resumable": False})
     else:
@@ -3835,7 +4596,8 @@ def v2_dispatch(verb: str, request: dict[str, Any]) -> dict[str, Any]:
                 "objects": [], "edges": [], "gaps": [], "maintenanceResult": result,
                 "cost": v2_cost(started, 1)}
     objects: list[dict[str, Any]] = []; edges: list[dict[str, Any]] = []; cursor = None; gaps: list[dict[str, Any]] = []; artifact = None
-    if verb == "enumerate": objects, edges, cursor, gaps = v2_enumerate(params, request["epochId"])
+    scan = None
+    if verb == "enumerate": objects, edges, cursor, gaps, scan = v2_enumerate(params, request["epochId"])
     elif verb == "project": objects = v2_project(params)
     elif verb == "read": objects = v2_read(params)
     elif verb == "match": objects, gaps = v2_match(params)
@@ -3860,9 +4622,9 @@ def v2_dispatch(verb: str, request: dict[str, Any]) -> dict[str, Any]:
             finally:
                 os.close(descriptor)
         elif namespace == "process":
-            collected = collect_process_executable({**identity, "maxBytes": params.get("maxBytes")})
+            collected = collect_process_executable({**identity, **_locator, "maxBytes": params.get("maxBytes")})
             staged = collected["artifact"]
-            current = process_request(identity)
+            current = process_request({**identity, **_locator})
             process_fields = {**current, "exe": current.get("exePath"), "command": current.get("command", current.get("comm"))}
             artifact = {"token": staged["artifactToken"], "sha256": staged["sha256"], "size": staged["size"],
                         "complete": True, "expiresAt": staged["expiresAt"]}
@@ -3872,28 +4634,60 @@ def v2_dispatch(verb: str, request: dict[str, Any]) -> dict[str, Any]:
     elif verb == "probe":
         namespace, identity, _locator = v2_ref_params(params)
         if namespace != "jvm": raise HelperError("UNSUPPORTED_ENVIRONMENT", "probe only supports jvm")
-        kind = params.get("probeKind")
-        command = "list_components" if kind == "jvm.tomcat.inventory" else "inspect_class"
-        result = run_tomcat_probe({"pid": identity.get("pid"), "command": command, **params.get("parameters", {})})
+        kind, probe_parameters = v2_probe_parameters(params)
+        pid = v2_bound_jvm(identity)
+        command = "list_components" if kind == "jvm.tomcat.inventory" else "dump_class" if kind == "jvm.class.dump" else "inspect_class"
+        result = run_tomcat_probe({"pid": pid, "command": command, **probe_parameters})
+        v2_bound_jvm(identity)
         jvm_digest = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
+        warnings = result.get("warnings", [])
+        warning_text = [str(value)[:512] for value in warnings[:20]] if isinstance(warnings, list) else []
+        if result.get("error"):
+            warning_text.append(str(result.get("error"))[:512])
+        if result.get("partial") is True:
+            gaps.append({"code": "COLLECTOR_ERROR", "detail": "; ".join(warning_text) or "probe reported partial output", "resumable": False})
         if command == "list_components":
-            for item in result.get("items", result.get("components", [])):
+            components = result.get("items", result.get("components", []))
+            if not isinstance(components, list):
+                raise HelperError("PROBE_FAILED", "probe returned invalid component list")
+            for item in components:
                 if isinstance(item, dict):
-                    fields = {"jvmDigest": jvm_digest, "componentKind": str(item.get("kind", "component")),
+                    raw_mappings = item.get("mappings", [])
+                    mappings = [str(value) for value in raw_mappings[:100]] if isinstance(raw_mappings, list) else []
+                    for key in ("context", "mapping", "endpointPath"):
+                        if item.get(key) is not None:
+                            mappings.append(f"{key}:{str(item[key])[:1024]}")
+                    fields = {"jvmDigest": jvm_digest, "context": str(item.get("context", "unknown")),
+                              "componentKind": str(item.get("componentKind", item.get("type", item.get("kind", "component")))),
                               "name": str(item.get("name", item.get("className", "unknown"))), "className": str(item.get("className", "unknown")),
-                              "mappings": item.get("mappings", [])}
+                              "classLoaderId": str(item.get("classLoaderId", item.get("loaderId", "unknown"))),
+                              "mappings": mappings}
                     objects.append(v2_observation("java_component", fields, "POINT_IN_TIME"))
                     edges.append(v2_edge("jvm", identity, "hosts_component", "java_component", fields))
         else:
-            fields = {"jvmDigest": jvm_digest, "className": str(result.get("className")), "loaderId": str(result.get("loaderId", "unknown")),
-                      "codeSource": result.get("codeSource", ""), "bytecodeSha256": result.get("sha256", "unknown"), "modifiable": bool(result.get("modifiable"))}
-            objects.append(v2_observation("class", fields, "POINT_IN_TIME"))
-            edges.append(v2_edge("jvm", identity, "loads_class", "class", fields))
-            edges.append(v2_edge("class", fields, "loaded_by", "jvm", identity))
+            loader_id = result.get("classLoaderId", result.get("loaderId"))
+            if (result.get("loaded") is True or command == "dump_class" and isinstance(result.get("artifact"), dict)) and isinstance(loader_id, str) and loader_id:
+                fields = {"jvmDigest": jvm_digest, "className": str(result.get("className")), "loaderId": loader_id,
+                          "codeSource": result.get("codeSource"), "modifiable": bool(result.get("modifiable"))}
+                if isinstance(result.get("sha256"), str) and SHA256.fullmatch(str(result["sha256"])):
+                    fields["bytecodeSha256"] = str(result["sha256"])
+                objects.append(v2_observation("class", fields, "POINT_IN_TIME"))
+                edges.append(v2_edge("jvm", identity, "loads_class", "class", fields))
+                edges.append(v2_edge("class", fields, "loaded_by", "jvm", identity))
+            elif result.get("partial") is not True:
+                gaps.append({"code": "FIELD_UNAVAILABLE", "field": "class.loaderId", "detail": "probe did not return a uniquely loaded class", "resumable": False})
+        if command == "dump_class" and isinstance(result.get("artifact"), dict):
+            staged = result["artifact"]
+            artifact = {"token": staged["artifactToken"], "sha256": staged["sha256"], "size": staged["size"],
+                        "complete": True, "expiresAt": staged["expiresAt"]}
     status_value = "PARTIAL" if gaps else "SUCCESS"
+    # enumerate 的主要开销来自访问过的源节点，即使谓词没有命中对象也已经消耗预算。
+    # 其他动词没有 scan 元数据，仍按实际产生的对象计数。
+    cost_nodes = scan["scannedCount"] if verb == "enumerate" and isinstance(scan, dict) else len(objects)
     response = {"protocolVersion": PROTOCOL_VERSION, "requestId": request_id, "status": status_value,
-                "objects": objects, "edges": edges, "cost": v2_cost(started, len(objects), len(json.dumps(objects).encode()), 1 if verb == "probe" else 0), "gaps": gaps}
+                "objects": objects, "edges": edges, "cost": v2_cost(started, cost_nodes, len(json.dumps(objects).encode()), 1 if verb == "probe" else 0), "gaps": gaps}
     if cursor is not None: response["cursor"] = cursor
+    if scan is not None: response["scan"] = scan
     if artifact is not None: response["artifact"] = artifact
     return response
 

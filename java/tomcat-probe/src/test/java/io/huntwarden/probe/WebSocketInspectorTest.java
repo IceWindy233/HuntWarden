@@ -1,5 +1,6 @@
 package io.huntwarden.probe;
 
+import fixture.websocket.EndpointFixtures;
 import org.junit.jupiter.api.Test;
 
 import java.util.LinkedHashMap;
@@ -36,6 +37,19 @@ class WebSocketInspectorTest {
 
         assertEquals(1, result.endpoints().size());
         assertFalse(result.truncated());
+    }
+
+    @Test
+    void invokesPublicGettersDeclaredByPackagePrivateEndpointConfig() {
+        FakeWsServerContainer container = new FakeWsServerContainer();
+        container.configExactMatchMap.put("/socket/{id}",
+                EndpointFixtures.packagePrivateConfig("/socket/{id}", ExampleEndpoint.class));
+
+        WebSocketInspector.ScanResult result = WebSocketInspector.inspect(container);
+
+        assertEquals(1, result.endpoints().size());
+        assertEquals("/socket/{id}", result.endpoints().get(0).path());
+        assertEquals(0, result.reflectionErrors().size());
     }
 
     static final class FakeWsServerContainer {

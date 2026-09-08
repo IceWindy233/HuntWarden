@@ -21,7 +21,8 @@ describe("配置与目标约束", () => {
     expect(config.remediation.requireApproval).toBe(true);
     expect(config.remediation.allowedTools).toEqual(["quarantine_file"]);
     expect(config.remediation.allowedTools).not.toContain("disable_account");
-    expect(config.java.allowRuntimeModification).toBe(false);
+    expect(config.protocolV2.dataPolicy.defaultTextClass).toBe("SENSITIVE_TEXT");
+    expect(config.protocolV2.grants.pendingExpiresOnInterruption).toBe(true);
     expect(config.storage.baseDir).toBe(resolve("data"));
   });
 
@@ -35,18 +36,21 @@ describe("配置与目标约束", () => {
     expect(model).toMatchObject({ api: "openai-completions", baseUrl: "https://api.deepseek.com", reasoning: true });
   });
 
-  it("为旧 Profile 纯增量注入持久化、入侵分诊与威胁情报默认值", () => {
+  it("旧 Profile 迁移时删除不再控制 V2 的检测细分配置", () => {
     const legacy = testConfig("/tmp/huntwarden-config-migration") as unknown as Record<string, unknown>;
-    delete legacy.persistence;
-    delete legacy.triage;
+    legacy.java = { supportedContainers: ["tomcat"], allowClassDump: true, allowRuntimeModification: false, probeJar: "/tmp/probe.jar" };
+    legacy.account = { checkAuthorizedKeys: true, checkLoginHistory: true, maxLoginHistoryEntries: 100 };
+    legacy.persistence = { maxItemsPerSource: 500, includeUserScope: true };
+    legacy.triage = { maxProcesses: 2_000, maxConnections: 5_000, maxFiles: 5_000, maxTimelineEvents: 5_000, maxArtifactBytes: 10_485_760, maxProcessTreeDepth: 12 };
+    legacy.webshell = { ...(legacy.webshell as Record<string, unknown>), maxCandidateFiles: 500, maxFileSizeBytes: 10_485_760, maxScriptExcerptBytes: 65_536, maxAccessLogLines: 500, yaraRuleDir: "/tmp/rules" };
     delete legacy.threatIntel;
     const migrated = normalizeConfig(legacy, "/tmp/huntwarden-config-migration/profile.yaml");
     expect(migrated.agent.providerTimeoutSeconds).toBe(600);
-    expect(migrated.persistence).toEqual({ maxItemsPerSource: 500, includeUserScope: true });
-    expect(migrated.triage).toEqual({ maxProcesses: 2_000, maxConnections: 5_000, maxFiles: 5_000, maxTimelineEvents: 5_000, maxArtifactBytes: 10_485_760, maxProcessTreeDepth: 12 });
+    expect(Object.keys(migrated)).not.toEqual(expect.arrayContaining(["java", "account", "persistence", "triage"]));
+    expect(migrated.webshell).toEqual({ modifiedWithinHours: 168 });
     expect(migrated.threatIntel).toEqual({
       enabled: false, provider: "dbapp-ti", baseUrl: "https://ti.dbappsecurity.com.cn/oapi/v1/", apiKeyEnv: "DBAPP_TI_API_KEY",
-      timeoutSeconds: 15, maxBatchSize: 100, cacheTtlSeconds: 3_600, autoEnrichConnections: true, includePrivateAddresses: false,
+      timeoutSeconds: 15, maxBatchSize: 100, cacheTtlSeconds: 3_600,
     });
   });
 

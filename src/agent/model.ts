@@ -66,7 +66,10 @@ function createCustomModelBundle(config: CustomModelConfig, credentials?: Creden
         name: "本机无认证端点",
         resolve: async ({ signal }: { signal: AbortSignal }) => {
           signal.throwIfAborted();
-          return { auth: {}, source: "本机无认证端点" };
+          // OpenAI SDK 在发起请求前强制要求 apiKey 或 Authorization 头，即便目标是
+          // localhost 上明确配置为无认证的兼容端点。这里使用固定的非秘密占位值满足
+          // SDK 前置条件；它只允许与 load-config.ts 已限制的回环地址组合使用。
+          return { auth: { apiKey: "huntwarden-local-no-auth" }, source: "本机无认证端点" };
         },
       };
   const api = config.protocol === "openai-responses"

@@ -11,10 +11,11 @@ function resolveConfigPath(configDir: string, value: string): string {
 
 export interface ConfigIssue { path: string; message: string }
 
-/** 与 ConfigSchema 的 triage 上限一致：旧 Profile 超限时收敛而不是拒绝加载。 */
-const TRIAGE_CEILINGS: Record<string, number> = {
-  maxProcesses: 5_000, maxConnections: 5_000, maxFiles: 5_000, maxTimelineEvents: 5_000,
-};
+const RETIRED_TOP_LEVEL_KEYS = ["java", "account", "persistence", "triage"] as const;
+const RETIRED_WEBSHELL_KEYS = [
+  "remoteRulePath", "maxCandidateFiles", "maxFileSizeBytes", "maxScriptExcerptBytes", "maxAccessLogLines", "yaraRuleDir",
+] as const;
+const RETIRED_THREAT_INTEL_KEYS = ["autoEnrichConnections", "includePrivateAddresses"] as const;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -49,40 +50,9 @@ function withIncrementalDefaults(input: unknown): unknown {
     if (migrated.agent.promptVersion === "sechost-agent-v1" || migrated.agent.promptVersion === "huntwarden-agent-v1") migrated.agent.promptVersion = "huntwarden-agent-v2";
   }
   if (isRecord(migrated.webshell)) {
-    delete migrated.webshell.remoteRulePath;
-    // 与 llmData.maxTextBytes 解耦前，脚本片段预算共用同一个旋钮；旧 Profile 沿用 Helper 硬顶。
-    if (migrated.webshell.maxScriptExcerptBytes === undefined) migrated.webshell.maxScriptExcerptBytes = 65_536;
-    if (migrated.webshell.maxAccessLogLines === undefined) migrated.webshell.maxAccessLogLines = 500;
+    for (const key of RETIRED_WEBSHELL_KEYS) delete migrated.webshell[key];
   }
-  if (isRecord(migrated.account) && migrated.account.maxLoginHistoryEntries === undefined) {
-    migrated.account.maxLoginHistoryEntries = 100;
-  }
-  if (migrated.persistence === undefined) {
-    migrated.persistence = { maxItemsPerSource: 500, includeUserScope: true };
-  }
-  if (isRecord(migrated.persistence)) {
-    // persistence.maxConnections 已退役：进程连接预算统一由 triage.maxConnections 与 Profile 系数提供。
-    migrated.persistence = Object.fromEntries(
-      Object.entries(migrated.persistence).filter(([key]) => key !== "maxConnections"),
-    );
-  }
-  if (migrated.triage === undefined) {
-    migrated.triage = {
-      maxProcesses: 2_000,
-      maxConnections: 5_000,
-      maxFiles: 5_000,
-      maxTimelineEvents: 5_000,
-      maxArtifactBytes: 10_485_760,
-      maxProcessTreeDepth: 12,
-    };
-  }
-  if (isRecord(migrated.triage)) {
-    if (migrated.triage.maxProcessTreeDepth === undefined) migrated.triage.maxProcessTreeDepth = 12;
-    for (const [key, ceiling] of Object.entries(TRIAGE_CEILINGS)) {
-      const value = migrated.triage[key];
-      if (typeof value === "number" && value > ceiling) migrated.triage[key] = ceiling;
-    }
-  }
+  for (const key of RETIRED_TOP_LEVEL_KEYS) delete migrated[key];
   if (migrated.threatIntel === undefined) {
     migrated.threatIntel = {
       enabled: false,
@@ -92,10 +62,9 @@ function withIncrementalDefaults(input: unknown): unknown {
       timeoutSeconds: 15,
       maxBatchSize: 100,
       cacheTtlSeconds: 3_600,
-      autoEnrichConnections: true,
-      includePrivateAddresses: false,
     };
   }
+  if (isRecord(migrated.threatIntel)) for (const key of RETIRED_THREAT_INTEL_KEYS) delete migrated.threatIntel[key];
   return migrated;
 }
 
@@ -103,11 +72,18 @@ function schemaIssues(schema: TSchema, value: unknown, prefix: string): ConfigIs
   const issues: ConfigIssue[] = [];
   const seen = new Set<string>();
   for (const error of Value.Errors(schema, value)) {
-    const issue = { path: `${prefix}${error.instancePath}` || "/", message: error.message };
-    const key = `${issue.path}\u0000${issue.message}`;
-    if (seen.has(key)) continue;
-    seen.add(key);
-    issues.push(issue);
+    const additional = error.keyword === "additionalProperties" && Array.isArray(error.params.additionalProperties)
+      ? error.params.additionalProperties.filter((item): item is string => typeof item === "string")
+      : [];
+    const current = additional.length > 0
+      ? additional.map((name) => ({ path: `${prefix}${error.instancePath}/${name}` || "/", message: "未知配置字段" }))
+      : [{ path: `${prefix}${error.instancePath}` || "/", message: error.message }];
+    for (const issue of current) {
+      const key = `${issue.path}\u0000${issue.message}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      issues.push(issue);
+    }
   }
   return issues;
 }
@@ -163,8 +139,6 @@ export function normalizeConfig(input: unknown, sourcePath: string): AppConfig {
   config.storage.baseDir = resolveConfigPath(configDir, config.storage.baseDir);
   config.executor.knownHostsPath = resolveConfigPath(configDir, config.executor.knownHostsPath);
   config.executor.privateKeyPath = resolveConfigPath(configDir, config.executor.privateKeyPath);
-  config.webshell.yaraRuleDir = resolveConfigPath(configDir, config.webshell.yaraRuleDir);
-  config.java.probeJar = resolveConfigPath(configDir, config.java.probeJar);
   return config;
 }
 

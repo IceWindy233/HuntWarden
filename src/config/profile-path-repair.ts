@@ -3,7 +3,6 @@ import { dirname, isAbsolute, join, resolve, sep } from "node:path";
 import type { AppConfig } from "./schema.js";
 
 export interface ProfilePathRepairOptions {
-  appPath: string;
   currentUserData: string;
   labStateDir?: string;
 }
@@ -69,13 +68,6 @@ export function repairProfilePaths(config: AppConfig, options: ProfilePathRepair
     config.model.authentication.apiKeyEnv = "HUNTWARDEN_LLM_API_KEY";
     changed = true;
   }
-  if (containsOldBrand(config.webshell.yaraRuleDir)) {
-    replace(config.webshell.yaraRuleDir, join(options.appPath, "rules", "yara"), (value) => { config.webshell.yaraRuleDir = value; });
-  }
-  if (containsOldBrand(config.java.probeJar)) {
-    replace(config.java.probeJar, join(options.appPath, "java", "tomcat-probe", "build", "libs", "huntwarden-tomcat-probe.jar"), (value) => { config.java.probeJar = value; });
-  }
-
   if (options.labStateDir) {
     if (containsOldBrand(config.executor.knownHostsPath) || isPackagedLabPath(config.executor.knownHostsPath)) {
       replace(config.executor.knownHostsPath, join(options.labStateDir, "known_hosts"), (value) => { config.executor.knownHostsPath = value; });

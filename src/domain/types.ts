@@ -5,6 +5,7 @@ export type TaskMode = "SCAN" | "REMEDIATE";
 export type TaskStatus =
   | "CREATED"
   | "RUNNING"
+  | "PAUSED"
   | "WAITING_APPROVAL"
   | "RECOVERING"
   | "REPORTING"
@@ -70,6 +71,12 @@ export interface TaskContext {
   profile?: ScanProfile;
   timeWindowHours?: number;
   iocs?: InvestigationIocs;
+  focus?: {
+    categories: CheckCategory[];
+    entryMode: "ZERO_IOC" | "SINGLE_LEAD" | "MULTI_LEAD";
+    iocKinds: Array<keyof InvestigationIocs>;
+    priority: "VOLATILE_FIRST";
+  };
   createdAt: string;
   updatedAt: string;
   /** 归档只影响默认列表可见性，不删除任务关联数据。 */
@@ -124,6 +131,8 @@ export type ApprovalStatus = "PENDING" | "APPROVED" | "DENIED" | "CONSUMED" | "E
 export interface ApprovalTicket {
   approvalId: string;
   taskId: string;
+  /** 票据只能授权创建时的 v2 Epoch；迁移前票据没有此字段并按失效处理。 */
+  epochId?: string;
   targetFingerprint: string;
   tool: string;
   argsDigest: string;
@@ -140,6 +149,7 @@ export type ActionReceiptStatus = "STARTED" | "SUCCEEDED" | "FAILED" | "UNKNOWN"
 export interface ActionReceipt {
   actionId: string;
   taskId: string;
+  epochId?: string;
   tool: string;
   targetFingerprint: string;
   status: ActionReceiptStatus;
@@ -153,6 +163,8 @@ export type ReportGenerationMode = "MODEL" | "REPAIRED" | "FALLBACK" | "LEGACY";
 export interface ReportRecord {
   reportId: string;
   taskId: string;
+  /** 生成该不可变报告时使用的 v2 Epoch；历史导入报告没有此字段。 */
+  epochId?: string;
   version: number;
   path: string;
   sha256: string;

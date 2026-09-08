@@ -1,12 +1,15 @@
 import { InvalidArgumentError } from "../common/errors.js";
-import type { Assessment, CoverageRun, FactRecord, ObjectReference } from "../protocol-v2/types.js";
+import type { RelationProvenance } from "../investigation/types.js";
+import type { Assessment, CoverageRun, EdgeRecord, FactRecord, ObjectReference } from "../protocol-v2/types.js";
 
 export interface AssessmentValidationContext {
   taskId: string;
   epochId: string;
   refs: readonly ObjectReference[];
   facts: readonly FactRecord[];
-  evidence: ReadonlyArray<{ evidenceId: string; taskId: string; metadata?: Record<string, unknown> }>;
+  edges: readonly EdgeRecord[];
+  relationProvenance: readonly RelationProvenance[];
+  evidence: ReadonlyArray<{ evidenceId: string; taskId: string; sha256?: string; storagePath?: string; metadata?: Record<string, unknown> }>;
   queryRefs: ReadonlySet<string>;
 }
 
@@ -23,13 +26,51 @@ export function validateAssessment(input: Assessment, context: AssessmentValidat
   for (const evidenceId of input.evidenceRefs) if (!context.evidence.some((item) => item.evidenceId === evidenceId && item.taskId === context.taskId)) throw new InvalidArgumentError(`Assessment 引用未知 Evidence: ${evidenceId}`);
   for (const queryRef of input.queryRefs) if (!context.queryRefs.has(queryRef)) throw new InvalidArgumentError(`Assessment 引用未知 Query: ${queryRef}`);
   if (input.verdict === "CONFIRMED_MALICIOUS") {
-    const completeEvidence = input.evidenceRefs.some((id) => context.evidence.some((item) => item.evidenceId === id && item.metadata?.complete !== false));
-    if (!completeEvidence) throw new InvalidArgumentError("CONFIRMED_MALICIOUS 必须绑定完整 Evidence");
+    const completeEvidence = input.evidenceRefs.some((id) => context.evidence.some((item) => item.evidenceId === id
+      && completeEvidenceMetadata(item)
+      && item.metadata?.epochId === context.epochId
+      && evidenceSupportsSubject(item.metadata, input.subjectRef, context)));
+    if (!completeEvidence) throw new InvalidArgumentError("CONFIRMED_MALICIOUS 必须绑定当前 epoch 被裁定对象或经实测关系验证的直接相关对象的完整 Evidence");
     const hostFacts = context.facts.filter((fact) => input.factRefs.includes(fact.factId) && fact.source.kind !== "EXTERNAL");
     const strong = hostFacts.some((fact) => fact.modelPayload.signalStrength === "STRONG");
     const independent = new Set(hostFacts.map((fact) => `${fact.collector.name}:${fact.subjectRef}`)).size;
     if (!strong && independent < 2) throw new InvalidArgumentError("CONFIRMED_MALICIOUS 需要一个强主机信号或两个独立主机事实信号");
   }
+}
+
+function completeEvidenceMetadata(item: AssessmentValidationContext["evidence"][number]): item is typeof item & { metadata: Record<string, unknown> } {
+  const metadata = item.metadata;
+  if (metadata?.complete !== true || metadata.integrityStatus === "FAILED") return false;
+  const range = metadata.range;
+  if (!range || typeof range !== "object" || Array.isArray(range)) return false;
+  const values = range as Record<string, unknown>;
+  if (values.start !== 0 || values.complete !== true || !Number.isSafeInteger(values.length) || Number(values.length) < 0) return false;
+  if (!Number.isSafeInteger(metadata.artifactSize) || metadata.artifactSize !== values.length) return false;
+  const digest = metadata.artifactDigest;
+  if (typeof digest !== "string" || !/^[a-f0-9]{64}$/.test(digest)) return false;
+  if (item.sha256 && item.sha256 !== digest) return false;
+  return true;
+}
+
+function evidenceSupportsSubject(metadata: Record<string, unknown>, subjectRef: string | undefined, context: AssessmentValidationContext): boolean {
+  if (!subjectRef || typeof metadata.subjectRef !== "string") return false;
+  if (metadata.subjectRef === subjectRef) return true;
+  const observedEdges = context.edges.filter((edge) => (
+    (edge.fromRef === metadata.subjectRef && edge.toRef === subjectRef)
+    || (edge.toRef === metadata.subjectRef && edge.fromRef === subjectRef)
+  ) && context.relationProvenance.some((item) => item.edgeRef === edge.edgeId && item.derivation === "OBSERVED"));
+  if (observedEdges.length === 0) return false;
+
+  // JVM retransformation 证据先绑定实际 Attach 的 JVM。只有当前 Class Fact
+  // 与证据中的类名、ClassLoader 精确一致，且存在实测 loads_class 边，才允许支撑 Class 裁定。
+  if (metadata.captureMethod === "JVM_RETRANSFORM") {
+    if (!observedEdges.some((edge) => edge.relation === "loads_class")) return false;
+    return context.facts.some((fact) => fact.subjectRef === subjectRef
+      && fact.namespace === "class"
+      && fact.privatePayload.className === metadata.className
+      && fact.privatePayload.loaderId === metadata.classLoaderId);
+  }
+  return false;
 }
 
 export function safetyProjection(coverage: CoverageRun | undefined, assessments: readonly Assessment[]): { state: "RISK" | "NO_OBSERVED_FINDING" | "INCOMPLETE" | "NOT_APPLICABLE"; model: string } {

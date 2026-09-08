@@ -15,7 +15,9 @@ if [[ ! -f "${state_dir}/unknown_ed25519" ]]; then
 fi
 
 cleanup() {
+  status=$?
   docker compose -f "${compose_file}" down --remove-orphans >/dev/null 2>&1 || true
+  exit "${status}"
 }
 trap cleanup EXIT
 

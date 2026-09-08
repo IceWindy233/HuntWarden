@@ -6,7 +6,7 @@ import { PROTOCOL_MANIFEST } from "./manifest.js";
 export interface EffectiveCapabilities {
   namespaces: Partial<Record<NamespaceName, { fields: Set<string>; relations: Set<string>; verbs: Set<HelperCapabilitiesV2["verbs"][number]> }>>;
   matchers: Set<"literal" | "re2" | "yara">;
-  probes: Set<"jvm.tomcat.inventory" | "jvm.class.inspect">;
+  probes: Set<"jvm.tomcat.inventory" | "jvm.class.inspect" | "jvm.class.dump">;
   verbs: Set<HelperCapabilitiesV2["verbs"][number]>;
   limits: HelperCapabilitiesV2["limits"];
   protocolAnomalies: string[];
@@ -19,6 +19,10 @@ const CATEGORY_NAMESPACES: Readonly<Record<CheckCategory, ReadonlySet<NamespaceN
   linux_persistence: new Set(["host", "process", "file", "ssh_key", "cron_entry", "unit", "persistence", "module"]),
   linux_intrusion_triage: new Set(["host", "process", "socket", "file", "account", "ssh_key", "cron_entry", "unit", "persistence", "module", "log_source", "log_event", "auth_event", "exec_event", "package"]),
 };
+
+export function categoryNamespaces(category: CheckCategory): readonly NamespaceName[] {
+  return [...CATEGORY_NAMESPACES[category]];
+}
 
 export function categoryGrantAllowsNamespace(grants: readonly TaskGrant[], namespace: NamespaceName, now = Date.now()): boolean {
   return grants.some((grant) => grant.kind === "CATEGORY" && grant.status === "ACTIVE"
@@ -59,7 +63,7 @@ export function gateCapabilities(helper: HelperCapabilitiesV2, grants: readonly 
   return {
     namespaces,
     matchers: new Set(helper.matchers.filter((value) => ["literal", "re2", "yara"].includes(value))),
-    probes: new Set(helper.probes.filter((value) => ["jvm.tomcat.inventory", "jvm.class.inspect"].includes(value))),
+    probes: new Set(helper.probes.filter((value) => ["jvm.tomcat.inventory", "jvm.class.inspect", "jvm.class.dump"].includes(value))),
     verbs: new Set(helper.verbs.filter((value) => ["enumerate", "project", "read", "match", "relate", "verify", "collect", "probe"].includes(value))),
     limits: {
       maxObjects: Math.min(helper.limits.maxObjects, PROTOCOL_MANIFEST.hardLimits.enumerateLimit!),

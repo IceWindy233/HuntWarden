@@ -1,0 +1,47 @@
+{
+  "schemaVersion": 1,
+  "suiteId": "business-jvm-release",
+  "hostKeyOutOfBandVerified": true,
+  "workload": {
+    "fixture": false,
+    "workloadKind": "BUSINESS_APPLICATION",
+    "attestor": "replace-with-business-owner-identity",
+    "attestedAt": "2026-09-08T00:00:00.000Z",
+    "declarationSha256": "replace-with-64-lowercase-hex"
+  },
+  "jvmSelector": {
+    "commandContains": "replace-with-unique-business-jvm-marker"
+  },
+  "traffic": {
+    "endpoints": [
+      {
+        "url": "https://service.example/health",
+        "expectedStatus": 200,
+        "headersFromEnv": {
+          "Authorization": "BUSINESS_AUTHORIZATION"
+        }
+      }
+    ],
+    "concurrency": 8,
+    "baselineRequests": 20,
+    "minLoadedRequests": 100,
+    "requestTimeoutMs": 10000,
+    "pauseMs": 5,
+    "maxResponseBytes": 1048576,
+    "maxFailureRate": 0,
+    "maxLoadedP95Ms": 1000,
+    "maxP95RegressionRatio": 2
+  },
+  "attach": {
+    "attempts": 12,
+    "maxWallTimeMs": 60000,
+    "requiredComponents": [
+      {
+        "componentKind": "spring_controller",
+        "className": "replace.with.real.Controller",
+        "mappingContains": "/health"
+      }
+    ]
+  }
+}
+

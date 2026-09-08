@@ -76,6 +76,22 @@ export function SettingsView({ profiles, activeProfileId, initialProfileId, onPr
   const updateAgent = (patch: Partial<AppConfig["agent"]>) => setConfig((old) => old ? { ...old, agent: { ...old.agent, ...patch } } : old);
   const updateExecutor = (patch: Partial<AppConfig["executor"]>) => setConfig((old) => old ? { ...old, executor: { ...old.executor, ...patch } } : old);
   const updateThreatIntel = (patch: Partial<AppConfig["threatIntel"]>) => setConfig((old) => old ? { ...old, threatIntel: { ...old.threatIntel, ...patch } } : old);
+  const updateRemoteBudget = (owner: "preset" | "model", patch: Partial<AppConfig["protocolV2"]["remoteBudget"]["preset"]>) => setConfig((old) => old ? {
+    ...old,
+    protocolV2: { ...old.protocolV2, remoteBudget: { ...old.protocolV2.remoteBudget, [owner]: { ...old.protocolV2.remoteBudget[owner], ...patch } } },
+  } : old);
+  const updateLocalQueryBudget = (patch: Partial<AppConfig["protocolV2"]["localQueryBudget"]>) => setConfig((old) => old ? {
+    ...old, protocolV2: { ...old.protocolV2, localQueryBudget: { ...old.protocolV2.localQueryBudget, ...patch } },
+  } : old);
+  const updateExternalIntelBudget = (patch: Partial<AppConfig["protocolV2"]["externalIntelBudget"]>) => setConfig((old) => old ? {
+    ...old, protocolV2: { ...old.protocolV2, externalIntelBudget: { ...old.protocolV2.externalIntelBudget, ...patch } },
+  } : old);
+  const updateDataPolicy = (patch: Partial<AppConfig["protocolV2"]["dataPolicy"]>) => setConfig((old) => old ? {
+    ...old, protocolV2: { ...old.protocolV2, dataPolicy: { ...old.protocolV2.dataPolicy, ...patch } },
+  } : old);
+  const updateGrantPolicy = (patch: Partial<AppConfig["protocolV2"]["grants"]>) => setConfig((old) => old ? {
+    ...old, protocolV2: { ...old.protocolV2, grants: { ...old.protocolV2.grants, ...patch } },
+  } : old);
 
   async function selectProvider(nextProvider: string): Promise<void> {
     if (!config || source !== "builtin") return;
@@ -236,20 +252,58 @@ export function SettingsView({ profiles, activeProfileId, initialProfileId, onPr
       <Section title="安恒威胁情报" description="对当前任务已观测的公网外联 IP、分析师提供的域名/IP 和文件哈希做受控富化；不会读取 Codex Skill 的密钥文件。">
         <div className="form-grid">
           <Field label="启用情报查询"><Select value={config.threatIntel.enabled ? "yes" : "no"} onChange={(event) => updateThreatIntel({ enabled: event.target.value === "yes" })}><option value="no">关闭</option><option value="yes">启用</option></Select></Field>
-          <Field label="自动富化可疑外联"><Select value={config.threatIntel.autoEnrichConnections ? "yes" : "no"} onChange={(event) => updateThreatIntel({ autoEnrichConnections: event.target.value === "yes" })}><option value="yes">启用</option><option value="no">仅手动调用</option></Select></Field>
           <Field label="Provider"><Input value="dbapp-ti" disabled /></Field>
           <Field label="API 端点"><Input value={config.threatIntel.baseUrl} disabled /></Field>
           <Field label="请求超时（秒）"><Input type="number" min={1} max={60} value={config.threatIntel.timeoutSeconds} onChange={(event) => updateThreatIntel({ timeoutSeconds: Number(event.target.value) })} /></Field>
           <Field label="单批 IOC 上限"><Input type="number" min={1} max={100} value={config.threatIntel.maxBatchSize} onChange={(event) => updateThreatIntel({ maxBatchSize: Number(event.target.value) })} /></Field>
           <Field label="本地缓存（秒）"><Input type="number" min={0} max={86400} value={config.threatIntel.cacheTtlSeconds} onChange={(event) => updateThreatIntel({ cacheTtlSeconds: Number(event.target.value) })} /></Field>
+          <Field label="情报调用预算"><Input type="number" min={1} value={config.protocolV2.externalIntelBudget.calls} onChange={(event) => updateExternalIntelBudget({ calls: Number(event.target.value) })} /></Field>
+          <Field label="情报 IOC 预算"><Input type="number" min={1} value={config.protocolV2.externalIntelBudget.iocs} onChange={(event) => updateExternalIntelBudget({ iocs: Number(event.target.value) })} /></Field>
+          <Field label="情报墙钟预算（ms）"><Input type="number" min={1000} value={config.protocolV2.externalIntelBudget.wallTimeMs} onChange={(event) => updateExternalIntelBudget({ wallTimeMs: Number(event.target.value) })} /></Field>
           <Field label="私网地址上送"><Input value="始终禁止" disabled /></Field>
         </div>
         <div className="credential-card"><div className="credential-status"><div className={`status-orb ${tiCredential?.configured ? "ok" : "warn"}`} /><div><strong>DBAPP TI API 凭据</strong><span>{tiCredential?.configured ? `已配置 · ${tiCredential.source ?? config.threatIntel.apiKeyEnv}` : `尚未配置 · 可使用 ${config.threatIntel.apiKeyEnv}`}</span>{tiCredential?.secureStorageBackend ? <small>安全存储：{tiCredential.secureStorageBackend}</small> : null}{tiCredential?.notice ? <small>{tiCredential.notice}</small> : null}</div></div><div className="credential-input"><Input type="password" autoComplete="new-password" placeholder="nti-…（保存后不可读取）" value={tiSecret} onChange={(event) => setTiSecret(event.target.value)} /><label className="checkbox-row"><input type="checkbox" checked={persistTiSecret} onChange={(event) => setPersistTiSecret(event.target.checked)} />系统安全存储持久化</label><Button onClick={saveThreatIntelSecret} busy={busy === "ti-credential"}>保存情报 Key</Button>{tiCredential?.configured ? <Button variant="ghost" onClick={deleteThreatIntelSecret}>删除</Button> : null}</div></div>
         <div className="inline-actions"><Button variant="primary" onClick={testThreatIntel} busy={busy === "ti-test"} disabled={!profile}>测试情报 API</Button><span className="cost-note">测试会查询 example.com，并消耗 1 次安恒威胁情报额度</span></div>
       </Section>
 
-      <Section title="Agent 预算" description="达到预算后停止调查并在报告中保留未完成项。">
-        <div className="form-grid"><Field label="最大轮次"><Input type="number" min={1} max={100} value={config.agent.maxTurns} onChange={(event) => updateAgent({ maxTurns: Number(event.target.value) })} /></Field><Field label="默认模式"><Select value={config.agent.defaultMode} onChange={(event) => updateAgent({ defaultMode: event.target.value as "SCAN" | "REMEDIATE" })}><option>SCAN</option><option>REMEDIATE</option></Select></Field><Field label="Prompt 版本"><Input value={config.agent.promptVersion} onChange={(event) => updateAgent({ promptVersion: event.target.value })} /></Field></div>
+      <Section title="Agent 与 Provider 边界" description="达到轮次或 Provider 边界后 fail-close，并在报告中保留未完成项。">
+        <div className="form-grid">
+          <Field label="最大轮次"><Input type="number" min={1} max={100} value={config.agent.maxTurns} onChange={(event) => updateAgent({ maxTurns: Number(event.target.value) })} /></Field>
+          <Field label="上下文保留轮次"><Input type="number" min={1} max={20} value={config.agent.contextRetainTurns} onChange={(event) => updateAgent({ contextRetainTurns: Number(event.target.value) })} /></Field>
+          <Field label="Provider 重试次数"><Input type="number" min={0} max={10} value={config.agent.providerMaxRetries} onChange={(event) => updateAgent({ providerMaxRetries: Number(event.target.value) })} /></Field>
+          <Field label="Provider 超时（秒）"><Input type="number" min={30} max={3600} value={config.agent.providerTimeoutSeconds} onChange={(event) => updateAgent({ providerTimeoutSeconds: Number(event.target.value) })} /></Field>
+          <Field label="默认模式"><Select value={config.agent.defaultMode} onChange={(event) => updateAgent({ defaultMode: event.target.value as "SCAN" | "REMEDIATE" })}><option>SCAN</option><option>REMEDIATE</option></Select></Field>
+          <Field label="Prompt 版本"><Input value={config.agent.promptVersion} onChange={(event) => updateAgent({ promptVersion: event.target.value })} /></Field>
+        </div>
+      </Section>
+
+      <Section title="V2 远程预算" description="Preset 与模型自由调查独立计费；QUICK/STANDARD/DEEP 会按 Profile 比例缩放。">
+        <div className="form-grid">
+          {(["preset", "model"] as const).flatMap((owner) => {
+            const budget = config.protocolV2.remoteBudget[owner];
+            const label = owner === "preset" ? "Preset" : "Model";
+            return [
+              <Field key={`${owner}-calls`} label={`${label} 远程调用`}><Input type="number" min={1} value={budget.remoteCalls} onChange={(event) => updateRemoteBudget(owner, { remoteCalls: Number(event.target.value) })} /></Field>,
+              <Field key={`${owner}-nodes`} label={`${label} 对象节点`}><Input type="number" min={1} value={budget.nodes} onChange={(event) => updateRemoteBudget(owner, { nodes: Number(event.target.value) })} /></Field>,
+              <Field key={`${owner}-bytes`} label={`${label} 远程字节`}><Input type="number" min={1024} value={budget.bytes} onChange={(event) => updateRemoteBudget(owner, { bytes: Number(event.target.value) })} /></Field>,
+              <Field key={`${owner}-wall`} label={`${label} 墙钟（ms）`}><Input type="number" min={1000} value={budget.wallTimeMs} onChange={(event) => updateRemoteBudget(owner, { wallTimeMs: Number(event.target.value) })} /></Field>,
+              <Field key={`${owner}-probe`} label={`${label} Probe 次数`}><Input type="number" min={0} value={budget.probeCalls} onChange={(event) => updateRemoteBudget(owner, { probeCalls: Number(event.target.value) })} /></Field>,
+            ];
+          })}
+        </div>
+      </Section>
+
+      <Section title="V2 本地与数据预算" description="这些是当前运行时真正消费的配置；文本和 Evidence 分别计费。">
+        <div className="form-grid">
+          <Field label="本地查询次数"><Input type="number" min={1} value={config.protocolV2.localQueryBudget.calls} onChange={(event) => updateLocalQueryBudget({ calls: Number(event.target.value) })} /></Field>
+          <Field label="本地查询行数"><Input type="number" min={1} value={config.protocolV2.localQueryBudget.rows} onChange={(event) => updateLocalQueryBudget({ rows: Number(event.target.value) })} /></Field>
+          <Field label="本地查询墙钟（ms）"><Input type="number" min={1000} value={config.protocolV2.localQueryBudget.wallTimeMs} onChange={(event) => updateLocalQueryBudget({ wallTimeMs: Number(event.target.value) })} /></Field>
+          <Field label="模型内容字节"><Input type="number" min={1024} value={config.protocolV2.dataPolicy.modelContentBytes} onChange={(event) => updateDataPolicy({ modelContentBytes: Number(event.target.value) })} /></Field>
+          <Field label="Evidence 字节"><Input type="number" min={1024} value={config.protocolV2.dataPolicy.evidenceBytes} onChange={(event) => updateDataPolicy({ evidenceBytes: Number(event.target.value) })} /></Field>
+          <Field label="Grant 申请上限"><Input type="number" min={1} max={100} value={config.protocolV2.grants.maxRequests} onChange={(event) => updateGrantPolicy({ maxRequests: Number(event.target.value) })} /></Field>
+          <Field label="默认文本分类"><Input value={config.protocolV2.dataPolicy.defaultTextClass} disabled /></Field>
+          <Field label="中断后未决 Grant"><Input value="始终过期" disabled /></Field>
+        </div>
       </Section>
 
       <Section title="已知哈希数据集" description="导入控制端版本化 SHA-256 集合；模型只获得 DATASET 引用，集合内容不会发送到目标主机。" action={<Button onClick={importKnownHashDataSet} busy={busy === "dataset"}>导入 JSON</Button>}>
@@ -263,7 +317,12 @@ export function SettingsView({ profiles, activeProfileId, initialProfileId, onPr
       </Section>
 
       <Section title="检测与数据边界" description="原始 Evidence、二进制和 Class Dump 不上传模型。">
-        <div className="form-grid"><Field label="文本上云上限（字节）"><Input type="number" min={1024} max={262144} value={config.llmData.maxTextBytes} onChange={(event) => setConfig({ ...config, llmData: { maxTextBytes: Number(event.target.value) } })} /></Field><Field label="WebShell 时间窗（小时）"><Input type="number" value={config.webshell.modifiedWithinHours} onChange={(event) => setConfig({ ...config, webshell: { ...config.webshell, modifiedWithinHours: Number(event.target.value) } })} /></Field><Field label="候选文件上限"><Input type="number" value={config.webshell.maxCandidateFiles} onChange={(event) => setConfig({ ...config, webshell: { ...config.webshell, maxCandidateFiles: Number(event.target.value) } })} /></Field><Field label="单文件上限（字节）"><Input type="number" value={config.webshell.maxFileSizeBytes} onChange={(event) => setConfig({ ...config, webshell: { ...config.webshell, maxFileSizeBytes: Number(event.target.value) } })} /></Field><Field label="持久化单来源上限"><Input type="number" min={1} max={5000} value={config.persistence.maxItemsPerSource} onChange={(event) => setConfig({ ...config, persistence: { ...config.persistence, maxItemsPerSource: Number(event.target.value) } })} /></Field><Field label="包含用户范围"><Select value={config.persistence.includeUserScope ? "yes" : "no"} onChange={(event) => setConfig({ ...config, persistence: { ...config.persistence, includeUserScope: event.target.value === "yes" } })}><option value="yes">是</option><option value="no">否</option></Select></Field><Field label="分诊进程上限"><Input type="number" min={1} max={10000} value={config.triage.maxProcesses} onChange={(event) => setConfig({ ...config, triage: { ...config.triage, maxProcesses: Number(event.target.value) } })} /></Field><Field label="分诊连接上限"><Input type="number" min={1} max={20000} value={config.triage.maxConnections} onChange={(event) => setConfig({ ...config, triage: { ...config.triage, maxConnections: Number(event.target.value) } })} /></Field><Field label="分诊文件上限"><Input type="number" min={1} max={50000} value={config.triage.maxFiles} onChange={(event) => setConfig({ ...config, triage: { ...config.triage, maxFiles: Number(event.target.value) } })} /></Field><Field label="时间线事件上限"><Input type="number" min={1} max={50000} value={config.triage.maxTimelineEvents} onChange={(event) => setConfig({ ...config, triage: { ...config.triage, maxTimelineEvents: Number(event.target.value) } })} /></Field><Field label="分诊单证据上限（字节）"><Input type="number" min={1024} max={104857600} value={config.triage.maxArtifactBytes} onChange={(event) => setConfig({ ...config, triage: { ...config.triage, maxArtifactBytes: Number(event.target.value) } })} /></Field><Field label="隔离目录"><Input value={config.remediation.quarantineRoot} onChange={(event) => setConfig({ ...config, remediation: { ...config.remediation, quarantineRoot: event.target.value } })} /></Field><Field label="处置审批"><Input value="始终逐动作审批（不可关闭）" disabled /></Field></div>
+        <div className="form-grid">
+          <Field label="单次模型文本上限（字节）"><Input type="number" min={1024} max={262144} value={config.llmData.maxTextBytes} onChange={(event) => setConfig({ ...config, llmData: { maxTextBytes: Number(event.target.value) } })} /></Field>
+          <Field label="WebShell 默认时间窗（小时）"><Input type="number" min={1} max={8760} value={config.webshell.modifiedWithinHours} onChange={(event) => setConfig({ ...config, webshell: { modifiedWithinHours: Number(event.target.value) } })} /></Field>
+          <Field label="隔离目录"><Input value={config.remediation.quarantineRoot} onChange={(event) => setConfig({ ...config, remediation: { ...config.remediation, quarantineRoot: event.target.value } })} /></Field>
+          <Field label="处置审批"><Input value="始终逐动作审批（不可关闭）" disabled /></Field>
+        </div>
       </Section>
 
       <Section title="本地存储" description="数据库、Evidence 和报告仅保存在本机受限目录。">

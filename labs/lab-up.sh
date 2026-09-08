@@ -52,6 +52,7 @@ wait_http() {
 
 wait_http "Lab-Web" "http://127.0.0.1:8080/"
 wait_http "Lab-Tomcat" "http://127.0.0.1:8081/lab/"
+wait_http "Lab-Tomcat-Spring" "http://127.0.0.1:8081/lab/spring/health"
 
 # SSH 和 HTTP 就绪不代表 Lab-Linux-IR 的可疑客户端已经连上假 C2。此前直接开跑测试，
 # `relate process connects` 偶发看不到 46666 连接，测试红灯却不是回归。46666 = 0xB64A。

@@ -31,6 +31,7 @@ import { Application } from "../runtime/application.js";
 import { RuntimeStore } from "../storage/runtime-store.js";
 import { DbappThreatIntelClient } from "../threat-intel/dbapp-client.js";
 import type { KnownHashDataSetSummary } from "../datasets/known-hash-registry.js";
+import { projectEffectiveAssessments } from "../assessments/projection.js";
 
 export interface DesktopBackendOptions {
   userDataDir: string;
@@ -237,16 +238,20 @@ export class DesktopBackend extends EventEmitter {
     if (!task) throw new Error(`任务不存在: ${taskId}`);
     const epoch = task.protocolVersion === 2 && task.activeEpochId ? application.store.getScanEpoch(taskId, task.activeEpochId) : undefined;
     const assessments = epoch ? application.store.listAssessments(taskId, epoch.epochId) : [];
+    const investigationSession = epoch ? application.store.getInvestigationSession(taskId, epoch.epochId) : undefined;
+    const completion = epoch && investigationSession?.completionSnapshotRef
+      ? application.store.getCompletionSnapshot(taskId, epoch.epochId, investigationSession.completionSnapshotRef)
+      : undefined;
     return {
       task,
-      evidence: application.store.listEvidence(taskId),
-      approvals: application.store.listApprovals(taskId),
+      evidence: application.store.listEvidence(taskId).filter((item) => !epoch || item.metadata?.epochId === epoch.epochId),
+      approvals: application.store.listApprovals(taskId).filter((item) => !epoch || item.epochId === epoch.epochId),
       grantRequests: application.store.listGrantRequests(taskId),
       grants: application.store.listTaskGrants(taskId),
-      actionReceipts: application.store.listActionReceipts(taskId),
+      actionReceipts: application.store.listActionReceipts(taskId).filter((item) => !epoch || item.epochId === epoch.epochId),
       reports: application.store.listReports(taskId),
       audit: application.store.listAudit(taskId, 500),
-      conversation: application.store.loadMessages(taskId).map((message) => {
+      conversation: application.store.loadMessages(taskId, epoch?.epochId).map((message) => {
         if (message.role === "user") {
           const text = typeof message.content === "string" ? message.content : message.content.filter((item) => item.type === "text").map((item) => item.text).join("\n");
           return { role: "user" as const, text, timestamp: message.timestamp };
@@ -275,7 +280,7 @@ export class DesktopBackend extends EventEmitter {
         }
         return { role: "assistant" as const, text: "（非安全工具执行记录已省略）", timestamp: message.timestamp };
       }),
-      toolRuns: application.store.listToolRuns(taskId).map((run) => ({
+      toolRuns: application.store.listToolRuns(taskId).filter((run) => !epoch || run.epochId === epoch.epochId).map((run) => ({
         toolCallId: run.toolCallId,
         toolName: run.toolName,
         risk: run.risk,
@@ -288,8 +293,18 @@ export class DesktopBackend extends EventEmitter {
         epoch,
         coverage: application.store.listCoverageRuns(taskId, epoch.epochId),
         assessments,
+        effectiveAssessments: projectEffectiveAssessments(assessments, application.store.listAssessmentRelations(taskId, epoch.epochId)),
         investigationGaps: application.store.listInvestigationGaps(taskId, epoch.epochId),
         modelState: task.checks.map((category) => ({ category, state: assessments.some((item) => item.authorType === "MODEL" && item.category === category && item.scope === "OBSERVED_CATEGORY") ? "CONCLUDED" as const : "NOT_CONCLUDED" as const })),
+        investigation: {
+          ...(investigationSession ? { session: investigationSession } : {}),
+          ...(completion ? { completion } : {}),
+          leads: application.store.listInvestigationLeads(taskId, epoch.epochId),
+          hypotheses: application.store.listInvestigationHypotheses(taskId, epoch.epochId),
+          obligations: application.store.listInvestigationObligations(taskId, epoch.epochId),
+          actions: application.store.listInvestigationActions(taskId, epoch.epochId),
+          discovery: application.store.listDiscoveryCheckpoints(taskId, epoch.epochId),
+        },
       } } : {}),
     };
   }
@@ -300,6 +315,8 @@ export class DesktopBackend extends EventEmitter {
   }
 
   async startTask(taskId: string): Promise<void> { await this.runAndNotify(taskId, () => this.requireApplication().startTask(taskId)); }
+  pauseTask(taskId: string): void { this.requireApplication().pauseTask(taskId); }
+  async resumeTask(taskId: string): Promise<void> { await this.runAndNotify(taskId, () => this.requireApplication().resumeTask(taskId)); }
   async recoverTask(taskId: string): Promise<void> { await this.runAndNotify(taskId, () => this.requireApplication().recoverTask(taskId)); }
   async steerTask(taskId: string, text: string): Promise<void> { await this.requireApplication().steerTask(taskId, text); }
   abortTask(taskId: string): void { this.requireApplication().abortTask(taskId); }

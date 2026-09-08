@@ -4,6 +4,7 @@ import { Agent } from "@earendil-works/pi-agent-core";
 import type { Api, Model, Models, ToolResultMessage } from "@earendil-works/pi-ai";
 import type { ApprovalService } from "../agent/approval-service.js";
 import { buildSystemPrompt } from "../agent/system-prompt.js";
+import { createObservedProviderFetch, providerRequestSignal } from "../agent/provider-observer.js";
 import { sanitizeForLlm } from "../agent/data-sanitizer.js";
 import type { AppConfig } from "../config/schema.js";
 import { digestObject } from "../common/json.js";
@@ -11,6 +12,7 @@ import type { AgentStreamUpdate, SecurityToolDefinition, TaskContext } from "../
 import type { ProtocolV2Executor } from "../executor/protocol-v2-executor.js";
 import type { RuntimeStore, ToolRunRecord } from "../storage/runtime-store.js";
 import { randomUUID } from "node:crypto";
+import { InvestigationCompletionValidator } from "../investigation/completion-validator.js";
 
 /** 小于该体量的工具结果不值得淘汰：存根本身也要占位，压缩收益接近零。 */
 const EVICTION_MIN_BYTES = 2_048;
@@ -33,16 +35,25 @@ export class SecurityAgentRuntime extends EventEmitter {
   private readonly pendingInputByTimestamp = new Map<number, string>();
   private activeStream: { streamId: string; timestamp: number } | undefined;
   private streamSequence = 0;
+  private pauseRequested = false;
   constructor(private readonly options: SecurityAgentRuntimeOptions) {
     super();
     const { task, config, tools, models, model, store } = options;
+    const providerFetch = createObservedProviderFetch((attempt) => {
+      store.appendAudit({
+        taskId: task.taskId,
+        event: "model_provider_http_attempt",
+        level: attempt.status !== undefined && attempt.status < 400 ? "debug" : "warn",
+        data: { epochId: options.protocolV2.epochId, provider: model.provider, model: model.id, ...attempt },
+      });
+    });
     this.agent = new Agent({
       initialState: {
         systemPrompt: buildSystemPrompt(task),
         model,
         thinkingLevel: config.model.thinkingLevel,
         tools,
-        messages: store.loadMessages(task.taskId),
+        messages: store.loadMessages(task.taskId, options.protocolV2.epochId),
       },
       // 调查循环此前不传重试策略：一次 429 或网络抖动就让 stopReason 变成 error，任务 FAILED，
       // 所有未固化类别被标成 ERROR。有界重试把可恢复的 Provider 抖动与真正的目标环境受限区分开。
@@ -50,6 +61,8 @@ export class SecurityAgentRuntime extends EventEmitter {
         ...options,
         maxRetries: config.agent.providerMaxRetries,
         timeoutMs: config.agent.providerTimeoutSeconds * 1_000,
+        signal: providerRequestSignal(config.agent.providerTimeoutSeconds * 1_000, options?.signal),
+        fetch: providerFetch,
       }),
       transformContext: async (messages) => this.evictStaleToolResults(messages),
       // 远程预算按最坏成本先预留、响应后结算。并行工具会把多个 60 秒
@@ -121,15 +134,20 @@ export class SecurityAgentRuntime extends EventEmitter {
     task.status = status;
     this.options.store.saveTask(task);
     const originalTools = this.agent.state.tools;
-    if (withoutTools) this.agent.state.tools = originalTools.filter((tool) => tool.name === "query_facts" || tool.name === "get_assessment_projection");
+    if (withoutTools) this.agent.state.tools = originalTools.filter((tool) => tool.name === "query_facts" || tool.name === "query_investigation" || tool.name === "get_assessment_projection");
     this.options.store.appendAudit({ taskId: task.taskId, event: withoutTools ? "report_model_started" : "agent_started", level: "info", data: {} });
     try {
       await this.agent.prompt(text);
+      if (!withoutTools && this.pauseRequested) { this.markPaused(); return; }
       const lastAssistant = [...this.agent.state.messages].reverse().find((message) => message.role === "assistant");
-      if (lastAssistant?.role === "assistant" && lastAssistant.stopReason === "error") {
-        throw new Error(lastAssistant.errorMessage || "模型 Provider 调用失败");
+      if (lastAssistant?.role === "assistant" && (lastAssistant.stopReason === "error" || lastAssistant.stopReason === "aborted")) {
+        throw new Error(lastAssistant.errorMessage || (lastAssistant.stopReason === "aborted" ? "模型 Provider 流在完成前中止" : "模型 Provider 调用失败"));
       }
-      if (!withoutTools) this.finalizeV2ModelGaps("NORMAL_SKIP");
+      this.requireMeaningfulAssistant(lastAssistant);
+      if (!withoutTools) {
+        this.finalizeV2ModelGaps("NORMAL_SKIP");
+        this.completeInvestigation("MODEL_STOPPED_WITH_OPEN_WORK");
+      }
       this.options.store.appendAudit({ taskId: task.taskId, event: withoutTools ? "report_model_finished" : "agent_run_finished", level: "info", data: {} });
       if (!withoutTools) {
         const completed = this.options.store.getTask(task.taskId) ?? task;
@@ -138,7 +156,12 @@ export class SecurityAgentRuntime extends EventEmitter {
       }
     } catch (error) {
       const aborted = Boolean(this.agent.signal?.aborted);
-      if (!withoutTools) this.finalizeV2ModelGaps(aborted ? "ANALYST_ABORT" : "PROVIDER_FAILURE");
+      if (!withoutTools && this.pauseRequested) { this.markPaused(); return; }
+      if (!withoutTools) {
+        this.finalizeV2ModelGaps(aborted ? "ANALYST_ABORT" : "PROVIDER_FAILURE");
+        if (aborted) this.cancelInvestigation("ANALYST_ABORT");
+        else this.completeInvestigationAfterFailure("PROVIDER_FAILURE");
+      }
       const failed = this.options.store.getTask(task.taskId) ?? task;
       failed.status = aborted ? "ABORTED" : "FAILED";
       this.options.store.saveTask(failed);
@@ -150,7 +173,7 @@ export class SecurityAgentRuntime extends EventEmitter {
 
   async steer(text: string): Promise<void> {
     const message: AgentMessage = { role: "user", content: text, timestamp: Date.now() };
-    const inputId = this.options.store.enqueueInput(this.options.task.taskId, message);
+    const inputId = this.options.store.enqueueInput(this.options.task.taskId, message, this.options.protocolV2.epochId);
     this.pendingInputByTimestamp.set(message.timestamp, inputId);
     this.agent.steer(message);
   }
@@ -159,13 +182,29 @@ export class SecurityAgentRuntime extends EventEmitter {
     this.ensureSingleActive();
     this.options.task.status = "RECOVERING";
     this.options.store.saveTask(this.options.task);
-    this.options.store.appendAudit({ taskId: this.options.task.taskId, event: "recovery_started", level: "warn", data: {} });
-    for (const queued of this.options.store.listPendingInputs(this.options.task.taskId)) {
+    this.options.store.appendAudit({ taskId: this.options.task.taskId, event: "recovery_started", level: "warn", data: { epochId: this.options.protocolV2.epochId } });
+    for (const queued of this.options.store.listPendingInputs(this.options.task.taskId, this.options.protocolV2.epochId)) {
       const timestamp = "timestamp" in queued.message ? queued.message.timestamp : Date.now();
       this.pendingInputByTimestamp.set(timestamp, queued.inputId);
       this.agent.steer(queued.message);
     }
-    for (const record of this.options.store.listIncompleteToolRuns(this.options.task.taskId)) {
+    const incomplete = this.options.store.listIncompleteToolRuns(this.options.task.taskId);
+    const unbound = incomplete.filter((record) => record.epochId !== this.options.protocolV2.epochId);
+    if (unbound.length > 0) {
+      this.options.store.appendAudit({
+        taskId: this.options.task.taskId,
+        event: "recovery_unbound_tool_runs",
+        level: "error",
+        data: { epochId: this.options.protocolV2.epochId, count: unbound.length, toolRunDigests: unbound.map((record) => digestObject(record.toolCallId)) },
+      });
+      this.options.task.status = "ABORTED";
+      this.options.task.interruption = {
+        previousStatus: "RECOVERING", reason: "PROCESS_INTERRUPTED", detectedAt: new Date().toISOString(), recoveryRequired: true,
+      };
+      this.options.store.saveTask(this.options.task);
+      throw new Error("存在未绑定当前 Epoch 的未完成 ToolRun，拒绝自动恢复");
+    }
+    for (const record of incomplete) {
       await this.recoverToolRun(record);
     }
     this.options.task.status = "RUNNING";
@@ -177,7 +216,7 @@ export class SecurityAgentRuntime extends EventEmitter {
     // 存在状态未知的写动作时，绝不能把任务归档为已完成：`recoveryRequired` 是分析师进入
     // 恢复入口的唯一信号，清零它等于把撕裂的隔离/锁定动作静默归档。见 9.0。
     const unresolved = this.options.store.listActionReceipts(this.options.task.taskId)
-      .filter((receipt) => receipt.status === "UNKNOWN");
+      .filter((receipt) => receipt.epochId === this.options.protocolV2.epochId && receipt.status === "UNKNOWN");
     if (unresolved.length > 0) {
       completed.status = "ABORTED";
       completed.interruption = {
@@ -192,6 +231,7 @@ export class SecurityAgentRuntime extends EventEmitter {
         event: "recovery_requires_manual_confirmation",
         level: "warn",
         data: {
+          epochId: this.options.protocolV2.epochId,
           unknownActionIds: unresolved.map((receipt) => receipt.actionId),
           detail: `${unresolved.length} 个写动作状态未知，需人工确认目标端实际状态`,
         },
@@ -199,9 +239,55 @@ export class SecurityAgentRuntime extends EventEmitter {
       return;
     }
     completed.status = "COMPLETED";
+    this.finalizeV2ModelGaps("RECOVERY_SKIP");
+    this.completeInvestigation("RECOVERY_STOPPED_WITH_OPEN_WORK");
     if (completed.interruption) completed.interruption.recoveryRequired = false;
     this.options.store.saveTask(completed);
-    this.options.store.appendAudit({ taskId: this.options.task.taskId, event: "recovery_completed", level: "info", data: {} });
+    this.options.store.appendAudit({ taskId: this.options.task.taskId, event: "recovery_completed", level: "info", data: { epochId: this.options.protocolV2.epochId } });
+  }
+
+  pause(): void {
+    const task = this.options.store.getTask(this.options.task.taskId) ?? this.options.task;
+    if (!["RUNNING", "WAITING_APPROVAL", "RECOVERING"].includes(task.status)) throw new Error("只有运行中的调查可以暂停");
+    this.pauseRequested = true;
+    this.markPaused();
+    this.agent.abort();
+  }
+
+  async resume(): Promise<void> {
+    this.ensureSingleActive();
+    const task = this.options.store.getTask(this.options.task.taskId) ?? this.options.task;
+    const session = this.options.store.getInvestigationSession(task.taskId, this.options.protocolV2.epochId);
+    if (task.status !== "PAUSED" || session?.executionStatus !== "PAUSED") throw new Error("任务没有处于可继续的暂停状态");
+    this.pauseRequested = false;
+    this.options.store.updateInvestigationSession({ ...session, executionStatus: "RUNNING", revision: session.revision + 1, updatedAt: new Date().toISOString() }, session.revision);
+    task.status = "RUNNING";
+    this.options.store.saveTask(task);
+    this.options.store.appendAudit({ taskId: task.taskId, event: "investigation_resumed", level: "info", data: {} });
+    try {
+      await this.agent.continue();
+      if (this.pauseRequested) { this.markPaused(); return; }
+      const lastAssistant = [...this.agent.state.messages].reverse().find((message) => message.role === "assistant");
+      if (lastAssistant?.role === "assistant" && (lastAssistant.stopReason === "error" || lastAssistant.stopReason === "aborted")) {
+        throw new Error(lastAssistant.errorMessage || (lastAssistant.stopReason === "aborted" ? "模型 Provider 流在完成前中止" : "模型 Provider 调用失败"));
+      }
+      this.requireMeaningfulAssistant(lastAssistant);
+      this.finalizeV2ModelGaps("NORMAL_SKIP");
+      this.completeInvestigation("MODEL_STOPPED_WITH_OPEN_WORK");
+      const completed = this.options.store.getTask(task.taskId) ?? task;
+      completed.status = "COMPLETED";
+      this.options.store.saveTask(completed);
+      this.options.store.appendAudit({ taskId: task.taskId, event: "agent_run_finished", level: "info", data: { resumed: true } });
+    } catch (error) {
+      if (this.pauseRequested) { this.markPaused(); return; }
+      const aborted = Boolean(this.agent.signal?.aborted);
+      this.finalizeV2ModelGaps(aborted ? "ANALYST_ABORT" : "PROVIDER_FAILURE");
+      if (aborted) this.cancelInvestigation("ANALYST_ABORT"); else this.completeInvestigationAfterFailure("PROVIDER_FAILURE");
+      const failed = this.options.store.getTask(task.taskId) ?? task;
+      failed.status = aborted ? "ABORTED" : "FAILED";
+      this.options.store.saveTask(failed);
+      throw error;
+    }
   }
 
   abort(): void { this.agent.abort(); }
@@ -212,10 +298,40 @@ export class SecurityAgentRuntime extends EventEmitter {
     return message.content.filter((item) => item.type === "text").map((item) => item.text).join("");
   }
 
+  /**
+   * Provider 以 stop 正常结束却没有文本或工具调用时，不能把这次请求当成模型已审查。
+   * assistant 原消息已经由 persistEvent 保存，后续 Provider failure 路径会把未审查类别
+   * 固化成 MODEL_DID_NOT_INVESTIGATE，因而既保留首跑轨迹，也不会丢掉确定性调查结果。
+   */
+  private requireMeaningfulAssistant(message: AgentMessage | undefined): void {
+    const meaningful = message?.role === "assistant" && message.content.some((item) =>
+      item.type === "toolCall" || (item.type === "text" && item.text.trim().length > 0));
+    if (meaningful) return;
+    this.options.store.appendAudit({
+      taskId: this.options.task.taskId,
+      event: "model_empty_response",
+      level: "warn",
+      data: { provider: this.options.model.provider, model: this.options.model.id },
+    });
+    throw new Error("模型 Provider 返回空 assistant 响应");
+  }
+
   private ensureSingleActive(): void {
     if (this.options.store.hasActiveTask(this.options.task.taskId)) {
       throw new Error("已有其他运行中的任务；首期只允许单任务运行");
     }
+  }
+
+  private markPaused(): void {
+    const task = this.options.store.getTask(this.options.task.taskId) ?? this.options.task;
+    const session = this.options.store.getInvestigationSession(task.taskId, this.options.protocolV2.epochId);
+    let transitioned = false;
+    if (session && session.executionStatus !== "PAUSED" && session.executionStatus !== "STOPPED") {
+      this.options.store.updateInvestigationSession({ ...session, executionStatus: "PAUSED", revision: session.revision + 1, updatedAt: new Date().toISOString() }, session.revision);
+      transitioned = true;
+    }
+    if (task.status !== "PAUSED") { task.status = "PAUSED"; this.options.store.saveTask(task); transitioned = true; }
+    if (transitioned) this.options.store.appendAudit({ taskId: task.taskId, event: "investigation_paused", level: "info", data: {} });
   }
 
   private async beforeToolCall(toolCallId: string, toolName: string, args: unknown, signal?: AbortSignal) {
@@ -225,14 +341,23 @@ export class SecurityAgentRuntime extends EventEmitter {
         taskId: this.options.task.taskId,
         event: "model_invalid_tool_call",
         level: "warn",
-        data: { reason: "UNREGISTERED_TOOL", toolNameDigest: digestObject(toolName) },
+        data: { epochId: this.options.protocolV2.epochId, reason: "UNREGISTERED_TOOL", toolNameDigest: digestObject(toolName) },
       });
       return { block: true, reason: `未注册工具: ${toolName}` };
     }
     const task = this.options.store.getTask(this.options.task.taskId) ?? this.options.task;
     task.toolCallCount += 1;
     this.options.store.saveTask(task);
-    this.options.store.startToolRun({ toolCallId, taskId: task.taskId, toolName, risk: tool.risk, replayPolicy: tool.replayPolicy, args });
+    const run = this.options.store.startToolRun({ toolCallId, taskId: task.taskId, epochId: this.options.protocolV2.epochId, toolName, risk: tool.risk, replayPolicy: tool.replayPolicy, args });
+    if (run.status !== "STARTED") {
+      this.options.store.appendAudit({
+        taskId: task.taskId,
+        event: "model_invalid_tool_call",
+        level: "warn",
+        data: { epochId: this.options.protocolV2.epochId, reason: "TERMINAL_TOOL_CALL_ID_REUSED", toolCallIdDigest: digestObject(toolCallId) },
+      });
+      return { block: true, reason: "ToolCall ID 已经进入终态，不能再次执行" };
+    }
     this.options.checkpoint?.("tool_started");
     if (tool.risk !== "WRITE") return undefined;
     if (task.mode !== "REMEDIATE") {
@@ -242,7 +367,7 @@ export class SecurityAgentRuntime extends EventEmitter {
     if (!this.options.config.remediation.allowedTools.includes(toolName as "quarantine_file" | "disable_account")) {
       return { block: true, reason: "写工具不在配置白名单" };
     }
-    let approved = this.options.store.findApproval(task.taskId, toolName, this.options.approvals.getArgsDigest(args));
+    let approved = this.options.store.findApproval(task.taskId, toolName, this.options.approvals.getArgsDigest(args), this.options.protocolV2.epochId);
     if (!approved) {
       const ticket = this.options.approvals.request(task, toolName, args);
       this.options.checkpoint?.("approval_waiting");
@@ -281,7 +406,7 @@ export class SecurityAgentRuntime extends EventEmitter {
     }
     if (type === "message_end" && event.message && typeof event.message === "object") {
       const message = event.message as AgentMessage;
-      this.options.store.appendMessage(this.options.task.taskId, message);
+      this.options.store.appendMessage(this.options.task.taskId, message, this.options.protocolV2.epochId);
       if (message.role === "user") {
         const inputId = this.pendingInputByTimestamp.get(message.timestamp);
         if (inputId) { this.options.store.markInputDelivered(inputId); this.pendingInputByTimestamp.delete(message.timestamp); }
@@ -300,7 +425,9 @@ export class SecurityAgentRuntime extends EventEmitter {
     }
     if (type === "tool_execution_end") {
       const toolCallId = String(event.toolCallId ?? "");
-      const run = toolCallId ? this.options.store.getToolRun(toolCallId) : undefined;
+      const run = toolCallId
+        ? this.options.store.getToolRunForScope(this.options.task.taskId, this.options.protocolV2.epochId, toolCallId)
+        : undefined;
       if (run?.status === "STARTED" && event.result) {
         const isError = Boolean(event.isError);
         this.options.store.finishToolRun(toolCallId, isError ? "FAILED" : "SUCCEEDED", event.result, isError ? "Pi tool execution error" : undefined);
@@ -323,6 +450,8 @@ export class SecurityAgentRuntime extends EventEmitter {
   }
 
   private async recoverToolRun(record: ToolRunRecord): Promise<void> {
+    const recordEpochId = record.epochId;
+    if (!recordEpochId || recordEpochId !== this.options.protocolV2.epochId) throw new Error("ToolRun 未绑定当前 Epoch");
     const tool = this.options.tools.find((item) => item.name === record.toolName);
     if (!tool) {
       this.appendRecoveredToolResult(record, { content: [{ type: "text", text: "恢复失败：工具已不可用" }], details: {} }, true);
@@ -342,6 +471,7 @@ export class SecurityAgentRuntime extends EventEmitter {
       record.taskId,
       record.toolName,
       this.options.approvals.getArgsDigest(record.args),
+      recordEpochId,
     );
     const actionId = previousApproval?.actionId;
     if (actionId) {
@@ -356,6 +486,7 @@ export class SecurityAgentRuntime extends EventEmitter {
           this.options.store.putActionReceipt({
             actionId,
             taskId: record.taskId,
+            epochId: recordEpochId,
             tool: record.toolName,
             targetFingerprint: this.options.task.target.hostFingerprint,
             status: remote.status,
@@ -373,6 +504,7 @@ export class SecurityAgentRuntime extends EventEmitter {
         this.options.store.putActionReceipt({
           actionId,
           taskId: record.taskId,
+          epochId: recordEpochId,
           tool: record.toolName,
           targetFingerprint: this.options.task.target.hostFingerprint,
           status: "UNKNOWN",
@@ -384,7 +516,7 @@ export class SecurityAgentRuntime extends EventEmitter {
           taskId: record.taskId,
           event: "action_receipt_query_failed",
           level: "warn",
-          data: { actionId, error: error instanceof Error ? error.message : String(error) },
+          data: { epochId: recordEpochId, actionId, error: error instanceof Error ? error.message : String(error) },
         });
       }
     }
@@ -424,13 +556,46 @@ export class SecurityAgentRuntime extends EventEmitter {
     }
   }
 
+  private completeInvestigation(reason: string): void {
+    if (!this.options.store.getInvestigationSession(this.options.task.taskId, this.options.protocolV2.epochId)) return;
+    const snapshot = new InvestigationCompletionValidator(this.options.store)
+      .freezeWithLimits(this.options.task.taskId, this.options.protocolV2.epochId, reason);
+    this.options.store.appendAudit({
+      taskId: this.options.task.taskId,
+      event: "investigation_completion_frozen",
+      level: snapshot.investigationStatus === "LIMITED" ? "warn" : "info",
+      data: { snapshotRef: snapshot.snapshotRef, investigationStatus: snapshot.investigationStatus, maxEventSeq: snapshot.maxEventSeq },
+    });
+  }
+
+  /** Provider 的原始错误是首要失败轨迹；完成快照自身异常必须留审计，但不能覆盖它。 */
+  private completeInvestigationAfterFailure(reason: string): void {
+    try {
+      this.completeInvestigation(reason);
+    } catch (error) {
+      this.options.store.appendAudit({
+        taskId: this.options.task.taskId,
+        event: "investigation_completion_after_provider_failure_failed",
+        level: "error",
+        data: { reason, error: error instanceof Error ? error.message : String(error) },
+      });
+    }
+  }
+
+  private cancelInvestigation(reason: string): void {
+    if (!this.options.store.getInvestigationSession(this.options.task.taskId, this.options.protocolV2.epochId)) return;
+    const snapshot = new InvestigationCompletionValidator(this.options.store)
+      .freezeCancelled(this.options.task.taskId, this.options.protocolV2.epochId, reason);
+    this.options.store.appendAudit({ taskId: this.options.task.taskId, event: "investigation_cancelled", level: "warn", data: { snapshotRef: snapshot.snapshotRef, maxEventSeq: snapshot.maxEventSeq } });
+  }
+
   private appendRecoveredToolResult(record: ToolRunRecord, result: AgentToolResult<unknown>, isError: boolean): void {
     this.options.store.finishToolRun(record.toolCallId, isError ? "FAILED" : "SUCCEEDED", result, isError ? "recovery failed" : undefined);
     const message: ToolResultMessage = {
       role: "toolResult", toolCallId: record.toolCallId, toolName: record.toolName,
       content: result.content, details: result.details, isError, timestamp: Date.now(),
     };
-    this.options.store.appendMessage(record.taskId, message);
+    this.options.store.appendMessage(record.taskId, message, record.epochId);
     this.agent.state.messages = [...this.agent.state.messages, message];
   }
 }

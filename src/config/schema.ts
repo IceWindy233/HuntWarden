@@ -1,5 +1,7 @@
 import { Type, type Static } from "typebox";
 
+const STRICT_OBJECT = { additionalProperties: false } as const;
+
 const ThinkingLevelSchema = Type.Union([
   Type.Literal("off"), Type.Literal("minimal"), Type.Literal("low"), Type.Literal("medium"),
   Type.Literal("high"), Type.Literal("xhigh"), Type.Literal("max"),
@@ -13,7 +15,7 @@ export const BuiltinModelSchema = Type.Object({
   provider: ProviderIdSchema,
   model: Type.String({ minLength: 1, maxLength: 256 }),
   thinkingLevel: ThinkingLevelSchema,
-});
+}, STRICT_OBJECT);
 
 export const CustomModelSchema = Type.Object({
   source: Type.Literal("custom"),
@@ -27,8 +29,8 @@ export const CustomModelSchema = Type.Object({
   ]),
   baseUrl: Type.String({ minLength: 1, maxLength: 2048 }),
   authentication: Type.Union([
-    Type.Object({ type: Type.Literal("api-key-env"), apiKeyEnv: EnvNameSchema }),
-    Type.Object({ type: Type.Literal("none") }),
+    Type.Object({ type: Type.Literal("api-key-env"), apiKeyEnv: EnvNameSchema }, STRICT_OBJECT),
+    Type.Object({ type: Type.Literal("none") }, STRICT_OBJECT),
   ]),
   reasoning: Type.Boolean(),
   contextWindow: Type.Integer({ minimum: 4096, maximum: 10_000_000 }),
@@ -40,21 +42,21 @@ export const CustomModelSchema = Type.Object({
     supportsStrictMode: Type.Optional(Type.Boolean()),
     supportsStrictTools: Type.Optional(Type.Boolean()),
     maxTokensField: Type.Optional(Type.Union([Type.Literal("max_completion_tokens"), Type.Literal("max_tokens")])),
-  })),
-});
+  }, STRICT_OBJECT)),
+}, STRICT_OBJECT);
 
 export const ConfigSchema = Type.Object({
   schemaVersion: Type.Literal(2),
   protocolV2: Type.Object({
     remoteBudget: Type.Object({
-      preset: Type.Object({ remoteCalls: Type.Integer({ minimum: 1 }), nodes: Type.Integer({ minimum: 1 }), bytes: Type.Integer({ minimum: 1024 }), wallTimeMs: Type.Integer({ minimum: 1000 }), probeCalls: Type.Integer({ minimum: 0 }) }),
-      model: Type.Object({ remoteCalls: Type.Integer({ minimum: 1 }), nodes: Type.Integer({ minimum: 1 }), bytes: Type.Integer({ minimum: 1024 }), wallTimeMs: Type.Integer({ minimum: 1000 }), probeCalls: Type.Integer({ minimum: 0 }) }),
-    }),
-    localQueryBudget: Type.Object({ calls: Type.Integer({ minimum: 1 }), rows: Type.Integer({ minimum: 1 }), wallTimeMs: Type.Integer({ minimum: 1000 }) }),
-    externalIntelBudget: Type.Object({ calls: Type.Integer({ minimum: 1 }), iocs: Type.Integer({ minimum: 1 }), wallTimeMs: Type.Integer({ minimum: 1000 }) }),
-    dataPolicy: Type.Object({ modelContentBytes: Type.Integer({ minimum: 1024 }), evidenceBytes: Type.Integer({ minimum: 1024 }), defaultTextClass: Type.Literal("SENSITIVE_TEXT") }),
-    grants: Type.Object({ maxRequests: Type.Integer({ minimum: 1, maximum: 100 }), pendingExpiresOnInterruption: Type.Literal(true) }),
-  }),
+      preset: Type.Object({ remoteCalls: Type.Integer({ minimum: 1 }), nodes: Type.Integer({ minimum: 1 }), bytes: Type.Integer({ minimum: 1024 }), wallTimeMs: Type.Integer({ minimum: 1000 }), probeCalls: Type.Integer({ minimum: 0 }) }, STRICT_OBJECT),
+      model: Type.Object({ remoteCalls: Type.Integer({ minimum: 1 }), nodes: Type.Integer({ minimum: 1 }), bytes: Type.Integer({ minimum: 1024 }), wallTimeMs: Type.Integer({ minimum: 1000 }), probeCalls: Type.Integer({ minimum: 0 }) }, STRICT_OBJECT),
+    }, STRICT_OBJECT),
+    localQueryBudget: Type.Object({ calls: Type.Integer({ minimum: 1 }), rows: Type.Integer({ minimum: 1 }), wallTimeMs: Type.Integer({ minimum: 1000 }) }, STRICT_OBJECT),
+    externalIntelBudget: Type.Object({ calls: Type.Integer({ minimum: 1 }), iocs: Type.Integer({ minimum: 1 }), wallTimeMs: Type.Integer({ minimum: 1000 }) }, STRICT_OBJECT),
+    dataPolicy: Type.Object({ modelContentBytes: Type.Integer({ minimum: 1024 }), evidenceBytes: Type.Integer({ minimum: 1024 }), defaultTextClass: Type.Literal("SENSITIVE_TEXT") }, STRICT_OBJECT),
+    grants: Type.Object({ maxRequests: Type.Integer({ minimum: 1, maximum: 100 }), pendingExpiresOnInterruption: Type.Literal(true) }, STRICT_OBJECT),
+  }, STRICT_OBJECT),
   agent: Type.Object({
     maxTurns: Type.Integer({ minimum: 1, maximum: 100 }),
     /**
@@ -70,7 +72,7 @@ export const ConfigSchema = Type.Object({
     providerTimeoutSeconds: Type.Integer({ minimum: 30, maximum: 3600 }),
     defaultMode: Type.Union([Type.Literal("SCAN"), Type.Literal("REMEDIATE")]),
     promptVersion: Type.String({ minLength: 1 }),
-  }),
+  }, STRICT_OBJECT),
   model: Type.Union([BuiltinModelSchema, CustomModelSchema]),
   executor: Type.Object({
     type: Type.Literal("ssh"),
@@ -78,58 +80,12 @@ export const ConfigSchema = Type.Object({
     helperPath: Type.String({ minLength: 1 }),
     knownHostsPath: Type.String({ minLength: 1 }),
     privateKeyPath: Type.String({ minLength: 1 }),
-  }),
-  storage: Type.Object({ baseDir: Type.String(), databaseFile: Type.String() }),
-  llmData: Type.Object({ maxTextBytes: Type.Integer({ minimum: 1024, maximum: 262144 }) }),
+  }, STRICT_OBJECT),
+  storage: Type.Object({ baseDir: Type.String(), databaseFile: Type.String() }, STRICT_OBJECT),
+  llmData: Type.Object({ maxTextBytes: Type.Integer({ minimum: 1024, maximum: 262144 }) }, STRICT_OBJECT),
   webshell: Type.Object({
-    modifiedWithinHours: Type.Integer({ minimum: 1 }),
-    maxCandidateFiles: Type.Integer({ minimum: 1, maximum: 5000 }),
-    maxFileSizeBytes: Type.Integer({ minimum: 1024 }),
-    /**
-     * `inspect_script_file` 交给模型的脚本片段字节预算。
-     *
-     * 与 `llmData.maxTextBytes` 解耦：后者是每条工具结果的整体预算，schema 上限 262144，而
-     * Helper 对本操作硬夹 [1024, 65536] 且越界抛错不夹取。共用一个旋钮时，把 `maxTextBytes`
-     * 调大就会让本工具恒定 INVALID_ARGUMENT，WebShell 内容特征分析整条路径静默不可用。
-     */
-    maxScriptExcerptBytes: Type.Integer({ minimum: 1024, maximum: 65_536 }),
-    /** `search_web_access_log` 返回的最大行数；上限对齐 Helper 的 safe_int 区间。 */
-    maxAccessLogLines: Type.Integer({ minimum: 1, maximum: 5000 }),
-    /** 控制端本地的内置 YARA RuleSet 资产目录；目标端路径是协议常量，不可配置。 */
-    yaraRuleDir: Type.String(),
-  }),
-  java: Type.Object({
-    supportedContainers: Type.Array(Type.Literal("tomcat")),
-    allowClassDump: Type.Boolean(),
-    allowRuntimeModification: Type.Literal(false),
-    probeJar: Type.String(),
-  }),
-  account: Type.Object({
-    checkAuthorizedKeys: Type.Boolean(),
-    checkLoginHistory: Type.Boolean(),
-    /** `get_login_history` 返回的最大条数；上限对齐 Helper 的 safe_int 区间。 */
-    maxLoginHistoryEntries: Type.Integer({ minimum: 1, maximum: 500 }),
-  }),
-  persistence: Type.Object({
-    maxItemsPerSource: Type.Integer({ minimum: 1, maximum: 5000 }),
-    includeUserScope: Type.Boolean(),
-  }),
-  /**
-   * 采集数量上限。与 helper 侧 1.5 MiB 输出预算（host-helper MAX_OUTPUT_BYTES）和控制端
-   * 2 MiB 协议硬顶（src/executor/ssh-executor.ts MAX_OUTPUT_BYTES）同一量级：按每条结构化记录
-   * 约 200–400 B 估算，1.5 MiB 约容纳 3900–7800 条，因此上限统一收敛到 5000。
-   * helper 超预算会截断 items 并置 partial，所以这里的上限不是"防止传输失败"，
-   * 而是让预算在任务创建时就显式化，避免用户长期拿到被静默截断的 partial 结果。
-   */
-  triage: Type.Object({
-    maxProcesses: Type.Integer({ minimum: 1, maximum: 5000 }),
-    maxConnections: Type.Integer({ minimum: 1, maximum: 5000 }),
-    maxFiles: Type.Integer({ minimum: 1, maximum: 5000 }),
-    maxTimelineEvents: Type.Integer({ minimum: 1, maximum: 5000 }),
-    maxArtifactBytes: Type.Integer({ minimum: 1024, maximum: 104_857_600 }),
-    /** `inspect_process_tree` 的最大深度；上限对齐 Helper 的 safe_int 区间。 */
-    maxProcessTreeDepth: Type.Integer({ minimum: 1, maximum: 32 }),
-  }),
+    modifiedWithinHours: Type.Integer({ minimum: 1, maximum: 8_760 }),
+  }, STRICT_OBJECT),
   threatIntel: Type.Object({
     enabled: Type.Boolean(),
     provider: Type.Literal("dbapp-ti"),
@@ -138,14 +94,12 @@ export const ConfigSchema = Type.Object({
     timeoutSeconds: Type.Integer({ minimum: 1, maximum: 60 }),
     maxBatchSize: Type.Integer({ minimum: 1, maximum: 100 }),
     cacheTtlSeconds: Type.Integer({ minimum: 0, maximum: 86_400 }),
-    autoEnrichConnections: Type.Boolean(),
-    includePrivateAddresses: Type.Literal(false),
-  }),
+  }, STRICT_OBJECT),
   remediation: Type.Object({
     requireApproval: Type.Literal(true),
     allowedTools: Type.Array(Type.Union([Type.Literal("quarantine_file"), Type.Literal("disable_account")])),
     quarantineRoot: Type.String(),
-  }),
-});
+  }, STRICT_OBJECT),
+}, STRICT_OBJECT);
 
 export type AppConfig = Static<typeof ConfigSchema>;

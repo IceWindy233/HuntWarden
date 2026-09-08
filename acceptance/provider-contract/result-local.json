@@ -1,0 +1,57 @@
+{
+  "schemaVersion": 1,
+  "status": "PASS",
+  "evaluationKind": "PROTOCOL_FIXTURE",
+  "endpointClass": "LOOPBACK",
+  "commit": "627a866dd0cfab3bc0525824b65e09b6add5c526",
+  "manifestVersion": "3.0.0",
+  "protocols": [
+    {
+      "protocol": "openai-completions",
+      "requestCount": 1,
+      "usage": {
+        "input": 41,
+        "output": 9
+      },
+      "toolCallVerified": true
+    },
+    {
+      "protocol": "openai-responses",
+      "requestCount": 1,
+      "usage": {
+        "input": 43,
+        "output": 8
+      },
+      "toolCallVerified": true
+    }
+  ],
+  "faults": {
+    "retry": {
+      "requestCount": 2,
+      "attempts": [
+        {
+          "attempt": 1,
+          "durationMs": 3,
+          "status": 429,
+          "retryable": true
+        },
+        {
+          "attempt": 2,
+          "durationMs": 0,
+          "status": 200,
+          "retryable": false
+        }
+      ]
+    },
+    "stall": {
+      "stopReason": "aborted",
+      "elapsedMs": 103,
+      "httpStatus": 200,
+      "runtimeClassification": "PROVIDER_FAILURE"
+    },
+    "empty": {
+      "rejected": true,
+      "message": "模型连接成功，但未生成有效 Tool Call"
+    }
+  }
+}
