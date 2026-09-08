@@ -1,8 +1,9 @@
 import { createModelBundle } from "../agent/model.js";
 import { checkModel } from "../agent/model-health.js";
 import { loadConfig } from "../config/load-config.js";
+import { optionValue } from "./options.js";
 
-const config = await loadConfig();
+const config = await loadConfig(optionValue(process.argv.slice(2), "--config"));
 const { models, model } = createModelBundle(config);
 const result = await checkModel(models, model);
 

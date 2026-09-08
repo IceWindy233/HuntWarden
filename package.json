@@ -66,6 +66,7 @@
     "eval:model": "tsx src/cli/evaluate-model.ts",
     "eval:investigation": "tsx src/cli/evaluate-investigation.ts",
     "qualify:provider": "tsx src/cli/qualify-provider.ts",
+    "qualify:provider:tasks": "tsx src/cli/run-provider-qualification.ts",
     "qualify:business-jvm": "tsx src/cli/qualify-business-jvm.ts",
     "qualify:platform": "tsx src/cli/qualify-platform.ts",
     "lab:up": "bash labs/lab-up.sh",
