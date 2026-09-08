@@ -2,6 +2,7 @@ import type { SecurityToolDefinition } from "../domain/types.js";
 import type { RuntimeStore } from "../storage/runtime-store.js";
 import type { InvestigationAction } from "./types.js";
 import { Value } from "typebox/value";
+import { digestObject } from "../common/json.js";
 
 export interface ActionExecutionSummary {
   executed: number;
@@ -48,7 +49,14 @@ export class InvestigationActionExecutor {
         let cursorRef: string | undefined;
         const resultRefs: string[] = [];
         const paged = claimed.action.operationRef === "enumerate" || claimed.action.operationRef === "relate";
-        for (let page = 0; page < ACTION_MAX_PAGES; page += 1) {
+        const reusablePreset = paged ? undefined : this.findReusablePresetResult(claimed.action);
+        if (reusablePreset) {
+          const details = reusablePreset.details as Record<string, unknown>;
+          resultRefs.push(...collectResultRefs(details));
+          partial = details.status === "partial";
+          this.store.appendAudit({ taskId: this.taskId, event: "investigation_action_reused_preset_primitive", level: "info", data: { actionId: claimed.action.actionId, operationRef: claimed.action.operationRef, argsDigest: claimed.action.argsDigest } });
+        }
+        for (let page = 0; !reusablePreset && page < ACTION_MAX_PAGES; page += 1) {
           if (!Value.Check(tool.parameters, args)) throw new Error(`调查 Action ${claimed.action.actionId} 参数不符合 ${claimed.action.operationRef} Schema`);
           try {
             const toolCallId = page === 0 ? claimed.attempt.attemptId : `${claimed.attempt.attemptId}-PAGE-${page + 1}`;
@@ -95,6 +103,15 @@ export class InvestigationActionExecutor {
       this.resolveObligations(action, "LIMITED", [], reason);
     }
     return summary;
+  }
+
+  private findReusablePresetResult(action: InvestigationAction): { details: unknown } | undefined {
+    const run = this.store.listToolRuns(this.taskId, 100_000).find((item) => item.epochId === this.epochId
+      && item.status === "SUCCEEDED" && item.toolCallId.startsWith("PRESET-")
+      && item.toolName === action.operationRef && digestObject(item.args) === action.argsDigest
+      && item.result !== undefined);
+    if (!run?.result || typeof run.result !== "object" || !("details" in run.result)) return undefined;
+    return run.result as { details: unknown };
   }
 
   private limitDiscoveryCheckpoint(cursorRef: string | undefined, reason: string): void {

@@ -128,6 +128,8 @@ describe("P1 最低覆盖 Preset", () => {
     expect(executor.maintenanceCalls.filter((call) => call.verb === "scope_resolve").map((call) => call.request.params.requestedRoot)).toEqual(["/usr/bin", "/tmp"]);
     expect(executor.calls.some((call) => call.verb === "relate" && call.request.params.relation === "owns_file")).toBe(true);
     expect(executor.calls.some((call) => call.verb === "verify" && call.request.params.baseline === "package_db")).toBe(true);
+    const verifyCalls = executor.calls.filter((call) => call.verb === "verify");
+    expect(new Set(verifyCalls.map((call) => JSON.stringify(call.request.params))).size).toBe(verifyCalls.length);
     expect(executor.calls.filter((call) => call.verb === "enumerate" && ["auth_event", "exec_event"].includes(String(call.request.params.namespace))).map((call) => call.request.params.sinceHours)).toEqual([72, 72]);
     const filePredicates = executor.calls
       .filter((call) => call.verb === "enumerate" && call.request.params.namespace === "file")

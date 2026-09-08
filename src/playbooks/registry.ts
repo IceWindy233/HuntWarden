@@ -5,6 +5,7 @@ import type { InvestigationAction, InvestigationHypothesis, InvestigationSession
 import type { FactRecord } from "../protocol-v2/types.js";
 import type { RuntimeStore } from "../storage/runtime-store.js";
 import { projectEffectiveAssessments } from "../assessments/projection.js";
+import { isUsableJavaClassIdentifier } from "../investigation/java-class-identity.js";
 
 export const PLAYBOOK_REGISTRY_VERSION = "1.3.0";
 
@@ -246,7 +247,7 @@ function operationsForFact(fact: FactRecord, category: CheckCategory, edges: rea
     const jvmRef = edges.find((edge) => edge.toRef === fact.subjectRef && edge.relation === "hosts_component")?.fromRef;
     const className = fact.privatePayload.className;
     const classLoaderId = fact.privatePayload.classLoaderId;
-    return jvmRef && typeof className === "string" && typeof classLoaderId === "string" ? [
+    return jvmRef && isUsableJavaClassIdentifier(className) && isUsableJavaClassIdentifier(classLoaderId) ? [
       { obligationKind: "JAVA_INSPECT_EXACT_CLASS", operationRef: "probe", args: { ref: jvmRef, probeKind: "jvm.class.inspect", parameters: { className, classLoaderId } }, required: true, priority: 88 },
       { obligationKind: "JAVA_PRESERVE_BYTECODE", operationRef: "probe", args: { ref: jvmRef, probeKind: "jvm.class.dump", parameters: { className, classLoaderId } }, required: true, replayPolicy: "RESUME_OR_RECOLLECT", priority: 92 },
     ] : [];

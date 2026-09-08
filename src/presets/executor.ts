@@ -8,6 +8,7 @@ import { createV2SecurityTools } from "../tools/v2/tools.js";
 import { selectedPresets } from "./registry.js";
 import type { PresetDefinition, PresetStep } from "./types.js";
 import { INITIAL_GRANT_POLICY } from "../protocol-v2/policy.js";
+import { selectJavaClassInspectionTargets } from "../investigation/java-class-identity.js";
 
 export interface PresetRunResult { presetRunId: string; coverage: CoverageRun[]; promptContext: string }
 type StepOutcome = { status: "success" | "partial" | "error"; runId?: string; factRefs?: string[]; objectRefs?: string[]; reason?: string; fanout?: Array<{ sourceRef: string; objectRefs: string[] }> };
@@ -161,7 +162,10 @@ export class PresetExecutorV2 {
     for (const ref of refs) {
       try {
         const toolCallId = `PRESET-${randomUUID()}`;
-        const result = await tool.execute(toolCallId, { ref, baseline: step.params.baseline } as never, signal) as AgentToolResult<{ status: "success" | "partial"; factRefs: string[]; objectRefs: string[] }>;
+        const args = { ref, baseline: step.params.baseline };
+        const reused = this.findReusableInvestigationResult("verify", args);
+        const result = reused ?? await tool.execute(toolCallId, args as never, signal) as AgentToolResult<{ status: "success" | "partial"; factRefs: string[]; objectRefs: string[] }>;
+        if (reused) this.deps.store.appendAudit({ taskId: this.deps.task.taskId, event: "preset_reused_investigation_primitive", level: "info", data: { presetId: preset.presetId, stepId: step.stepId, tool: "verify", argsDigest: digestObject(args) } });
         factRefs.push(...result.details.factRefs); objectRefs.push(...result.details.objectRefs);
         partial = partial || result.details.status === "partial";
       } catch { partial = true; }
@@ -272,16 +276,9 @@ export class PresetExecutorV2 {
     let inspected = 0;
     for (const binding of inventory?.fanout ?? []) {
       const boundObjectRefs: string[] = [];
-      const classEntries = binding.objectRefs.flatMap((ref) => facts
-        .filter((fact) => fact.subjectRef === ref && fact.namespace === "java_component")
-        .flatMap((fact) => {
-          const className = fact.privatePayload.className;
-          const classLoaderId = fact.privatePayload.classLoaderId;
-          return typeof className === "string" && className.length > 0 && typeof classLoaderId === "string" && classLoaderId.length > 0
-            ? [[`${className}\0${classLoaderId}`, { className, classLoaderId }] as const]
-            : [];
-        }));
-      const classes = [...new Map(classEntries).values()].slice(0, 20);
+      const selected = selectJavaClassInspectionTargets(facts, binding.objectRefs, 20);
+      const classes = selected.targets;
+      partial = partial || selected.incomplete;
       if (classes.length === 0) { partial = true; continue; }
       for (const { className, classLoaderId } of classes) {
         signal?.throwIfAborted();
@@ -326,6 +323,14 @@ export class PresetExecutorV2 {
     }
     if (captured === 0 && (inspected?.objectRefs?.length ?? 0) > 0) partial = true;
     return { status: partial ? "partial" : "success", factRefs, objectRefs, ...(captured === 0 && partial ? { reason: "NO_CLASS_BYTECODE_EVIDENCE" } : {}) };
+  }
+
+  private findReusableInvestigationResult(toolName: string, args: Record<string, unknown>): AgentToolResult<{ status: "success" | "partial"; factRefs: string[]; objectRefs: string[] }> | undefined {
+    const argsDigest = digestObject(args);
+    const run = this.deps.store.listToolRuns(this.deps.task.taskId, 100_000).find((item) => item.epochId === this.deps.epoch.epochId
+      && item.status === "SUCCEEDED" && item.toolCallId.startsWith("ACT-") && item.toolName === toolName
+      && digestObject(item.args) === argsDigest && item.result !== undefined);
+    return run?.result as AgentToolResult<{ status: "success" | "partial"; factRefs: string[]; objectRefs: string[] }> | undefined;
   }
 
   private async executeProbeFanout(preset: PresetDefinition, presetRunId: string, step: PresetStep, discovery: StepOutcome | undefined, signal?: AbortSignal): Promise<StepOutcome> {
