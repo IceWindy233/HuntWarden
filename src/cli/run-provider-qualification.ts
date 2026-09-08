@@ -11,6 +11,9 @@ import { RuntimeStore } from "../storage/runtime-store.js";
 import { optionValue } from "./options.js";
 import { parseQualificationTarget } from "./qualification-target.js";
 
+const linuxRequest = "对当前 Ubuntu systemd 主机执行零 IOC 自主深度取证，覆盖 Linux 入侵分诊与持久化。先复核确定性预置、事实、关系、义务和反证；必须分别通过 propose_hypothesis 和 propose_actions 提交至少一个有事实依据、白名单且非重复的模型假设与调查动作，并为每个已观察类别写入模型 Assessment。不得把未检查范围解释为安全。";
+const javaRequest = "对当前 Tomcat 9/JDK 17 运行态执行 Java 内存马自主深度取证。复核运行时组件、精确 ClassLoader、类检查和完整字节码 Evidence；必须分别通过 propose_hypothesis 和 propose_actions 提交至少一个有事实依据、白名单且非重复的模型假设与调查动作，写入 Java 类别模型 Assessment，并确保最终结论引用实际类字节码 Evidence。不得把 unknown Loader 或未检查范围解释为安全。";
+
 const args = process.argv.slice(2);
 const configPath = resolve(optionValue(args, "--config", true)!);
 const linuxTargetPath = resolve(optionValue(args, "--linux-target", true)!);
@@ -133,6 +136,3 @@ interface ProviderTaskRunRecord {
   tasks: Partial<Record<"linux" | "java", ProviderTaskRecord>>;
   error?: string;
 }
-
-const linuxRequest = "对当前 Ubuntu systemd 主机执行零 IOC 自主深度取证，覆盖 Linux 入侵分诊与持久化。先复核确定性预置、事实、关系、义务和反证；必须分别通过 propose_hypothesis 和 propose_actions 提交至少一个有事实依据、白名单且非重复的模型假设与调查动作，并为每个已观察类别写入模型 Assessment。不得把未检查范围解释为安全。";
-const javaRequest = "对当前 Tomcat 9/JDK 17 运行态执行 Java 内存马自主深度取证。复核运行时组件、精确 ClassLoader、类检查和完整字节码 Evidence；必须分别通过 propose_hypothesis 和 propose_actions 提交至少一个有事实依据、白名单且非重复的模型假设与调查动作，写入 Java 类别模型 Assessment，并确保最终结论引用实际类字节码 Evidence。不得把 unknown Loader 或未检查范围解释为安全。";
