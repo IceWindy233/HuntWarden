@@ -832,6 +832,11 @@ function validateProposedAction(
   if (operationRef === "enumerate") {
     const namespace = args.namespace as NamespaceName;
     if (namespace === "task_ioc") throw new InvalidArgumentError("task_ioc 只能通过 query_facts 查询");
+    const hasPresetFacts = deps.store.listFacts(deps.task.taskId, deps.epoch.epochId)
+      .some((fact) => fact.namespace === namespace && fact.source.kind === "PRESET");
+    if (hasPresetFacts && args.predicate === undefined && args.scopeRef === undefined && args.cursorRef === undefined) {
+      throw new InvalidArgumentError(`当前 Epoch 已有 ${namespace} 的 PRESET 事实；请用 query_facts 复核，或用 predicate/scopeRef 提交收窄的新观察`);
+    }
     assertEffectiveVerb(deps, namespace, "enumerate");
     const fields = (args.fields as string[] | undefined) ?? identityFields(namespace);
     for (const field of fields) {

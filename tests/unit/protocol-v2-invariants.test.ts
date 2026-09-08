@@ -123,7 +123,9 @@ describe("Tool Protocol v2 invariants", () => {
     store.putTaskGrant(grant);
     const now = new Date().toISOString();
     const batch = store.commitFactBatch({
-      taskId: task.taskId, epochId: epoch.epochId, sourceRunId: "RUN-PROPOSAL", source: { kind: "SYSTEM" }, targetFingerprint: task.target.hostFingerprint,
+      taskId: task.taskId, epochId: epoch.epochId, sourceRunId: "RUN-PROPOSAL",
+      source: { kind: "PRESET", presetRunId: "PRUN-PROPOSAL", presetId: "linux-triage-baseline", presetVersion: "2.5.0", stepId: "processes" },
+      targetFingerprint: task.target.hostFingerprint,
       requestId: "RUN-PROPOSAL", collector: { name: "enumerate", version: "2.1.0" },
       observations: [{ namespace: "process", identity: { bootId: "boot", pid: 77, startTicks: "100", exeInode: "200", exeSha256: "a".repeat(64) }, fields: { bootId: "boot", pid: 77, startTicks: "100", exeInode: "200", exeSha256: "a".repeat(64) }, observedAt: now, consistency: "OBJECT_STABLE" }],
       edges: [], gaps: [], wireDigest: "b".repeat(64),
@@ -155,6 +157,12 @@ describe("Tool Protocol v2 invariants", () => {
     } as never)).rejects.toThrow(/不符合工具 Schema/);
 
     const actionCount = store.listInvestigationActions(task.taskId, epoch.epochId).length;
+    await expect(proposalTool.execute("CALL-REDUNDANT-ENUMERATE", {
+      hypothesisId: hypothesis.hypothesisId, obligationId: hypothesis.obligationId,
+      actions: [{ clientRef: "redundant", operationRef: "enumerate", subjectRefs: [], args: { namespace: "process", limit: 100 }, dependsOnClientRefs: [] }],
+    } as never)).rejects.toThrow(/已有 process 的 PRESET 事实/);
+    expect(store.listInvestigationActions(task.taskId, epoch.epochId)).toHaveLength(actionCount);
+
     await expect(proposalTool.execute("CALL-SEMANTIC-BAD-ACTIONS", {
       hypothesisId: hypothesis.hypothesisId, obligationId: hypothesis.obligationId,
       actions: [
