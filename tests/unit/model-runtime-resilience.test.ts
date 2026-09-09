@@ -187,6 +187,32 @@ describe("模型运行时故障降级", () => {
     ]));
   });
 
+  it("仅在执行面已闭合但 Assessment 未终态化时追加一次模型协调回合", async () => {
+    const { store, task, epoch, faux, runtime } = await fixture();
+    const obligation = store.listInvestigationObligations(task.taskId, epoch.epochId)[0]!;
+    store.updateInvestigationObligation({
+      ...obligation,
+      status: "SATISFIED",
+      updatedAt: new Date().toISOString(),
+    }, "OPEN");
+    let providerCalls = 0;
+    faux.setResponses([
+      () => { providerCalls += 1; return fauxAssistantMessage("调查正文已完成。"); },
+      () => { providerCalls += 1; return fauxAssistantMessage("已完成终态证据裁定。"); },
+    ]);
+
+    await runtime.prompt("审查当前调查");
+
+    expect(providerCalls).toBe(2);
+    expect(store.listAudit(task.taskId)).toEqual(expect.arrayContaining([
+      expect.objectContaining({ event: "model_terminal_reconciliation_started" }),
+      expect.objectContaining({
+        event: "model_terminal_reconciliation_finished",
+        data: expect.objectContaining({ beforeStatus: "LIMITED", afterStatus: "LIMITED" }),
+      }),
+    ]));
+  });
+
   it("把带部分文本的非完整 aborted 流按 Provider failure 固化而不误报完成", async () => {
     const { store, task, epoch, faux, runtime } = await fixture();
     faux.setResponses([{ ...fauxAssistantMessage("partial before stall"), stopReason: "aborted" }]);

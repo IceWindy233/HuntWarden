@@ -267,6 +267,12 @@ export class SecurityAgentRuntime extends EventEmitter {
       }
       this.requireMeaningfulAssistant(lastAssistant);
       if (!withoutTools) {
+        await this.reconcileTerminalAssessment();
+        const reconciledAssistant = [...this.agent.state.messages].reverse().find((message) => message.role === "assistant");
+        if (reconciledAssistant?.role === "assistant" && (reconciledAssistant.stopReason === "error" || reconciledAssistant.stopReason === "aborted")) {
+          throw new Error(reconciledAssistant.errorMessage || "模型终态协调失败");
+        }
+        this.requireMeaningfulAssistant(reconciledAssistant);
         this.finalizeV2ModelGaps("NORMAL_SKIP");
         this.completeInvestigation("MODEL_STOPPED_WITH_OPEN_WORK");
       }
@@ -676,6 +682,39 @@ export class SecurityAgentRuntime extends EventEmitter {
         code: "MODEL_DID_NOT_INVESTIGATE", reasonCode, createdAt: new Date().toISOString(),
       });
     }
+  }
+
+  /**
+   * 模型常在动作已经闭合后仍沿用调查中期的 INCONCLUSIVE，或者在文字里指出具体风险却没有
+   * 写 SUBJECT Assessment。此时证据平面完整，但账本无法形成 CLOSED_* 终态。只给一次额外
+   * 模型回合，让它通过正式的 Assessment 工具完成裁定；控制端不替模型猜测风险或改写结论。
+   */
+  private async reconcileTerminalAssessment(): Promise<void> {
+    const validator = new InvestigationCompletionValidator(this.options.store);
+    const before = validator.evaluate(this.options.task.taskId, this.options.protocolV2.epochId);
+    if (!before.canClose || before.status !== "LIMITED" || before.limitedObligationIds.length > 0 || before.runningActionIds.length > 0) return;
+    const task = this.options.store.getTask(this.options.task.taskId) ?? this.options.task;
+    if (task.turnCount >= this.options.config.agent.maxTurns) return;
+    this.options.store.appendAudit({
+      taskId: task.taskId,
+      event: "model_terminal_reconciliation_started",
+      level: "info",
+      data: { epochId: this.options.protocolV2.epochId, reasons: before.reasons },
+    });
+    await this.agent.prompt(`调查执行面已经闭合，但终态校验仍为 LIMITED：${before.reasons.join("；") || "模型 Assessment 尚未形成终态"}。
+
+请执行一次最终证据裁定，不再扩大枚举范围：
+1. 先用 get_assessment_projection 和 query_investigation 核对当前有效结论、已完成动作与缺口。
+2. 若任何具体对象或事件仍构成可疑信号，必须用 record_assessment 写 SUBJECT 级 SUSPICIOUS/HIGHLY_SUSPICIOUS，并绑定该事实已有的 subjectRef；对应类别保持或裁定为 INCONCLUSIVE。不能只在文字中描述风险。
+3. 若动作结果已排除中期疑点，Coverage 为 COMPLETE，且没有影响结论的真实采集缺口，则用 adjudicate_assessment 针对当前类别 Assessment 写 NO_OBSERVED_FINDING。不得仅因时间、缓存截断或没有逐页阅读全部已固化事实而判 INCONCLUSIVE。
+4. 不得把真实 PARTIAL/ERROR/UNKNOWN、未满足义务或未决冲突改写为安全。完成必要的 Assessment Tool Call 后直接给出终态摘要。`);
+    const after = validator.evaluate(this.options.task.taskId, this.options.protocolV2.epochId);
+    this.options.store.appendAudit({
+      taskId: task.taskId,
+      event: "model_terminal_reconciliation_finished",
+      level: after.status === "LIMITED" ? "warn" : "info",
+      data: { epochId: this.options.protocolV2.epochId, beforeStatus: before.status, afterStatus: after.status, reasons: after.reasons },
+    });
   }
 
   private completeInvestigation(reason: string): void {
