@@ -108,6 +108,56 @@ describe("Tool Protocol v2 invariants", () => {
     expect(remediationNames).toEqual(expect.arrayContaining(["quarantine_file", "disable_account"]));
   });
 
+  it("query_investigation 压缩批次引用并严格服从模型文本字节上限", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "huntwarden-v2-investigation-query-"));
+    const { store, task, epoch } = await v2Store();
+    task.checks = ["linux_intrusion_triage"];
+    store.saveTask(task);
+    const now = new Date().toISOString();
+    store.createInvestigationSession({
+      sessionId: "ISESS-QUERY-BOUND", taskId: task.taskId, epochId: epoch.epochId,
+      engineVersion: "1.0.0", playbookRegistryDigest: "a".repeat(64), ruleRegistryDigest: "b".repeat(64),
+      authorizationVersion: "AUTH-QUERY-BOUND", executionStatus: "RUNNING", investigationStatus: "OPEN",
+      revision: 0, createdAt: now, updatedAt: now,
+    });
+    store.commitFactBatch({
+      taskId: task.taskId, epochId: epoch.epochId, sourceRunId: "RUN-QUERY-BOUND",
+      source: { kind: "PRESET", presetRunId: "PRUN-QUERY-BOUND", presetId: "linux-triage-baseline", presetVersion: "2.5.0", stepId: "process-snapshot" },
+      targetFingerprint: task.target.hostFingerprint, requestId: "RUN-QUERY-BOUND", collector: { name: "enumerate", version: "3.0.0" },
+      observations: Array.from({ length: 200 }, (_, index) => ({
+        namespace: "process" as const,
+        identity: { bootId: "boot-query", pid: 10_000 + index, startTicks: String(index + 1), exeInode: String(index + 1) },
+        fields: { bootId: "boot-query", pid: 10_000 + index, startTicks: String(index + 1), exeInode: String(index + 1) },
+        observedAt: now, consistency: "OBJECT_STABLE" as const,
+      })),
+      edges: [], gaps: [], wireDigest: "c".repeat(64),
+    });
+    const grant: TaskGrant = { grantId: "GRANT-QUERY-BOUND", taskId: task.taskId, targetFingerprint: task.target.hostFingerprint, kind: "CATEGORY", status: "ACTIVE", binding: { category: "linux_intrusion_triage" }, createdAt: now };
+    store.putTaskGrant(grant);
+    const helper: HelperCapabilitiesV2 = {
+      protocolVersion: 2, manifestVersion: "3.0.0", helper: { name: "helper", version: "3.0.0" },
+      namespaces: { process: { fields: ["bootId", "pid", "startTicks", "exeInode"], relations: [], verbs: ["enumerate"] } },
+      matchers: ["literal"], probes: [], verbs: ["enumerate", "project", "read", "match", "relate", "verify", "collect", "probe"],
+      limits: { maxObjects: 500, maxOutputBytes: 1_572_864, maxReadBytes: 65_536, maxCollectBytes: 104_857_600 },
+    };
+    const config = testConfig(directory);
+    config.llmData.maxTextBytes = 4_096;
+    const tools = createV2SecurityTools({
+      task, epoch, config, store,
+      executor: new FakeProtocolV2Executor(helper, async () => { throw new Error("本测试不应触发远程调用"); }),
+      evidence: new EvidenceStore(directory, store), capabilities: gateCapabilities(helper, [grant]), approvals: new ApprovalService(store), budgetOwner: "MODEL",
+    });
+    const query = tools.find((item) => item.name === "query_investigation")!;
+    const result = await query.execute("CALL-QUERY-BOUND", { limit: 200 } as never);
+    const text = result.content.find((item) => item.type === "text")?.text ?? "";
+    expect(Buffer.byteLength(text, "utf8")).toBeLessThanOrEqual(config.llmData.maxTextBytes);
+    const parsed = JSON.parse(text) as { events: Array<{ eventType: string; payload: Record<string, unknown> }>; summary: { events: { maxEventSeq: number } } };
+    const batch = parsed.events.find((item) => item.eventType === "FACT_BATCH_COMMITTED");
+    expect(batch?.payload).toMatchObject({ factRefsCount: 200, edgeRefsCount: 0 });
+    expect(batch?.payload).not.toHaveProperty("factRefs");
+    expect(parsed.summary.events.maxEventSeq).toBeGreaterThan(0);
+  });
+
   it("模型假设与动作提议必须绑定当前 Epoch，并由持久化调度器执行", async () => {
     const directory = await mkdtemp(join(tmpdir(), "huntwarden-model-proposal-"));
     const { store, task, epoch } = await v2Store();

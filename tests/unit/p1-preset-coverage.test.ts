@@ -118,6 +118,10 @@ describe("P1 最低覆盖 Preset", () => {
     });
 
     const result = await bootstrapProtocolV2({ task, config: testConfig(directory), store, executor, evidence: new EvidenceStore(directory, store), approvals: new ApprovalService(store) });
+    expect(Buffer.byteLength(result.presetContext, "utf8")).toBeLessThanOrEqual(testConfig(directory).llmData.maxTextBytes);
+    expect(result.presetContext).toContain("\"factCount\"");
+    expect(result.presetContext).not.toContain("\"factRefs\"");
+    expect(result.presetContext).not.toContain("\"objectRefs\"");
     expect(executor.calls.slice(0, 2).map((call) => [call.verb, call.request.params.namespace])).toEqual([["enumerate", "process"], ["enumerate", "socket"]]);
     const coverage = store.listCoverageRuns(task.taskId, result.epoch.epochId).find((item) => item.category === "linux_intrusion_triage");
     expect(coverage).toMatchObject({ status: "COMPLETE", completedCriteria: expect.arrayContaining(["file-scopes", "package-inventory", "package-verify"]) });

@@ -31,7 +31,8 @@ import type { InvestigationAction, InvestigationHypothesis, InvestigationObligat
 import { InvestigationScheduler } from "../../investigation/scheduler.js";
 import { projectEffectiveAssessments } from "../../assessments/projection.js";
 import { DERIVED_RESOLVERS, DerivedObjectResolver } from "../../investigation/derived-object-resolver.js";
-import type { DerivedResolverRef } from "../../investigation/types.js";
+import type { DerivedResolverRef, InvestigationEvent } from "../../investigation/types.js";
+import { serializeToolResultForLlm } from "../../agent/data-sanitizer.js";
 
 interface RemoteResultDetails {
   status: "success" | "partial";
@@ -64,6 +65,12 @@ interface ModelActionProposal {
 // can double the length) with a byte-offset label. Context is a content egress path, so it is
 // charged against MODEL_CONTENT_BYTES exactly like `read`.
 const MATCH_CONTEXT_MAX_BYTES = 2560;
+const INVESTIGATION_REF_SAMPLE_LIMIT = 8;
+
+function modelToolResult<R>(deps: V2ToolDependencies, details: R): AgentToolResult<R> {
+  const encoded = serializeToolResultForLlm(details, deps.config.llmData.maxTextBytes);
+  return { content: [{ type: "text", text: encoded.text }], details };
+}
 
 export function createV2SecurityTools(deps: V2ToolDependencies, phase: "INVESTIGATE" | "REPORT" = "INVESTIGATE"): SecurityToolDefinition[] {
   if (deps.task.protocolVersion !== 2 || deps.task.activeEpochId !== deps.epoch.epochId) throw new SecurityError("RECOVERY_UNCERTAIN", "v2 工具必须绑定任务当前 epoch");
@@ -373,7 +380,7 @@ function writeTool<T extends TSchema>(
         deps.store.putActionReceipt({ ...started, status, result: remote, finishedAt: new Date().toISOString() });
         if (status !== "SUCCEEDED") throw new SecurityError("EVIDENCE_COLLECTION", `${label}未成功`, { actionId: ticket.actionId });
         const details = { status: "success" as const, actionId: ticket.actionId };
-        const result = { content: [{ type: "text" as const, text: JSON.stringify(details) }], details };
+        const result = modelToolResult(deps, details);
         deps.store.finishToolRun(toolCallId, "SUCCEEDED", result);
         deps.store.appendAudit({ taskId: deps.task.taskId, event: `v2_${name}`, level: "warn", data: { actionId: ticket.actionId, approvalId: ticket.approvalId, status } });
         return result;
@@ -502,7 +509,7 @@ function remoteTool<T extends TSchema>(deps: V2ToolDependencies, verb: ForensicV
           observations: response.objects, edges: response.edges, gaps: response.gaps, wireDigest: rawWireDigest,
           toolRun: { toolCallId, status: "SUCCEEDED", resultFactory: (prepared) => {
             const finalDetails: RemoteResultDetails = { ...placeholder, factRefs: prepared.facts.map((fact) => fact.factId), objectRefs: [...new Set(prepared.facts.map((fact) => fact.subjectRef))], edgeRefs: prepared.edges.map((edge) => edge.edgeId) };
-            return { content: [{ type: "text", text: JSON.stringify(finalDetails) }], details: finalDetails } satisfies AgentToolResult<RemoteResultDetails>;
+            return modelToolResult(deps, finalDetails);
           } },
         });
         for (const evidenceId of evidenceRefs) {
@@ -522,7 +529,7 @@ function remoteTool<T extends TSchema>(deps: V2ToolDependencies, verb: ForensicV
           } });
         }
         const details: RemoteResultDetails = { ...placeholder, factRefs: batch.facts.map((fact) => fact.factId), objectRefs: [...new Set(batch.facts.map((fact) => fact.subjectRef))], edgeRefs: batch.edges.map((edge) => edge.edgeId) };
-        const result: AgentToolResult<RemoteResultDetails> = { content: [{ type: "text", text: JSON.stringify(details) }], details };
+        const result = modelToolResult(deps, details);
         deps.store.appendAudit({ taskId: deps.task.taskId, event: `v2_${verb}`, level: response.status === "PARTIAL" ? "warn" : "info", data: { toolCallId, factCount: batch.facts.length, edgeCount: batch.edges.length, gapCodes: response.gaps.map((gap) => gap.code), cursorRef, evidenceRefs, cost: response.cost } });
         return result;
       } catch (error) {
@@ -653,9 +660,37 @@ function localTool<T extends TSchema, R>(deps: V2ToolDependencies, name: string,
     if (existing?.status === "SUCCEEDED" && existing.result) return existing.result as AgentToolResult<R>;
     if (existing && existing.status !== "STARTED") throw new SecurityError("RECOVERY_UNCERTAIN", "ToolCall 已进入终态，拒绝再次执行本地工具");
     deps.store.startToolRun({ toolCallId, taskId: deps.task.taskId, epochId: deps.epoch.epochId, toolName: name, risk: "LOCAL", replayPolicy, args: params });
-    try { const details = await run(params, toolCallId, signal); const result: AgentToolResult<R> = { content: [{ type: "text", text: JSON.stringify(details) }], details }; deps.store.finishToolRun(toolCallId, "SUCCEEDED", result); return result; }
+    try { const details = await run(params, toolCallId, signal); const result = modelToolResult(deps, details); deps.store.finishToolRun(toolCallId, "SUCCEEDED", result); return result; }
     catch (error) { deps.store.finishToolRun(toolCallId, "FAILED", undefined, error instanceof Error ? error.message : String(error)); throw error; }
   } };
+}
+
+function refSample(values: string[]): string[] {
+  return values.slice(0, INVESTIGATION_REF_SAMPLE_LIMIT);
+}
+
+function countBy<T extends object>(values: T[], field: keyof T): Record<string, number> {
+  const counts: Record<string, number> = {};
+  for (const value of values) {
+    const key = String(value[field] ?? "UNKNOWN");
+    counts[key] = (counts[key] ?? 0) + 1;
+  }
+  return counts;
+}
+
+function compactEventPayload(event: InvestigationEvent): Record<string, unknown> {
+  const compact: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(event.payload)) {
+    if (Array.isArray(value)) {
+      compact[`${key}Count`] = value.length;
+      if (key === "gapRefs" || key === "obligationIds") compact[key] = value.slice(0, INVESTIGATION_REF_SAMPLE_LIMIT);
+    } else if (typeof value === "string") {
+      compact[key] = value.length <= 512 ? value : `${value.slice(0, 512)}…`;
+    } else if (value === null || ["number", "boolean"].includes(typeof value)) {
+      compact[key] = value;
+    }
+  }
+  return compact;
 }
 
 function createQueryInvestigationTool(deps: V2ToolDependencies): SecurityToolDefinition {
@@ -665,15 +700,87 @@ function createQueryInvestigationTool(deps: V2ToolDependencies): SecurityToolDef
   }, { additionalProperties: false }), async (params) => {
     const taskId = deps.task.taskId;
     const epochId = deps.epoch.epochId;
-    return {
-      session: deps.store.getInvestigationSession(taskId, epochId),
-      leads: deps.store.listInvestigationLeads(taskId, epochId).slice(0, params.limit).map((item) => ({ leadId: item.leadId, subjectRef: item.subjectRef, triggerKind: item.triggerKind, priority: item.priority, status: item.status, triggerFactRefs: item.triggerFactRefs })),
-      hypotheses: deps.store.listInvestigationHypotheses(taskId, epochId).slice(0, params.limit),
-      obligations: deps.store.listInvestigationObligations(taskId, epochId).slice(0, params.limit),
-      actions: deps.store.listInvestigationActions(taskId, epochId).slice(0, params.limit).map((item) => ({ actionId: item.actionId, kind: item.kind, requestedBy: item.requestedBy, obligationIds: item.obligationIds, subjectRefs: item.subjectRefs, operationRef: item.operationRef, dependsOn: item.dependsOn, status: item.status, resultRefs: item.resultRefs, error: item.error, updatedAt: item.updatedAt })),
-      discovery: deps.store.listDiscoveryCheckpoints(taskId, epochId).slice(0, params.limit),
-      events: deps.store.listInvestigationEvents(taskId, epochId, params.afterEventSeq ?? 0, params.limit),
+    const leads = deps.store.listInvestigationLeads(taskId, epochId);
+    const hypotheses = deps.store.listInvestigationHypotheses(taskId, epochId);
+    const obligations = deps.store.listInvestigationObligations(taskId, epochId);
+    const actions = deps.store.listInvestigationActions(taskId, epochId);
+    const discovery = deps.store.listDiscoveryCheckpoints(taskId, epochId);
+    const afterEventSeq = params.afterEventSeq ?? 0;
+    const eventCandidates = deps.store.listInvestigationEvents(taskId, epochId, afterEventSeq, Math.min(201, params.limit + 1));
+    const maxEventSeq = deps.store.maxInvestigationEventSeq(taskId, epochId);
+    const build = (keep: number) => {
+      const events = eventCandidates.slice(0, keep);
+      const moreEvents = eventCandidates.length > events.length || (events.at(-1)?.eventSeq ?? afterEventSeq) < maxEventSeq;
+      const sections = [
+        ["leads", leads.length], ["hypotheses", hypotheses.length], ["obligations", obligations.length],
+        ["actions", actions.length], ["discovery", discovery.length], ["events", moreEvents ? keep + 1 : events.length],
+      ] as const;
+      const truncatedSections = sections.filter(([, total]) => total > keep).map(([name]) => name);
+      return {
+        status: truncatedSections.length > 0 ? "partial" : "success",
+        requestedLimit: params.limit,
+        effectiveLimit: keep,
+        session: deps.store.getInvestigationSession(taskId, epochId),
+        summary: {
+          leads: { total: leads.length, byStatus: countBy(leads, "status") },
+          hypotheses: { total: hypotheses.length, byStatus: countBy(hypotheses, "status") },
+          obligations: { total: obligations.length, byStatus: countBy(obligations, "status") },
+          actions: { total: actions.length, byStatus: countBy(actions, "status") },
+          discovery: { total: discovery.length, byStatus: countBy(discovery, "status") },
+          events: { afterEventSeq, maxEventSeq, returned: events.length, more: moreEvents },
+        },
+        leads: leads.slice(0, keep).map((item) => ({
+          leadId: item.leadId, subjectRef: item.subjectRef, triggerKind: item.triggerKind, priority: item.priority, status: item.status,
+          triggerFactRefs: refSample(item.triggerFactRefs), triggerFactRefCount: item.triggerFactRefs.length,
+        })),
+        hypotheses: hypotheses.slice(0, keep).map((item) => ({
+          hypothesisId: item.hypothesisId, subjectRef: item.subjectRef, claim: item.claim.slice(0, 512), proposedBy: item.proposedBy, status: item.status,
+          supportRefs: refSample(item.supportRefs), supportRefCount: item.supportRefs.length,
+          counterEvidenceRefs: refSample(item.counterEvidenceRefs), counterEvidenceRefCount: item.counterEvidenceRefs.length,
+          alternativeExplanations: item.alternativeExplanations.slice(0, 5).map((value) => value.slice(0, 256)),
+        })),
+        obligations: obligations.slice(0, keep).map((item) => ({
+          obligationId: item.obligationId, hypothesisId: item.hypothesisId, obligationKind: item.obligationKind, required: item.required, status: item.status,
+          subjectRefs: refSample(item.subjectRefs), subjectRefCount: item.subjectRefs.length,
+          resultRefs: refSample(item.resultRefs), resultRefCount: item.resultRefs.length,
+          gapRefs: refSample(item.gapRefs), gapRefCount: item.gapRefs.length,
+        })),
+        actions: actions.slice(0, keep).map((item) => ({
+          actionId: item.actionId, kind: item.kind, requestedBy: item.requestedBy, operationRef: item.operationRef, status: item.status,
+          obligationIds: refSample(item.obligationIds), obligationIdCount: item.obligationIds.length,
+          subjectRefs: refSample(item.subjectRefs), subjectRefCount: item.subjectRefs.length,
+          dependsOn: refSample(item.dependsOn), dependencyCount: item.dependsOn.length,
+          resultRefs: refSample(item.resultRefs ?? []), resultRefCount: item.resultRefs?.length ?? 0,
+          ...(item.error ? { error: item.error.slice(0, 512) } : {}), updatedAt: item.updatedAt,
+        })),
+        discovery: discovery.slice(0, keep).map((item) => ({
+          checkpointId: item.checkpointId, namespace: item.namespace, status: item.status, scannedCount: item.scannedCount,
+          matchedCount: item.matchedCount, returnedCount: item.returnedCount, cursorRef: item.cursorRef,
+          remainingDescription: item.remainingDescription?.slice(0, 512), updatedAt: item.updatedAt,
+        })),
+        events: events.map((item) => ({
+          eventSeq: item.eventSeq, eventId: item.eventId, sourceBatchRef: item.sourceBatchRef, eventType: item.eventType,
+          payload: compactEventPayload(item), createdAt: item.createdAt,
+        })),
+        truncatedSections,
+        ...(moreEvents && events.length > 0 ? { nextAfterEventSeq: events.at(-1)!.eventSeq } : {}),
+        ...(truncatedSections.length > 0 ? { instruction: "结果按模型文本预算收紧；事件可用 nextAfterEventSeq 续页，事实与完整引用请用 query_facts 按 subjectRef/sourceRunId 查询。省略不表示不存在。" } : {}),
+      };
     };
+    let low = 1;
+    let high = params.limit;
+    let best = build(0);
+    while (low <= high) {
+      const middle = Math.floor((low + high) / 2);
+      const candidate = build(middle);
+      if (Buffer.byteLength(JSON.stringify(candidate), "utf8") <= deps.config.llmData.maxTextBytes) {
+        best = candidate;
+        low = middle + 1;
+      } else {
+        high = middle - 1;
+      }
+    }
+    return best;
   });
 }
 

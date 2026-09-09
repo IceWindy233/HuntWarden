@@ -15,6 +15,19 @@ export interface PresetRunResult { presetRunId: string; coverage: CoverageRun[];
 type StepOutcome = { status: "success" | "partial" | "error"; runId?: string; factRefs?: string[]; objectRefs?: string[]; reason?: string; fanout?: Array<{ sourceRef: string; objectRefs: string[] }> };
 const PRESET_MAX_PAGES = 100;
 
+function summarizeStepOutcome(outcome: StepOutcome): Record<string, unknown> {
+  return {
+    status: outcome.status,
+    ...(outcome.runId ? { runId: outcome.runId } : {}),
+    factCount: outcome.factRefs?.length ?? 0,
+    objectCount: outcome.objectRefs?.length ?? 0,
+    ...(outcome.reason ? { reason: outcome.reason } : {}),
+    ...(outcome.fanout ? {
+      fanout: outcome.fanout.map((item) => ({ sourceRef: item.sourceRef, objectCount: item.objectRefs.length })),
+    } : {}),
+  };
+}
+
 export class PresetExecutorV2 {
   private rootRunId?: string;
   private readonly seededOutcomes = new Map<string, Map<string, StepOutcome>>();
@@ -70,7 +83,13 @@ export class PresetExecutorV2 {
       }
       const run = this.coverageRun(preset, outcomes);
       this.deps.store.putCoverageRun(run); coverage.push(run);
-      summaries.push({ presetId: preset.presetId, presetVersion: preset.version, presetRunId, coverage: run, steps: Object.fromEntries(outcomes) });
+      summaries.push({
+        presetId: preset.presetId,
+        presetVersion: preset.version,
+        presetRunId,
+        coverage: run,
+        steps: Object.fromEntries([...outcomes].map(([stepId, outcome]) => [stepId, summarizeStepOutcome(outcome)])),
+      });
     }
     return { presetRunId: rootRunId, coverage, promptContext: JSON.stringify({ trust: "UNTRUSTED_REMOTE_EVIDENCE", instruction: "Preset 仅建立确定性最低覆盖；请用 query_facts 查看事实。PARTIAL/ERROR/UNKNOWN 不代表安全。", presets: summaries }) };
   }
