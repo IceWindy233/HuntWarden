@@ -2,8 +2,8 @@ schemaVersion: 2
 
 protocolV2:
   remoteBudget:
-    preset: { remoteCalls: 80, nodes: 20000, bytes: 67108864, wallTimeMs: 900000, probeCalls: 10 }
-    model: { remoteCalls: 80, nodes: 20000, bytes: 67108864, wallTimeMs: 900000, probeCalls: 10 }
+    preset: { remoteCalls: 80, nodes: 20000, bytes: 67108864, wallTimeMs: 900000, probeCalls: 64 }
+    model: { remoteCalls: 80, nodes: 20000, bytes: 67108864, wallTimeMs: 900000, probeCalls: 64 }
   localQueryBudget: { calls: 200, rows: 50000, wallTimeMs: 300000 }
   externalIntelBudget: { calls: 100, iocs: 1000, wallTimeMs: 300000 }
   dataPolicy: { modelContentBytes: 4194304, evidenceBytes: 268435456, defaultTextClass: SENSITIVE_TEXT }

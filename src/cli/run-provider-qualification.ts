@@ -25,6 +25,10 @@ const dirty = execFileSync("git", ["status", "--porcelain", "--untracked-files=a
 if (dirty) throw new Error("真实 Provider 任务只能从干净固定提交运行；请先提交或移除工作树修改");
 
 const config = await loadConfig(configPath);
+const minimumJavaPresetProbeCalls = 1 + 20 + 20;
+if (config.protocolV2.remoteBudget.preset.probeCalls < minimumJavaPresetProbeCalls) {
+  throw new Error(`真实 Provider Java 资格要求 PRESET probeCalls 至少为 ${minimumJavaPresetProbeCalls}（1 次 inventory + 最多 20 次 inspect + 20 次 dump）`);
+}
 for (const [label, path] of [["storage.baseDir", config.storage.baseDir], ["--output", outputPath]] as const) {
   const pathFromRoot = relative(root, path);
   if (!pathFromRoot.startsWith("..") && !isAbsolute(pathFromRoot)) throw new Error(`${label} 必须位于仓库外，避免验收数据污染固定提交`);

@@ -29,8 +29,8 @@ function withIncrementalDefaults(input: unknown): unknown {
     migrated.schemaVersion = 2;
     migrated.protocolV2 = {
       remoteBudget: {
-        preset: { remoteCalls: 80, nodes: 20_000, bytes: 64 * 1024 * 1024, wallTimeMs: 15 * 60_000, probeCalls: 10 },
-        model: { remoteCalls: 80, nodes: 20_000, bytes: 64 * 1024 * 1024, wallTimeMs: 15 * 60_000, probeCalls: 10 },
+        preset: { remoteCalls: 80, nodes: 20_000, bytes: 64 * 1024 * 1024, wallTimeMs: 15 * 60_000, probeCalls: 64 },
+        model: { remoteCalls: 80, nodes: 20_000, bytes: 64 * 1024 * 1024, wallTimeMs: 15 * 60_000, probeCalls: 64 },
       },
       localQueryBudget: { calls: 200, rows: 50_000, wallTimeMs: 5 * 60_000 },
       externalIntelBudget: { calls: 100, iocs: 1_000, wallTimeMs: 5 * 60_000 },

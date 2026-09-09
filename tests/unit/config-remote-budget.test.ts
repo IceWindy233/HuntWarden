@@ -57,7 +57,7 @@ describe("V2 配置面", () => {
     delete legacy.protocolV2;
     const migrated = normalizeConfig(legacy, SOURCE);
     expect(migrated.schemaVersion).toBe(2);
-    expect(migrated.protocolV2.remoteBudget.preset).toMatchObject({ remoteCalls: 80, nodes: 20_000 });
+    expect(migrated.protocolV2.remoteBudget.preset).toMatchObject({ remoteCalls: 80, nodes: 20_000, probeCalls: 64 });
     expect(Object.keys(migrated)).not.toEqual(expect.arrayContaining(["java", "account", "persistence", "triage"]));
   });
 
