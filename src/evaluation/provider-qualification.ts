@@ -5,6 +5,7 @@ import { digestObject } from "../common/json.js";
 import type { InvestigationAction, InvestigationActionAttempt, InvestigationSession } from "../investigation/types.js";
 import type { Assessment, ScanEpoch } from "../protocol-v2/types.js";
 import type { RuntimeStore, ToolRunRecord } from "../storage/runtime-store.js";
+import { isSyntheticProxyAddress, type ProviderResolutionSource } from "./provider-endpoint-resolution.js";
 
 const remotePrimitives = new Set(["enumerate", "project", "read", "match", "relate", "verify", "collect", "probe"]);
 const terminalClosed = new Set(["CLOSED_WITH_FINDINGS", "CLOSED_NO_OBSERVED_FINDING"]);
@@ -40,7 +41,14 @@ export interface ProviderQualificationInput {
   model: string;
   protocol: string;
   endpoint: string;
-  endpointResolution: { before: string[]; after: string[] };
+  endpointResolution: {
+    before: string[];
+    after: string[];
+    sourceBefore?: ProviderResolutionSource;
+    sourceAfter?: ProviderResolutionSource;
+    systemBefore?: string[];
+    systemAfter?: string[];
+  };
   expectedHelperSha256: string;
   smoke: { toolCallVerified: boolean; usage?: { input: number; output: number } };
   faultContract: ProviderFaultContractProof;
@@ -83,7 +91,15 @@ export interface ProviderQualificationResult {
   commit: string;
   manifestVersion: string;
   networkEndpointClass: "REMOTE_VENDOR" | "NON_RELEASE_ENDPOINT";
-  endpointResolution: { beforeCount: number; afterCount: number; allPublic: boolean; stable: boolean };
+  endpointResolution: {
+    beforeCount: number;
+    afterCount: number;
+    allPublic: boolean;
+    stable: boolean;
+    sourceBefore: ProviderResolutionSource;
+    sourceAfter: ProviderResolutionSource;
+    systemSyntheticProxy: boolean;
+  };
   helperSha256: string;
   provider: string;
   model: string;
@@ -368,10 +384,22 @@ export function evaluateProviderQualification(input: ProviderQualificationInput)
   const after = [...new Set(input.endpointResolution.after.map((item) => item.toLowerCase()))].sort();
   const allPublic = before.length > 0 && after.length > 0 && [...before, ...after].every(isPublicProviderAddress);
   const stable = before.length === after.length && before.every((item, index) => item === after[index]);
+  const sourceBefore = input.endpointResolution.sourceBefore ?? "SYSTEM";
+  const sourceAfter = input.endpointResolution.sourceAfter ?? "SYSTEM";
+  const systemBefore = [...new Set((input.endpointResolution.systemBefore ?? []).map((item) => item.toLowerCase()))].sort();
+  const systemAfter = [...new Set((input.endpointResolution.systemAfter ?? []).map((item) => item.toLowerCase()))].sort();
+  const fallbackUsed = sourceBefore === "DNS_OVER_HTTPS_PROXY_FALLBACK" || sourceAfter === "DNS_OVER_HTTPS_PROXY_FALLBACK";
+  const systemSyntheticProxy = sourceBefore === "DNS_OVER_HTTPS_PROXY_FALLBACK"
+    && sourceAfter === "DNS_OVER_HTTPS_PROXY_FALLBACK"
+    && systemBefore.length > 0
+    && systemAfter.length > 0
+    && [...systemBefore, ...systemAfter].every(isSyntheticProxyAddress);
   const endpointClass = classifyProviderEndpoint(input.endpoint, [...before, ...after]);
   record(endpointClass === "REMOTE_VENDOR", failures, "真实 Provider 必须使用 HTTPS 远端厂商端点");
   record(allPublic, failures, "真实 Provider DNS 前后解析结果必须全部是公网地址");
   record(stable, failures, "真实 Provider DNS 在冒烟前后发生变化，不能形成稳定端点证明");
+  record(sourceBefore === sourceAfter, failures, "真实 Provider DNS 在冒烟前后切换了解析来源");
+  record(!fallbackUsed || systemSyntheticProxy, failures, "真实 Provider DoH 回退缺少完整的代理 fake-IP 证明");
   const contract = validateFaultContract(input, failures);
 
   const linux = loadTask(input.store, input.linuxTaskId);
@@ -418,7 +446,15 @@ export function evaluateProviderQualification(input: ProviderQualificationInput)
     commit: input.commit,
     manifestVersion: input.manifestVersion,
     networkEndpointClass: endpointClass,
-    endpointResolution: { beforeCount: before.length, afterCount: after.length, allPublic, stable },
+    endpointResolution: {
+      beforeCount: before.length,
+      afterCount: after.length,
+      allPublic,
+      stable,
+      sourceBefore,
+      sourceAfter,
+      systemSyntheticProxy,
+    },
     helperSha256: input.expectedHelperSha256,
     provider: input.provider,
     model: input.model,

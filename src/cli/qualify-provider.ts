@@ -1,5 +1,4 @@
 import { execFileSync } from "node:child_process";
-import { lookup } from "node:dns/promises";
 import { readFile, writeFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { resolve } from "node:path";
@@ -7,6 +6,7 @@ import { createModelBundle } from "../agent/model.js";
 import { smokeModel } from "../agent/model-health.js";
 import { loadConfig } from "../config/load-config.js";
 import { evaluateProviderQualification, sha256Bytes } from "../evaluation/provider-qualification.js";
+import { resolveProviderEndpoint } from "../evaluation/provider-endpoint-resolution.js";
 import { MANIFEST_VERSION } from "../protocol-v2/types.js";
 import { RuntimeStore } from "../storage/runtime-store.js";
 
@@ -34,15 +34,11 @@ const contractBytes = await readFile(contractPath);
 const helperBytes = await readFile(resolve(root, "host-helper/huntwarden_helper.py"));
 const contract = JSON.parse(contractBytes.toString("utf8")) as unknown;
 const { models, model } = createModelBundle(config);
-async function resolveEndpoint(endpoint: string): Promise<string[]> {
-  const hostname = new URL(endpoint).hostname.replace(/^\[|\]$/g, "");
-  return [...new Set((await lookup(hostname, { all: true, verbatim: true })).map((item) => item.address.toLowerCase()))].sort();
-}
 const endpoint = model.baseUrl;
-const resolvedBefore = await resolveEndpoint(endpoint);
+const resolvedBefore = await resolveProviderEndpoint(endpoint);
 const smoke = await smokeModel(config, models, model);
 if (!smoke.ok) throw new Error(smoke.message);
-const resolvedAfter = await resolveEndpoint(endpoint);
+const resolvedAfter = await resolveProviderEndpoint(endpoint);
 
 const baseDir = resolve(option("--data-dir") ?? process.env.HUNTWARDEN_DATA_DIR ?? config.storage.baseDir);
 const databaseFile = option("--database-file") ?? process.env.HUNTWARDEN_DATABASE_FILE ?? config.storage.databaseFile;
@@ -58,7 +54,14 @@ try {
     model: smoke.model,
     protocol: smoke.protocol,
     endpoint: smoke.endpoint,
-    endpointResolution: { before: resolvedBefore, after: resolvedAfter },
+    endpointResolution: {
+      before: resolvedBefore.addresses,
+      after: resolvedAfter.addresses,
+      sourceBefore: resolvedBefore.source,
+      sourceAfter: resolvedAfter.source,
+      systemBefore: resolvedBefore.systemAddresses,
+      systemAfter: resolvedAfter.systemAddresses,
+    },
     expectedHelperSha256: sha256Bytes(helperBytes),
     smoke: { toolCallVerified: smoke.toolCallVerified, ...(smoke.usage ? { usage: smoke.usage } : {}) },
     faultContract: { sha256: sha256Bytes(contractBytes), value: contract },

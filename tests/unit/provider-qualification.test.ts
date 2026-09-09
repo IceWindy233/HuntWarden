@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { AuditEvent, Evidence, ReportRecord, TaskContext } from "../../src/domain/types.js";
 import { classifyProviderEndpoint, evaluateProviderQualification, isPublicProviderAddress, type ProviderQualificationInput, type ProviderQualificationStore } from "../../src/evaluation/provider-qualification.js";
+import { isSyntheticProxyAddress, resolveProviderEndpoint } from "../../src/evaluation/provider-endpoint-resolution.js";
 import type { CompletionSnapshot, DiscoveryCheckpoint, InvestigationAction, InvestigationActionAttempt, InvestigationSession } from "../../src/investigation/types.js";
 import type { Assessment, ScanEpoch } from "../../src/protocol-v2/types.js";
 import type { ToolRunRecord } from "../../src/storage/runtime-store.js";
@@ -184,6 +185,47 @@ describe("真实 Provider 发布资格生成器", () => {
     expect(isPublicProviderAddress("100.64.0.1")).toBe(false);
     expect(isPublicProviderAddress("::ffff:10.0.0.1")).toBe(false);
     expect(isPublicProviderAddress("2606:4700:4700::1111")).toBe(true);
+  });
+
+  it("透明代理 fake-IP 只通过 TLS DNS 回退为公网地址", async () => {
+    const lookup = async () => [{ address: "198.18.0.68" }];
+    const fetchImpl = async (input: string | URL | Request) => {
+      const type = new URL(String(input)).searchParams.get("type");
+      return new Response(JSON.stringify({
+        Status: 0,
+        Answer: type === "A" ? [{ type: 1, data: "8.152.204.11" }] : [],
+      }), { status: 200, headers: { "content-type": "application/dns-json" } });
+    };
+    const result = await resolveProviderEndpoint("https://api.example.com/v1", { lookup, fetch: fetchImpl });
+    expect(result).toEqual({
+      addresses: ["8.152.204.11"],
+      source: "DNS_OVER_HTTPS_PROXY_FALLBACK",
+      systemAddresses: ["198.18.0.68"],
+    });
+    expect(isSyntheticProxyAddress("198.19.255.255")).toBe(true);
+    expect(isSyntheticProxyAddress("10.0.0.1")).toBe(false);
+  });
+
+  it("普通私网 DNS 不允许借 DoH 绕过", async () => {
+    const lookup = async () => [{ address: "10.0.0.8" }];
+    const fetchImpl = async () => { throw new Error("不应调用"); };
+    const result = await resolveProviderEndpoint("https://api.example.com/v1", { lookup, fetch: fetchImpl });
+    expect(result).toEqual({ addresses: ["10.0.0.8"], source: "SYSTEM", systemAddresses: ["10.0.0.8"] });
+  });
+
+  it("资格评估拒绝伪造的 DoH fake-IP 回退证明", () => {
+    const value = input();
+    value.endpointResolution = {
+      before: ["8.8.8.8"],
+      after: ["8.8.8.8"],
+      sourceBefore: "DNS_OVER_HTTPS_PROXY_FALLBACK",
+      sourceAfter: "DNS_OVER_HTTPS_PROXY_FALLBACK",
+      systemBefore: ["10.0.0.8"],
+      systemAfter: ["10.0.0.8"],
+    };
+    const result = evaluateProviderQualification(value);
+    expect(result.status).toBe("FAIL");
+    expect(result.failures).toContain("真实 Provider DoH 回退缺少完整的代理 fake-IP 证明");
   });
 });
 import { createHash } from "node:crypto";
