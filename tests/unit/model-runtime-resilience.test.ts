@@ -187,7 +187,7 @@ describe("模型运行时故障降级", () => {
     ]));
   });
 
-  it("仅在执行面已闭合但 Assessment 未终态化时追加一次模型协调回合", async () => {
+  it("执行面已闭合时依次协调缺失里程碑与非终态 Assessment", async () => {
     const { store, task, epoch, faux, runtime } = await fixture();
     const obligation = store.listInvestigationObligations(task.taskId, epoch.epochId)[0]!;
     store.updateInvestigationObligation({
@@ -198,13 +198,25 @@ describe("模型运行时故障降级", () => {
     let providerCalls = 0;
     faux.setResponses([
       () => { providerCalls += 1; return fauxAssistantMessage("调查正文已完成。"); },
+      () => { providerCalls += 1; return fauxAssistantMessage("已复核模型调查里程碑。"); },
       () => { providerCalls += 1; return fauxAssistantMessage("已完成终态证据裁定。"); },
     ]);
 
     await runtime.prompt("审查当前调查");
 
-    expect(providerCalls).toBe(2);
+    expect(providerCalls).toBe(3);
     expect(store.listAudit(task.taskId)).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        event: "model_milestone_reconciliation_started",
+        data: expect.objectContaining({
+          missing: expect.objectContaining({ hypothesis: true, action: true, assessmentCategories: task.checks }),
+        }),
+      }),
+      expect.objectContaining({
+        event: "model_milestone_reconciliation_finished",
+        level: "warn",
+        data: expect.objectContaining({ complete: false }),
+      }),
       expect.objectContaining({ event: "model_terminal_reconciliation_started" }),
       expect.objectContaining({
         event: "model_terminal_reconciliation_finished",

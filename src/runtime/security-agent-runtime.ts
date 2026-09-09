@@ -267,6 +267,7 @@ export class SecurityAgentRuntime extends EventEmitter {
       }
       this.requireMeaningfulAssistant(lastAssistant);
       if (!withoutTools) {
+        await this.reconcileInvestigationMilestones();
         await this.reconcileTerminalAssessment();
         const reconciledAssistant = [...this.agent.state.messages].reverse().find((message) => message.role === "assistant");
         if (reconciledAssistant?.role === "assistant" && (reconciledAssistant.stopReason === "error" || reconciledAssistant.stopReason === "aborted")) {
@@ -682,6 +683,67 @@ export class SecurityAgentRuntime extends EventEmitter {
         code: "MODEL_DID_NOT_INVESTIGATE", reasonCode, createdAt: new Date().toISOString(),
       });
     }
+  }
+
+  /**
+   * Prompt 中的“必须提交”不是执行保证。模型自然停止后由控制端检查可验证里程碑，只在确定性
+   * 执行面已经闭合、或仅剩模型自己创建的义务时追加一次协调回合。所有记录仍由模型通过正式
+   * Tool Call 写入，控制端不会代造假设、动作或 Assessment。
+   */
+  private async reconcileInvestigationMilestones(): Promise<void> {
+    const taskId = this.options.task.taskId;
+    const epochId = this.options.protocolV2.epochId;
+    const hypotheses = this.options.store.listInvestigationHypotheses(taskId, epochId);
+    const modelHypothesisIds = new Set(hypotheses.filter((item) => item.proposedBy === "MODEL").map((item) => item.hypothesisId));
+    const evaluation = new InvestigationCompletionValidator(this.options.store).evaluate(taskId, epochId);
+    const openObligations = this.options.store.listInvestigationObligations(taskId, epochId)
+      .filter((item) => evaluation.openRequiredObligationIds.includes(item.obligationId));
+    const onlyModelCreatedWorkRemains = openObligations.length > 0
+      && openObligations.every((item) => item.hypothesisId !== undefined && modelHypothesisIds.has(item.hypothesisId));
+    if (!evaluation.canClose && !onlyModelCreatedWorkRemains) return;
+
+    const modelActions = this.options.store.listInvestigationActions(taskId, epochId).filter((item) => item.requestedBy === "MODEL");
+    const concluded = new Set(this.options.store.listAssessments(taskId, epochId)
+      .filter((item) => item.authorType === "MODEL" && item.scope === "OBSERVED_CATEGORY")
+      .map((item) => item.category));
+    const missing = {
+      hypothesis: modelHypothesisIds.size === 0,
+      action: modelActions.length === 0,
+      assessmentCategories: this.options.task.checks.filter((category) => !concluded.has(category)),
+    };
+    if (!missing.hypothesis && !missing.action && missing.assessmentCategories.length === 0) return;
+
+    this.options.store.appendAudit({
+      taskId,
+      event: "model_milestone_reconciliation_started",
+      level: "info",
+      data: { epochId, missing },
+    });
+    await this.agent.prompt(`模型调查即将结束，但可验证里程碑仍不完整：${JSON.stringify(missing)}。
+
+请只补齐缺失项，不重复已有记录，也不扩大枚举范围：
+1. 若缺少 hypothesis，从当前 Fact/Assessment 中选择一个真实 subjectRef，调用 propose_hypothesis；必须提供支持事实、反证和至少一种替代解释。
+2. 若缺少 action，使用已有或刚创建的 MODEL hypothesis/obligation，调用 propose_actions 提交至少一个白名单、非重复且能检验替代解释的动作，并检查调度结果。不能直接调用远程原语冒充 MODEL Action。
+3. 为每个缺失类别调用 record_assessment 写 OBSERVED_CATEGORY；有具体可疑对象时另写 SUBJECT 风险结论。不得把 PARTIAL/ERROR/UNKNOWN 或未决缺口解释为安全。
+4. 通过 query_investigation 核对以上记录已持久化后直接收尾。`);
+
+    const afterHypotheses = this.options.store.listInvestigationHypotheses(taskId, epochId).filter((item) => item.proposedBy === "MODEL");
+    const afterActions = this.options.store.listInvestigationActions(taskId, epochId).filter((item) => item.requestedBy === "MODEL");
+    const afterConcluded = new Set(this.options.store.listAssessments(taskId, epochId)
+      .filter((item) => item.authorType === "MODEL" && item.scope === "OBSERVED_CATEGORY")
+      .map((item) => item.category));
+    const remaining = {
+      hypothesis: afterHypotheses.length === 0,
+      action: afterActions.length === 0,
+      assessmentCategories: this.options.task.checks.filter((category) => !afterConcluded.has(category)),
+    };
+    const complete = !remaining.hypothesis && !remaining.action && remaining.assessmentCategories.length === 0;
+    this.options.store.appendAudit({
+      taskId,
+      event: "model_milestone_reconciliation_finished",
+      level: complete ? "info" : "warn",
+      data: { epochId, complete, remaining },
+    });
   }
 
   /**
