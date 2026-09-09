@@ -46,6 +46,7 @@ export class SecurityAgentRuntime extends EventEmitter {
   private streamSequence = 0;
   private pauseRequested = false;
   private milestoneNudgeQueued = false;
+  private terminalNudgeQueued = false;
   private investigationPromptActive = false;
   constructor(private readonly options: SecurityAgentRuntimeOptions) {
     super();
@@ -100,7 +101,10 @@ export class SecurityAgentRuntime extends EventEmitter {
       beforeToolCall: async ({ toolCall, args }, signal) => await this.beforeToolCall(toolCall.id, toolCall.name, args, signal),
       shouldStopAfterTurn: async () => {
         const current = this.options.store.getTask(task.taskId) ?? task;
-        if (current.turnCount < config.agent.maxTurns) this.queueMilestoneNudgeIfNeeded(current.turnCount);
+        if (current.turnCount < config.agent.maxTurns) {
+          this.queueMilestoneNudgeIfNeeded(current.turnCount);
+          this.queueTerminalNudgeIfNeeded(current.turnCount);
+        }
         return current.turnCount >= config.agent.maxTurns;
       },
     });
@@ -751,6 +755,42 @@ export class SecurityAgentRuntime extends EventEmitter {
       event: "model_milestone_nudge_queued",
       level: "info",
       data: { epochId, turnCount, missing, inputId },
+    });
+  }
+
+  /** 执行面已闭合但模型仍在继续查询时主动要求终态裁定，为自然停止后的兜底协调保留轮次。 */
+  private queueTerminalNudgeIfNeeded(turnCount: number): void {
+    if (!this.investigationPromptActive || this.terminalNudgeQueued) return;
+    const taskId = this.options.task.taskId;
+    const epochId = this.options.protocolV2.epochId;
+    const alreadyQueued = this.options.store.listAudit(taskId).some((entry) =>
+      entry.event === "model_terminal_nudge_queued" && entry.data.epochId === epochId);
+    if (alreadyQueued) {
+      this.terminalNudgeQueued = true;
+      return;
+    }
+    const hasHypothesis = this.options.store.listInvestigationHypotheses(taskId, epochId).some((item) => item.proposedBy === "MODEL");
+    const hasAction = this.options.store.listInvestigationActions(taskId, epochId).some((item) => item.requestedBy === "MODEL");
+    const concluded = new Set(this.options.store.listAssessments(taskId, epochId)
+      .filter((item) => item.authorType === "MODEL" && item.scope === "OBSERVED_CATEGORY")
+      .map((item) => item.category));
+    if (!hasHypothesis || !hasAction || this.options.task.checks.some((category) => !concluded.has(category))) return;
+    const evaluation = new InvestigationCompletionValidator(this.options.store).evaluate(taskId, epochId);
+    if (!evaluation.canClose || evaluation.status !== "LIMITED" || evaluation.limitedObligationIds.length > 0 || evaluation.runningActionIds.length > 0) return;
+    this.terminalNudgeQueued = true;
+    const message: AgentMessage = {
+      role: "user",
+      content: `控制端终态检查：调查执行面已经闭合，但结论仍为 LIMITED（${evaluation.reasons.join("；") || "Assessment 尚未形成终态"}）。立即停止扩大查询范围，使用 get_assessment_projection 和 query_investigation 核对证据；有具体风险时写 SUBJECT 级风险 Assessment，疑点已排除且无真实缺口时用 adjudicate_assessment 写 NO_OBSERVED_FINDING。不得把 PARTIAL/ERROR/UNKNOWN 改写为安全。完成必要 Tool Call 后直接收尾。`,
+      timestamp: Date.now(),
+    };
+    const inputId = this.options.store.enqueueInput(taskId, message, epochId);
+    this.trackPendingInput(message.timestamp, inputId);
+    this.agent.steer(message);
+    this.options.store.appendAudit({
+      taskId,
+      event: "model_terminal_nudge_queued",
+      level: "info",
+      data: { epochId, turnCount, reasons: evaluation.reasons, inputId },
     });
   }
 

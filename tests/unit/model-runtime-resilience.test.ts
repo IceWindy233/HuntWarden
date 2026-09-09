@@ -5,6 +5,7 @@ import { createModels, type Context, type ToolResultMessage } from "@earendil-wo
 import { fauxAssistantMessage, fauxProvider } from "@earendil-works/pi-ai/providers/faux";
 import { afterEach, describe, expect, it } from "vitest";
 import { ApprovalService } from "../../src/agent/approval-service.js";
+import { digestObject } from "../../src/common/json.js";
 import { FakeProtocolV2Executor } from "../../src/executor/fake-executor.js";
 import type { InvestigationSession } from "../../src/investigation/types.js";
 import type { HelperCapabilitiesV2, ScanEpoch } from "../../src/protocol-v2/types.js";
@@ -99,7 +100,7 @@ async function fixture(withObligation = true) {
     model: faux.getModel(),
     protocolV2: { epochId: epoch.epochId },
   });
-  return { store, task, epoch, faux, runtime };
+  return { store, task, epoch, config, faux, runtime };
 }
 
 describe("模型运行时故障降级", () => {
@@ -274,6 +275,69 @@ describe("模型运行时故障降级", () => {
       expect.objectContaining({ event: "model_milestone_reconciliation_started" }),
       expect.objectContaining({ event: "model_terminal_reconciliation_started" }),
     ]));
+  });
+
+  it("执行面闭合后在主循环中主动要求终态裁定", async () => {
+    const { store, task, epoch, config, faux, runtime } = await fixture();
+    task.checks = ["backdoor_account"];
+    task.turnCount = 5;
+    store.saveTask(task);
+    config.agent.maxTurns = 7;
+    const now = new Date().toISOString();
+    const fact = store.commitFactBatch({
+      taskId: task.taskId,
+      epochId: epoch.epochId,
+      sourceRunId: "MODEL-TERMINAL-FACT",
+      source: { kind: "SYSTEM" },
+      targetFingerprint: task.target.hostFingerprint,
+      requestId: "MODEL-TERMINAL-FACT",
+      collector: { name: "enumerate", version: "2.0.0" },
+      observations: [{
+        namespace: "process",
+        identity: { bootId: "boot", pid: 42, startTicks: "10", exeInode: "20", exeSha256: "d".repeat(64) },
+        fields: { bootId: "boot", pid: 42, startTicks: "10", exeInode: "20", exeSha256: "d".repeat(64) },
+        observedAt: now,
+        consistency: "OBJECT_STABLE",
+      }],
+      edges: [],
+      gaps: [],
+      wireDigest: "c".repeat(64),
+    }).facts[0]!;
+    store.putInvestigationHypothesis({
+      hypothesisId: "HYP-MODEL-TERMINAL", taskId: task.taskId, epochId: epoch.epochId, subjectRef: fact.subjectRef,
+      claim: "测试终态提醒", proposedBy: "MODEL", supportRefs: [fact.factId], counterEvidenceRefs: [],
+      alternativeExplanations: ["良性进程"], status: "SUPPORTED", revision: 0, createdAt: now, updatedAt: now,
+    });
+    const obligation = store.listInvestigationObligations(task.taskId, epoch.epochId)[0]!;
+    store.updateInvestigationObligation({ ...obligation, status: "SATISFIED", updatedAt: now }, "OPEN");
+    const actionArgs = { ref: fact.subjectRef, fields: ["pid"] };
+    store.putInvestigationAction({
+      actionId: "ACTION-MODEL-TERMINAL", taskId: task.taskId, epochId: epoch.epochId, kind: "LOCAL_QUERY", requestedBy: "MODEL",
+      obligationIds: [obligation.obligationId], subjectRefs: [fact.subjectRef], entityVersionRefs: [], operationRef: "query_facts",
+      replayPolicy: "SAFE_REOBSERVE", args: actionArgs, argsDigest: digestObject(actionArgs), dependsOn: [], authorizationVersion: "AUTH-1",
+      observationRound: "ROUND-1", idempotencyKey: `${task.taskId}:${epoch.epochId}:terminal-test`, priority: 10,
+      status: "SUCCEEDED", revision: 0, createdAt: now, updatedAt: now,
+    });
+    store.putAssessment({
+      assessmentId: "ASM-MODEL-TERMINAL", taskId: task.taskId, epochId: epoch.epochId, authorType: "MODEL",
+      category: "backdoor_account", scope: "OBSERVED_CATEGORY", verdict: "INCONCLUSIVE", severity: "INFO", confidence: 0.7,
+      rationale: "等待终态裁定", evidenceRefs: [], factRefs: [fact.factId], queryRefs: [], createdAt: now,
+    });
+    let providerCalls = 0;
+    let secondContext: Context | undefined;
+    faux.setResponses([
+      () => { providerCalls += 1; return fauxAssistantMessage("继续查询。"); },
+      (context) => { providerCalls += 1; secondContext = context; return fauxAssistantMessage("执行终态裁定。"); },
+    ]);
+
+    await runtime.prompt("继续调查");
+
+    expect(providerCalls).toBe(2);
+    expect(secondContext?.messages).toEqual(expect.arrayContaining([
+      expect.objectContaining({ role: "user", content: expect.stringContaining("控制端终态检查") }),
+    ]));
+    expect(store.listAudit(task.taskId).filter((event) => event.event === "model_terminal_nudge_queued")).toHaveLength(1);
+    expect(store.listPendingInputs(task.taskId)).toHaveLength(0);
   });
 
   it("把带部分文本的非完整 aborted 流按 Provider failure 固化而不误报完成", async () => {
