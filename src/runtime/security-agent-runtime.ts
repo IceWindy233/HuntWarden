@@ -41,10 +41,12 @@ export interface SecurityAgentRuntimeOptions {
 
 export class SecurityAgentRuntime extends EventEmitter {
   readonly agent: Agent;
-  private readonly pendingInputByTimestamp = new Map<number, string>();
+  private readonly pendingInputByTimestamp = new Map<number, string[]>();
   private activeStream: { streamId: string; timestamp: number } | undefined;
   private streamSequence = 0;
   private pauseRequested = false;
+  private milestoneNudgeQueued = false;
+  private investigationPromptActive = false;
   constructor(private readonly options: SecurityAgentRuntimeOptions) {
     super();
     const { task, config, tools, models, model, store } = options;
@@ -98,6 +100,7 @@ export class SecurityAgentRuntime extends EventEmitter {
       beforeToolCall: async ({ toolCall, args }, signal) => await this.beforeToolCall(toolCall.id, toolCall.name, args, signal),
       shouldStopAfterTurn: async () => {
         const current = this.options.store.getTask(task.taskId) ?? task;
+        if (current.turnCount < config.agent.maxTurns) this.queueMilestoneNudgeIfNeeded(current.turnCount);
         return current.turnCount >= config.agent.maxTurns;
       },
     });
@@ -257,9 +260,15 @@ export class SecurityAgentRuntime extends EventEmitter {
     this.options.store.saveTask(task);
     const originalTools = this.agent.state.tools;
     if (withoutTools) this.agent.state.tools = originalTools.filter((tool) => tool.name === "query_facts" || tool.name === "query_investigation" || tool.name === "get_assessment_projection");
+    this.investigationPromptActive = !withoutTools;
     this.options.store.appendAudit({ taskId: task.taskId, event: withoutTools ? "report_model_started" : "agent_started", level: "info", data: {} });
     try {
-      await this.agent.prompt(text);
+      try {
+        await this.agent.prompt(text);
+      } finally {
+        // 后续 reconciliation 已有专用提示；第 5 轮 steering 只属于主调查循环。
+        this.investigationPromptActive = false;
+      }
       if (!withoutTools && this.pauseRequested) { this.markPaused(); return; }
       let lastAssistant = [...this.agent.state.messages].reverse().find((message) => message.role === "assistant");
       if (!withoutTools && lastAssistant?.role === "assistant") lastAssistant = await this.retryInterruptedProviderStream(lastAssistant);
@@ -297,6 +306,7 @@ export class SecurityAgentRuntime extends EventEmitter {
       this.options.store.saveTask(failed);
       throw error;
     } finally {
+      this.investigationPromptActive = false;
       this.agent.state.tools = originalTools;
     }
   }
@@ -304,7 +314,7 @@ export class SecurityAgentRuntime extends EventEmitter {
   async steer(text: string): Promise<void> {
     const message: AgentMessage = { role: "user", content: text, timestamp: Date.now() };
     const inputId = this.options.store.enqueueInput(this.options.task.taskId, message, this.options.protocolV2.epochId);
-    this.pendingInputByTimestamp.set(message.timestamp, inputId);
+    this.trackPendingInput(message.timestamp, inputId);
     this.agent.steer(message);
   }
 
@@ -315,7 +325,7 @@ export class SecurityAgentRuntime extends EventEmitter {
     this.options.store.appendAudit({ taskId: this.options.task.taskId, event: "recovery_started", level: "warn", data: { epochId: this.options.protocolV2.epochId } });
     for (const queued of this.options.store.listPendingInputs(this.options.task.taskId, this.options.protocolV2.epochId)) {
       const timestamp = "timestamp" in queued.message ? queued.message.timestamp : Date.now();
-      this.pendingInputByTimestamp.set(timestamp, queued.inputId);
+      this.trackPendingInput(timestamp, queued.inputId);
       this.agent.steer(queued.message);
     }
     const incomplete = this.options.store.listIncompleteToolRuns(this.options.task.taskId);
@@ -395,13 +405,27 @@ export class SecurityAgentRuntime extends EventEmitter {
     this.options.store.saveTask(task);
     this.options.store.appendAudit({ taskId: task.taskId, event: "investigation_resumed", level: "info", data: {} });
     try {
-      await this.agent.continue();
+      let lastAssistant: AgentMessage | undefined;
+      this.investigationPromptActive = true;
+      try {
+        await this.agent.continue();
+      } finally {
+        this.investigationPromptActive = false;
+      }
       if (this.pauseRequested) { this.markPaused(); return; }
-      const lastAssistant = [...this.agent.state.messages].reverse().find((message) => message.role === "assistant");
+      lastAssistant = [...this.agent.state.messages].reverse().find((message) => message.role === "assistant");
+      if (lastAssistant?.role === "assistant") lastAssistant = await this.retryInterruptedProviderStream(lastAssistant);
       if (lastAssistant?.role === "assistant" && (lastAssistant.stopReason === "error" || lastAssistant.stopReason === "aborted")) {
         throw new Error(lastAssistant.errorMessage || (lastAssistant.stopReason === "aborted" ? "模型 Provider 流在完成前中止" : "模型 Provider 调用失败"));
       }
       this.requireMeaningfulAssistant(lastAssistant);
+      await this.reconcileInvestigationMilestones();
+      await this.reconcileTerminalAssessment();
+      const reconciledAssistant = [...this.agent.state.messages].reverse().find((message) => message.role === "assistant");
+      if (reconciledAssistant?.role === "assistant" && (reconciledAssistant.stopReason === "error" || reconciledAssistant.stopReason === "aborted")) {
+        throw new Error(reconciledAssistant.errorMessage || "模型终态协调失败");
+      }
+      this.requireMeaningfulAssistant(reconciledAssistant);
       this.finalizeV2ModelGaps("NORMAL_SKIP");
       this.completeInvestigation("MODEL_STOPPED_WITH_OPEN_WORK");
       const completed = this.options.store.getTask(task.taskId) ?? task;
@@ -538,8 +562,10 @@ export class SecurityAgentRuntime extends EventEmitter {
       const message = event.message as AgentMessage;
       this.options.store.appendMessage(this.options.task.taskId, message, this.options.protocolV2.epochId);
       if (message.role === "user") {
-        const inputId = this.pendingInputByTimestamp.get(message.timestamp);
-        if (inputId) { this.options.store.markInputDelivered(inputId); this.pendingInputByTimestamp.delete(message.timestamp); }
+        const inputIds = this.pendingInputByTimestamp.get(message.timestamp);
+        const inputId = inputIds?.shift();
+        if (inputId) this.options.store.markInputDelivered(inputId);
+        if (inputIds?.length === 0) this.pendingInputByTimestamp.delete(message.timestamp);
         this.options.checkpoint?.("model_response_after_user_persisted");
       }
       if (message.role === "assistant") {
@@ -577,6 +603,12 @@ export class SecurityAgentRuntime extends EventEmitter {
       ...(input.delta === undefined ? {} : { delta: input.delta }),
     };
     this.emit("stream", update);
+  }
+
+  private trackPendingInput(timestamp: number, inputId: string): void {
+    const inputIds = this.pendingInputByTimestamp.get(timestamp) ?? [];
+    inputIds.push(inputId);
+    this.pendingInputByTimestamp.set(timestamp, inputIds);
   }
 
   private async recoverToolRun(record: ToolRunRecord): Promise<void> {
@@ -686,14 +718,52 @@ export class SecurityAgentRuntime extends EventEmitter {
     }
   }
 
+  /** 第 5 轮仍缺少模型账本里程碑时立即插入一次 steering，避免模型把全部轮次耗在分页阅读。 */
+  private queueMilestoneNudgeIfNeeded(turnCount: number): void {
+    if (!this.investigationPromptActive || this.milestoneNudgeQueued || turnCount < 5) return;
+    const taskId = this.options.task.taskId;
+    const epochId = this.options.protocolV2.epochId;
+    const alreadyQueued = this.options.store.listAudit(taskId).some((entry) =>
+      entry.event === "model_milestone_nudge_queued" && entry.data.epochId === epochId);
+    if (alreadyQueued) {
+      this.milestoneNudgeQueued = true;
+      return;
+    }
+    const hasHypothesis = this.options.store.listInvestigationHypotheses(taskId, epochId).some((item) => item.proposedBy === "MODEL");
+    const hasAction = this.options.store.listInvestigationActions(taskId, epochId).some((item) => item.requestedBy === "MODEL");
+    const concluded = new Set(this.options.store.listAssessments(taskId, epochId)
+      .filter((item) => item.authorType === "MODEL" && item.scope === "OBSERVED_CATEGORY")
+      .map((item) => item.category));
+    const missingCategories = this.options.task.checks.filter((category) => !concluded.has(category));
+    if (hasHypothesis && hasAction && missingCategories.length === 0) return;
+    this.milestoneNudgeQueued = true;
+    const missing = { hypothesis: !hasHypothesis, action: !hasAction, assessmentCategories: missingCategories };
+    const message: AgentMessage = {
+      role: "user",
+      content: `控制端第 5 轮里程碑检查：${JSON.stringify(missing)}。立即暂停扩大分页范围，优先用正式 Tool Call 补齐缺项：propose_hypothesis → 使用返回的 obligation 调用 propose_actions → 为缺失类别 record_assessment。完成后再按必要性继续调查；不得重复已有记录或把未决缺口写成安全。`,
+      timestamp: Date.now(),
+    };
+    const inputId = this.options.store.enqueueInput(taskId, message, epochId);
+    this.trackPendingInput(message.timestamp, inputId);
+    this.agent.steer(message);
+    this.options.store.appendAudit({
+      taskId,
+      event: "model_milestone_nudge_queued",
+      level: "info",
+      data: { epochId, turnCount, missing, inputId },
+    });
+  }
+
   /**
    * SDK 的 HTTP 重试只覆盖取得响应头之前的错误。Provider 已返回 200 后若 SSE/TCP 被提前关闭，
    * Agent 会留下 stopReason=error 的部分 assistant，且不会执行其中的 Tool Call。对明确的传输
    * 中断只追加一次新用户回合继续；失败消息仍在账本中，普通 Provider 错误不会被掩盖。
    */
   private async retryInterruptedProviderStream(message: AssistantMessage): Promise<AssistantMessage> {
+    const task = this.options.store.getTask(this.options.task.taskId) ?? this.options.task;
     const retryable = message.stopReason === "error"
       && this.options.config.agent.providerMaxRetries > 0
+      && task.turnCount < this.options.config.agent.maxTurns
       && /(?:^terminated$|fetch failed|socket|ECONNRESET|UND_ERR_)/iu.test(message.errorMessage ?? "")
       && !this.pauseRequested
       && !this.agent.signal?.aborted;
@@ -733,6 +803,8 @@ export class SecurityAgentRuntime extends EventEmitter {
   private async reconcileInvestigationMilestones(): Promise<void> {
     const taskId = this.options.task.taskId;
     const epochId = this.options.protocolV2.epochId;
+    const task = this.options.store.getTask(taskId) ?? this.options.task;
+    if (task.turnCount >= this.options.config.agent.maxTurns) return;
     const hypotheses = this.options.store.listInvestigationHypotheses(taskId, epochId);
     const modelHypothesisIds = new Set(hypotheses.filter((item) => item.proposedBy === "MODEL").map((item) => item.hypothesisId));
     const evaluation = new InvestigationCompletionValidator(this.options.store).evaluate(taskId, epochId);

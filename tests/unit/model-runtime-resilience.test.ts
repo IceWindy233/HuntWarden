@@ -225,6 +225,57 @@ describe("模型运行时故障降级", () => {
     ]));
   });
 
+  it("第 5 轮调查仍缺里程碑时只追加一次控制端提醒", async () => {
+    const { store, task, faux, runtime } = await fixture();
+    const current = store.getTask(task.taskId)!;
+    current.turnCount = 4;
+    store.saveTask(current);
+    let providerCalls = 0;
+    let secondContext: Context | undefined;
+    faux.setResponses([
+      () => { providerCalls += 1; return fauxAssistantMessage("继续分页读取事实。"); },
+      (context) => { providerCalls += 1; secondContext = context; return fauxAssistantMessage("已按控制端要求检查里程碑。"); },
+    ]);
+
+    await runtime.prompt("继续调查");
+
+    expect(providerCalls).toBe(2);
+    expect(secondContext?.messages).toEqual(expect.arrayContaining([
+      expect.objectContaining({ role: "user", content: expect.stringContaining("控制端第 5 轮里程碑检查") }),
+    ]));
+    expect(store.listAudit(task.taskId).filter((event) => event.event === "model_milestone_nudge_queued")).toEqual([
+      expect.objectContaining({ data: expect.objectContaining({ turnCount: 5 }) }),
+    ]);
+    expect(store.listPendingInputs(task.taskId)).toHaveLength(0);
+  });
+
+  it("暂停后继续仍执行里程碑与终态协调", async () => {
+    const { store, task, epoch, faux, runtime } = await fixture();
+    const obligation = store.listInvestigationObligations(task.taskId, epoch.epochId)[0]!;
+    store.updateInvestigationObligation({ ...obligation, status: "SATISFIED", updatedAt: new Date().toISOString() }, "OPEN");
+    const session = store.getInvestigationSession(task.taskId, epoch.epochId)!;
+    store.updateInvestigationSession({ ...session, executionStatus: "PAUSED", revision: 1, updatedAt: new Date().toISOString() }, 0);
+    const current = store.getTask(task.taskId)!;
+    current.status = "PAUSED";
+    store.saveTask(current);
+    runtime.agent.state.messages = [{ role: "user", content: "从暂停点继续", timestamp: Date.now() }];
+    let providerCalls = 0;
+    faux.setResponses([
+      () => { providerCalls += 1; return fauxAssistantMessage("已继续调查。"); },
+      () => { providerCalls += 1; return fauxAssistantMessage("已协调里程碑。"); },
+      () => { providerCalls += 1; return fauxAssistantMessage("已协调终态。"); },
+    ]);
+
+    await runtime.resume();
+
+    expect(providerCalls).toBe(3);
+    expect(store.getTask(task.taskId)?.status).toBe("COMPLETED");
+    expect(store.listAudit(task.taskId)).toEqual(expect.arrayContaining([
+      expect.objectContaining({ event: "model_milestone_reconciliation_started" }),
+      expect.objectContaining({ event: "model_terminal_reconciliation_started" }),
+    ]));
+  });
+
   it("把带部分文本的非完整 aborted 流按 Provider failure 固化而不误报完成", async () => {
     const { store, task, epoch, faux, runtime } = await fixture();
     faux.setResponses([{ ...fauxAssistantMessage("partial before stall"), stopReason: "aborted" }]);
