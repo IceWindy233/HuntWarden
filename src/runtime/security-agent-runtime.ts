@@ -25,6 +25,12 @@ const PROVIDER_CONTEXT_MIN_RESERVE_TOKENS = 8_192;
 const PROVIDER_CONTEXT_MAX_RESERVE_TOKENS = 32_768;
 const PROVIDER_CONTEXT_RESERVE_RATIO = 0.125;
 const MIN_BATCH_RESULT_BYTES = 1_024;
+const DIRECT_REMOTE_PRIMITIVES = new Set(["enumerate", "project", "read", "match", "relate", "verify", "collect", "probe"]);
+
+/** 模型只提交结构化调查动作；八个远端原语由 propose_actions 后的持久化调度器执行。 */
+export function selectModelVisibleTools(tools: readonly SecurityToolDefinition[]): SecurityToolDefinition[] {
+  return tools.filter((tool) => !DIRECT_REMOTE_PRIMITIVES.has(tool.name));
+}
 
 export interface SecurityAgentRuntimeOptions {
   task: TaskContext;
@@ -64,7 +70,7 @@ export class SecurityAgentRuntime extends EventEmitter {
         systemPrompt: buildSystemPrompt(task),
         model,
         thinkingLevel: config.model.thinkingLevel,
-        tools,
+        tools: selectModelVisibleTools(tools),
         messages: store.loadMessages(task.taskId, options.protocolV2.epochId),
       },
       // 调查循环此前不传重试策略：一次 429 或网络抖动就让 stopReason 变成 error，任务 FAILED，

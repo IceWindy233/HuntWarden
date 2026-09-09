@@ -392,7 +392,7 @@ describe("持久化调查状态", () => {
     expect(store.listInvestigationActionAttempts(task.taskId, epoch.epochId)).toHaveLength(1);
   });
 
-  it("Action 执行器复用同一 Epoch 已完成的 Preset 原语结果", async () => {
+  it("Action 执行器复用同一 Epoch 任意已完成的相同原语结果", async () => {
     const { store, task, epoch, fact, observedAt } = await fixture();
     store.createInvestigationSession(session(task.taskId, epoch.epochId, observedAt));
     const createdObligation = store.putInvestigationObligation(obligation(task.taskId, epoch.epochId, fact.subjectRef, observedAt));
@@ -402,8 +402,8 @@ describe("持久化调查状态", () => {
       operationRef: "project", args, argsDigest: digestObject(args),
     });
     const presetResult = { content: [{ type: "text" as const, text: "{}" }], details: { status: "success", factRefs: [fact.factId], objectRefs: [fact.subjectRef] } };
-    store.startToolRun({ toolCallId: "PRESET-REUSABLE", taskId: task.taskId, epochId: epoch.epochId, toolName: "project", risk: "READ", replayPolicy: "SAFE_REOBSERVE", args });
-    store.finishToolRun("PRESET-REUSABLE", "SUCCEEDED", presetResult);
+    store.startToolRun({ toolCallId: "DIRECT-REUSABLE", taskId: task.taskId, epochId: epoch.epochId, toolName: "project", risk: "READ", replayPolicy: "SAFE_REOBSERVE", args });
+    store.finishToolRun("DIRECT-REUSABLE", "SUCCEEDED", presetResult);
     let calls = 0;
     const tool: SecurityToolDefinition = {
       name: "project", label: "project", description: "project",
@@ -416,7 +416,7 @@ describe("持久化调查状态", () => {
     expect(summary).toEqual({ executed: 1, succeeded: 1, partial: 0, failed: 0 });
     expect(calls).toBe(0);
     expect(store.listInvestigationActions(task.taskId, epoch.epochId)).toContainEqual(expect.objectContaining({ status: "SUCCEEDED", resultRefs: [fact.factId, fact.subjectRef] }));
-    expect(store.listAudit(task.taskId, 100).some((event) => event.event === "investigation_action_reused_preset_primitive")).toBe(true);
+    expect(store.listAudit(task.taskId, 100).some((event) => event.event === "investigation_action_reused_primitive")).toBe(true);
   });
 
   it("活动 Action 队列达到上限后阻塞新增动作并把受影响义务收敛为受限", async () => {

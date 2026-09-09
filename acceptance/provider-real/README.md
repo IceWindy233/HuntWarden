@@ -54,7 +54,7 @@ HUNTWARDEN_LLM_API_KEY='由安全环境注入' npm run qualify:provider:tasks --
   --output /secure/provider-task-run.json
 ```
 
-运行器固定任务类别、DEEP 配置、时间窗和验收提示，依次执行 Linux 零 IOC 调查与 Java 运行态调查。每条任务都必须生成报告，且 Task、Epoch、调查状态分别为 `COMPLETED`、`COMPLETED`、`CLOSED_WITH_FINDINGS` 或 `CLOSED_NO_OBSERVED_FINDING`。`LIMITED`、Provider 失败或报告失败会令命令失败，并在输出中保留对应任务 ID、状态和错误。
+运行器固定任务类别、DEEP 配置、时间窗和验收提示，依次执行 Linux 零 IOC 调查与 Java 运行态调查。模型可见工具不包含八个直接远端原语；模型必须通过 `propose_actions` 建立持久化 Action，再由调度器执行原语。调度器对当前 Epoch 的相同成功调用复用既有结果，避免 Preset、确定性发现和模型动作重复触达目标。每条任务都必须生成报告，且 Task、Epoch、调查状态分别为 `COMPLETED`、`COMPLETED`、`CLOSED_WITH_FINDINGS` 或 `CLOSED_NO_OBSERVED_FINDING`。`LIMITED`、Provider 失败或报告失败会令命令失败，并在输出中保留对应任务 ID、状态和错误。
 
 每次正式重试使用新的 `storage.baseDir` 和输出文件，保留 FIRST 记录，不覆盖失败轨迹。
 

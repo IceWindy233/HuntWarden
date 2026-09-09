@@ -839,14 +839,14 @@ function createProposeHypothesisTool(deps: V2ToolDependencies): SecurityToolDefi
 }
 
 function createProposeActionsTool(deps: V2ToolDependencies): SecurityToolDefinition {
-  return localTool(deps, "propose_actions", "为调查义务提交受限动作组合并交由持久化调度器执行", Type.Object({
+  return localTool(deps, "propose_actions", "为调查义务提交受限动作组合并交由持久化调度器执行；每个 args 必须包含对应原语的完整参数（包括必需的 ref/refs），subjectRefs 不会自动填入 args", Type.Object({
     hypothesisId: Type.String({ pattern: "^HYP-[A-Za-z0-9-]+$" }),
     obligationId: Type.String({ pattern: "^OBL-[A-Za-z0-9-]+$" }),
     actions: Type.Array(Type.Object({
       clientRef: Type.String({ minLength: 1, maxLength: 64 }),
       operationRef: Type.Union(MODEL_ACTION_OPERATION_NAMES.map((value) => Type.Literal(value))),
-      subjectRefs: Type.Array(RefSchema, { maxItems: 32, uniqueItems: true }),
-      args: Type.Record(Type.String({ maxLength: 64 }), Type.Unknown()),
+      subjectRefs: Type.Array(RefSchema, { maxItems: 32, uniqueItems: true, description: "动作归属对象；不会替代 args 中的 ref/refs。" }),
+      args: Type.Record(Type.String({ maxLength: 64 }), Type.Unknown(), { description: "对应 operationRef 的完整工具参数，必须显式包含该原语 Schema 要求的 ref/refs。" }),
       dependsOnClientRefs: Type.Array(Type.String({ minLength: 1, maxLength: 64 }), { maxItems: 32, uniqueItems: true }),
     }, { additionalProperties: false }), { minItems: 1, maxItems: 32 }),
   }, { additionalProperties: false }), async (params, _toolCallId, signal) => {

@@ -10,7 +10,9 @@ import { FakeProtocolV2Executor } from "../../src/executor/fake-executor.js";
 import type { InvestigationSession } from "../../src/investigation/types.js";
 import type { HelperCapabilitiesV2, ScanEpoch } from "../../src/protocol-v2/types.js";
 import { SecurityAgentRuntime } from "../../src/runtime/security-agent-runtime.js";
+import { selectModelVisibleTools } from "../../src/runtime/security-agent-runtime.js";
 import { RuntimeStore } from "../../src/storage/runtime-store.js";
+import type { SecurityToolDefinition } from "../../src/domain/types.js";
 import { testConfig, testTask } from "../helpers.js";
 
 const directories: string[] = [];
@@ -104,6 +106,17 @@ async function fixture(withObligation = true) {
 }
 
 describe("模型运行时故障降级", () => {
+  it("模型只能通过持久化提案调度八个远端原语", () => {
+    const names = [
+      "enumerate", "project", "read", "match", "relate", "verify", "collect", "probe",
+      "query_facts", "propose_hypothesis", "propose_actions", "record_assessment",
+    ];
+    const tools = names.map((name) => ({ name })) as SecurityToolDefinition[];
+    expect(selectModelVisibleTools(tools).map((tool) => tool.name)).toEqual([
+      "query_facts", "propose_hypothesis", "propose_actions", "record_assessment",
+    ]);
+  });
+
   it("空 assistant 保留原响应并按 Provider failure 固化调查缺口", async () => {
     const { store, task, epoch, faux, runtime } = await fixture();
     faux.setResponses([fauxAssistantMessage([])]);

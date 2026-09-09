@@ -50,14 +50,14 @@ export class InvestigationActionExecutor {
         let cursorRef: string | undefined;
         const resultRefs: string[] = [];
         const paged = claimed.action.operationRef === "enumerate" || claimed.action.operationRef === "relate";
-        const reusablePreset = paged ? undefined : this.findReusablePresetResult(claimed.action);
-        if (reusablePreset) {
-          const details = reusablePreset.details as Record<string, unknown>;
+        const reusableResult = paged ? undefined : this.findReusablePriorResult(claimed.action);
+        if (reusableResult) {
+          const details = reusableResult.details as Record<string, unknown>;
           resultRefs.push(...collectResultRefs(details));
           partial = details.status === "partial";
-          this.store.appendAudit({ taskId: this.taskId, event: "investigation_action_reused_preset_primitive", level: "info", data: { actionId: claimed.action.actionId, operationRef: claimed.action.operationRef, argsDigest: claimed.action.argsDigest } });
+          this.store.appendAudit({ taskId: this.taskId, event: "investigation_action_reused_primitive", level: "info", data: { actionId: claimed.action.actionId, operationRef: claimed.action.operationRef, argsDigest: claimed.action.argsDigest, sourceToolCallIdDigest: digestObject(reusableResult.toolCallId) } });
         }
-        for (let page = 0; !reusablePreset && page < ACTION_MAX_PAGES; page += 1) {
+        for (let page = 0; !reusableResult && page < ACTION_MAX_PAGES; page += 1) {
           if (!Value.Check(tool.parameters, args)) throw new Error(`调查 Action ${claimed.action.actionId} 参数不符合 ${claimed.action.operationRef} Schema`);
           try {
             const toolCallId = page === 0 ? claimed.attempt.attemptId : `${claimed.attempt.attemptId}-PAGE-${page + 1}`;
@@ -106,13 +106,13 @@ export class InvestigationActionExecutor {
     return summary;
   }
 
-  private findReusablePresetResult(action: InvestigationAction): { details: unknown } | undefined {
+  private findReusablePriorResult(action: InvestigationAction): { details: unknown; toolCallId: string } | undefined {
     const run = this.store.listToolRuns(this.taskId, 100_000).find((item) => item.epochId === this.epochId
-      && item.status === "SUCCEEDED" && item.toolCallId.startsWith("PRESET-")
+      && item.status === "SUCCEEDED"
       && item.toolName === action.operationRef && digestObject(item.args) === action.argsDigest
       && item.result !== undefined);
     if (!run?.result || typeof run.result !== "object" || !("details" in run.result)) return undefined;
-    return run.result as { details: unknown };
+    return { ...(run.result as { details: unknown }), toolCallId: run.toolCallId };
   }
 
   private limitDiscoveryCheckpoint(cursorRef: string | undefined, reason: string): void {
