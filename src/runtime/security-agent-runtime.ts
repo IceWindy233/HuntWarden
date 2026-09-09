@@ -1,7 +1,7 @@
 import { EventEmitter } from "node:events";
 import type { AgentEvent, AgentMessage, AgentToolResult } from "@earendil-works/pi-agent-core";
 import { Agent } from "@earendil-works/pi-agent-core";
-import type { Api, Model, Models, ToolResultMessage } from "@earendil-works/pi-ai";
+import type { Api, AssistantMessage, Model, Models, ToolResultMessage } from "@earendil-works/pi-ai";
 import type { ApprovalService } from "../agent/approval-service.js";
 import { buildSystemPrompt } from "../agent/system-prompt.js";
 import { createObservedProviderFetch, providerRequestSignal } from "../agent/provider-observer.js";
@@ -261,7 +261,8 @@ export class SecurityAgentRuntime extends EventEmitter {
     try {
       await this.agent.prompt(text);
       if (!withoutTools && this.pauseRequested) { this.markPaused(); return; }
-      const lastAssistant = [...this.agent.state.messages].reverse().find((message) => message.role === "assistant");
+      let lastAssistant = [...this.agent.state.messages].reverse().find((message) => message.role === "assistant");
+      if (!withoutTools && lastAssistant?.role === "assistant") lastAssistant = await this.retryInterruptedProviderStream(lastAssistant);
       if (lastAssistant?.role === "assistant" && (lastAssistant.stopReason === "error" || lastAssistant.stopReason === "aborted")) {
         throw new Error(lastAssistant.errorMessage || (lastAssistant.stopReason === "aborted" ? "模型 Provider 流在完成前中止" : "模型 Provider 调用失败"));
       }
@@ -683,6 +684,45 @@ export class SecurityAgentRuntime extends EventEmitter {
         code: "MODEL_DID_NOT_INVESTIGATE", reasonCode, createdAt: new Date().toISOString(),
       });
     }
+  }
+
+  /**
+   * SDK 的 HTTP 重试只覆盖取得响应头之前的错误。Provider 已返回 200 后若 SSE/TCP 被提前关闭，
+   * Agent 会留下 stopReason=error 的部分 assistant，且不会执行其中的 Tool Call。对明确的传输
+   * 中断只追加一次新用户回合继续；失败消息仍在账本中，普通 Provider 错误不会被掩盖。
+   */
+  private async retryInterruptedProviderStream(message: AssistantMessage): Promise<AssistantMessage> {
+    const retryable = message.stopReason === "error"
+      && this.options.config.agent.providerMaxRetries > 0
+      && /(?:^terminated$|fetch failed|socket|ECONNRESET|UND_ERR_)/iu.test(message.errorMessage ?? "")
+      && !this.pauseRequested
+      && !this.agent.signal?.aborted;
+    if (!retryable) return message;
+    this.options.store.appendAudit({
+      taskId: this.options.task.taskId,
+      event: "model_provider_stream_retry_started",
+      level: "warn",
+      data: {
+        epochId: this.options.protocolV2.epochId,
+        provider: this.options.model.provider,
+        model: this.options.model.id,
+        error: message.errorMessage,
+      },
+    });
+    await this.agent.prompt("上一模型响应在完整结束帧到达前发生传输中断，其中的 Tool Call 未执行。请从已持久化的调查状态继续，不要重复已完成动作；保持推理简洁，优先补齐 MODEL 假设、MODEL Action 与各类别 Assessment，然后收尾。");
+    const retried = [...this.agent.state.messages].reverse().find((item): item is AssistantMessage => item.role === "assistant") ?? message;
+    this.options.store.appendAudit({
+      taskId: this.options.task.taskId,
+      event: "model_provider_stream_retry_finished",
+      level: retried.stopReason === "error" || retried.stopReason === "aborted" ? "error" : "info",
+      data: {
+        epochId: this.options.protocolV2.epochId,
+        provider: this.options.model.provider,
+        model: this.options.model.id,
+        stopReason: retried.stopReason,
+      },
+    });
+    return retried;
   }
 
   /**

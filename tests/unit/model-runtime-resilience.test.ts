@@ -237,4 +237,31 @@ describe("模型运行时故障降级", () => {
     ]));
     expect(store.getInvestigationSession(task.taskId, epoch.epochId)?.investigationStatus).toBe("LIMITED");
   });
+
+  it("HTTP 200 后的 terminated 流中断仅续接一次并保留失败消息", async () => {
+    const { store, task, faux, runtime } = await fixture();
+    let providerCalls = 0;
+    faux.setResponses([
+      () => {
+        providerCalls += 1;
+        return { ...fauxAssistantMessage("中断前的部分正文"), stopReason: "error", errorMessage: "terminated" };
+      },
+      () => {
+        providerCalls += 1;
+        return fauxAssistantMessage("续接后完成调查。");
+      },
+    ]);
+
+    await runtime.prompt("审查当前调查");
+
+    expect(providerCalls).toBe(2);
+    expect(store.loadMessages(task.taskId).filter((message) => message.role === "assistant")).toEqual(expect.arrayContaining([
+      expect.objectContaining({ stopReason: "error", errorMessage: "terminated" }),
+      expect.objectContaining({ stopReason: "stop" }),
+    ]));
+    expect(store.listAudit(task.taskId)).toEqual(expect.arrayContaining([
+      expect.objectContaining({ event: "model_provider_stream_retry_started", level: "warn" }),
+      expect.objectContaining({ event: "model_provider_stream_retry_finished", level: "info", data: expect.objectContaining({ stopReason: "stop" }) }),
+    ]));
+  });
 });
