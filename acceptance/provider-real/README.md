@@ -20,6 +20,8 @@ model:
 
 配置中的 `storage.baseDir` 必须指向仓库外的本次独立数据目录。Linux 和 Java 各准备一个目标 YAML：
 
+正式 Java 链需要完成一次 inventory、最多 20 个 class inspect 和 20 个 class dump，因此 `budgets.preset.probeCalls` 必须至少为 `41`；当前默认值为 `64`。运行器会在创建任务前检查该门槛，避免执行到一半才因 Probe 预算耗尽。
+
 ```yaml
 host: 192.0.2.10
 port: 22
@@ -72,4 +74,4 @@ HUNTWARDEN_LLM_API_KEY='由安全环境注入' npm run qualify:provider -- \
   --output /secure/provider-real.json
 ```
 
-`qualify:provider` 会再次在线冒烟，并核对 DNS、公网端点、两个任务的提议/动作/Assessment、发现检查点、完成快照、冻结报告、Java Evidence、控制端提交和目标 Helper 摘要。只有输出 `status: PASS` 才能作为发布证据。
+`qualify:provider` 会再次在线冒烟，并核对 DNS、公网端点、两个任务的提议/动作/Assessment、发现检查点、完成快照、冻结报告、Java Evidence、控制端提交和目标 Helper 摘要。系统 DNS 全部返回 RFC 2544 `198.18.0.0/15` 透明代理 fake-IP 时，执行器使用经 TLS 校验的 DNS over HTTPS 获取资格地址，并在结果中保留解析来源和 fake-IP 证明；普通私网解析不会触发该回退。只有输出 `status: PASS` 才能作为发布证据。
