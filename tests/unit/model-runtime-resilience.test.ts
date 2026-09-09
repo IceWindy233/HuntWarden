@@ -1,7 +1,7 @@
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createModels } from "@earendil-works/pi-ai";
+import { createModels, type Context, type ToolResultMessage } from "@earendil-works/pi-ai";
 import { fauxAssistantMessage, fauxProvider } from "@earendil-works/pi-ai/providers/faux";
 import { afterEach, describe, expect, it } from "vitest";
 import { ApprovalService } from "../../src/agent/approval-service.js";
@@ -141,6 +141,50 @@ describe("模型运行时故障降级", () => {
 
     expect(observed).toEqual({ maxRetries: 4, timeoutMs: 17_000 });
     expect(store.getTask(task.taskId)?.status).toBe("COMPLETED");
+  });
+
+  it("按模型窗口公平压缩同一回合的批量工具结果并移除本地 details", async () => {
+    const { store, task, faux, runtime } = await fixture();
+    let observed: Context | undefined;
+    faux.setResponses([((context) => {
+      observed = context;
+      return fauxAssistantMessage("已完成模型审查。");
+    })]);
+    const timestamp = Date.now();
+    const results: ToolResultMessage[] = Array.from({ length: 13 }, (_, index) => {
+      const details = {
+        status: "success",
+        summary: { offset: 0, returned: 120, total: 120 },
+        items: Array.from({ length: 120 }, (_item, itemIndex) => ({ index: itemIndex, value: `${index}:${"x".repeat(1024)}` })),
+        warnings: [],
+      };
+      return {
+        role: "toolResult",
+        toolCallId: `call-${index}`,
+        toolName: "query_facts",
+        content: [{ type: "text", text: JSON.stringify(details) }],
+        details,
+        isError: false,
+        timestamp,
+      };
+    });
+    runtime.agent.state.messages = results;
+
+    await runtime.prompt("继续调查");
+
+    const sentResults = observed?.messages.filter((message): message is ToolResultMessage => message.role === "toolResult") ?? [];
+    expect(sentResults).toHaveLength(13);
+    const sentBytes = sentResults.reduce((sum, message) => sum + Buffer.byteLength(message.content[0]?.type === "text" ? message.content[0].text : "", "utf8"), 0);
+    expect(sentBytes).toBeLessThanOrEqual(95_616);
+    expect(sentResults.every((message) => message.details === undefined)).toBe(true);
+    expect(sentResults.every((message) => JSON.parse(message.content[0]?.type === "text" ? message.content[0].text : "null").status === "partial")).toBe(true);
+    expect(store.listAudit(task.taskId)).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        event: "model_context_compacted",
+        data: expect.objectContaining({ batchResizedResults: 13, toolBudgetBytes: 95_616 }),
+      }),
+      expect.objectContaining({ event: "model_provider_context" }),
+    ]));
   });
 
   it("把带部分文本的非完整 aborted 流按 Provider failure 固化而不误报完成", async () => {

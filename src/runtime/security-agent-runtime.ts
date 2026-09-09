@@ -5,7 +5,7 @@ import type { Api, Model, Models, ToolResultMessage } from "@earendil-works/pi-a
 import type { ApprovalService } from "../agent/approval-service.js";
 import { buildSystemPrompt } from "../agent/system-prompt.js";
 import { createObservedProviderFetch, providerRequestSignal } from "../agent/provider-observer.js";
-import { sanitizeForLlm } from "../agent/data-sanitizer.js";
+import { sanitizeForLlm, serializeToolResultForLlm } from "../agent/data-sanitizer.js";
 import type { AppConfig } from "../config/schema.js";
 import { digestObject } from "../common/json.js";
 import type { AgentStreamUpdate, SecurityToolDefinition, TaskContext } from "../domain/types.js";
@@ -16,6 +16,15 @@ import { InvestigationCompletionValidator } from "../investigation/completion-va
 
 /** 小于该体量的工具结果不值得淘汰：存根本身也要占位，压缩收益接近零。 */
 const EVICTION_MIN_BYTES = 2_048;
+/**
+ * 模型窗口是 token 单位，而工具结果预算是 UTF-8 字节。按 1 byte/token 换算会比常见
+ * 英文 JSON 的 3-4 bytes/token 更保守，也覆盖大量转义、短标识符导致的高 token 密度。
+ */
+const PROVIDER_CONTEXT_BYTES_PER_TOKEN = 1;
+const PROVIDER_CONTEXT_MIN_RESERVE_TOKENS = 8_192;
+const PROVIDER_CONTEXT_MAX_RESERVE_TOKENS = 32_768;
+const PROVIDER_CONTEXT_RESERVE_RATIO = 0.125;
+const MIN_BATCH_RESULT_BYTES = 1_024;
 
 export interface SecurityAgentRuntimeOptions {
   task: TaskContext;
@@ -57,13 +66,27 @@ export class SecurityAgentRuntime extends EventEmitter {
       },
       // 调查循环此前不传重试策略：一次 429 或网络抖动就让 stopReason 变成 error，任务 FAILED，
       // 所有未固化类别被标成 ERROR。有界重试把可恢复的 Provider 抖动与真正的目标环境受限区分开。
-      streamFn: (streamModel, context, options) => models.streamSimple(streamModel, context, {
-        ...options,
-        maxRetries: config.agent.providerMaxRetries,
-        timeoutMs: config.agent.providerTimeoutSeconds * 1_000,
-        signal: providerRequestSignal(config.agent.providerTimeoutSeconds * 1_000, options?.signal),
-        fetch: providerFetch,
-      }),
+      streamFn: (streamModel, context, options) => {
+        store.appendAudit({
+          taskId: task.taskId,
+          event: "model_provider_context",
+          level: "debug",
+          data: {
+            epochId: this.options.protocolV2.epochId,
+            provider: model.provider,
+            model: model.id,
+            messages: context.messages.length,
+            serializedBytes: Buffer.byteLength(JSON.stringify(context), "utf8"),
+          },
+        });
+        return models.streamSimple(streamModel, context, {
+          ...options,
+          maxRetries: config.agent.providerMaxRetries,
+          timeoutMs: config.agent.providerTimeoutSeconds * 1_000,
+          signal: providerRequestSignal(config.agent.providerTimeoutSeconds * 1_000, options?.signal),
+          fetch: providerFetch,
+        });
+      },
       transformContext: async (messages) => this.evictStaleToolResults(messages),
       // 远程预算按最坏成本先预留、响应后结算。并行工具会把多个 60 秒
       // wallTime 估算同时计入 reserved，QUICK 的 225 秒账户因此在第 4 个
@@ -82,7 +105,7 @@ export class SecurityAgentRuntime extends EventEmitter {
   }
 
   /**
-   * 把过旧的工具结果文本换成存根，只作用于发给 Provider 的上下文。
+   * 把过旧的工具结果文本换成存根，并约束同一批工具结果的总量；只作用于发给 Provider 的上下文。
    *
    * 存在理由：本运行时用的是低层 `Agent`，没有 compaction，历史消息又是从 SQLite 全量回放的，
    * 上下文只增不减。单条满额工具结果约 16k token，长调查必然撞窗口，届时输出预算被夹到极小、
@@ -94,16 +117,115 @@ export class SecurityAgentRuntime extends EventEmitter {
   private async evictStaleToolResults(messages: AgentMessage[]): Promise<AgentMessage[]> {
     const retainTurns = this.options.config.agent.contextRetainTurns;
     let assistantTurns = 0;
-    const output: AgentMessage[] = [];
+    let agedResults = 0;
+    const reversed: AgentMessage[] = [];
     for (let index = messages.length - 1; index >= 0; index -= 1) {
       const message = messages[index];
       if (message === undefined) continue;
       if (message.role === "assistant") assistantTurns += 1;
       // `>=`：走过 retainTurns 个 assistant 消息之后的工具结果才淘汰，因此恰好保留最近
       // retainTurns 个回合的原文，而不是 retainTurns + 1 个。
-      output.push(assistantTurns >= retainTurns ? this.stubToolResult(message) : message);
+      const next = assistantTurns >= retainTurns ? this.stubToolResult(message) : message;
+      if (next !== message) agedResults += 1;
+      reversed.push(next);
     }
-    return output.reverse();
+    const turnBounded = reversed.reverse();
+    const toolBudgetBytes = this.providerToolResultBudgetBytes();
+    const originalToolBytes = turnBounded.reduce((sum, message) => sum + this.toolResultTextBytes(message), 0);
+    const resizable = turnBounded.flatMap((message, index) => {
+      if (message.role !== "toolResult" || message.isError || message.details === undefined) return [];
+      const bytes = this.toolResultTextBytes(message);
+      return bytes > EVICTION_MIN_BYTES ? [{ index, bytes }] : [];
+    });
+    const resizableBytes = resizable.reduce((sum, item) => sum + item.bytes, 0);
+    const fixedBytes = originalToolBytes - resizableBytes;
+    const availableBytes = Math.max(0, toolBudgetBytes - fixedBytes);
+    const fairCap = originalToolBytes > toolBudgetBytes && resizable.length > 0
+      ? this.fairPerResultCap(resizable.map((item) => item.bytes), availableBytes)
+      : Number.POSITIVE_INFINITY;
+    const resizedIndexes = new Set<number>();
+    const output = turnBounded.map((message, index) => {
+      let next = message;
+      const entry = resizable.find((item) => item.index === index);
+      if (entry && entry.bytes > fairCap) {
+        next = this.resizeToolResult(message, fairCap);
+        resizedIndexes.add(index);
+      }
+      return this.withoutToolDetails(next);
+    });
+    const outputToolBytes = output.reduce((sum, message) => sum + this.toolResultTextBytes(message), 0);
+    this.options.store.appendAudit({
+      taskId: this.options.task.taskId,
+      event: "model_context_compacted",
+      level: "debug",
+      data: {
+        epochId: this.options.protocolV2.epochId,
+        messages: messages.length,
+        retainTurns,
+        toolBudgetBytes,
+        originalToolBytes,
+        outputToolBytes,
+        agedResults,
+        batchResizedResults: resizedIndexes.size,
+      },
+    });
+    return output;
+  }
+
+  /** 为 system prompt、Tool Schema、普通消息和 Provider 封装预留窗口，再给工具正文分配保守预算。 */
+  private providerToolResultBudgetBytes(): number {
+    const inputTokens = Math.max(0, this.options.model.contextWindow - this.options.model.maxTokens);
+    const reserveTokens = Math.min(
+      PROVIDER_CONTEXT_MAX_RESERVE_TOKENS,
+      Math.max(PROVIDER_CONTEXT_MIN_RESERVE_TOKENS, Math.ceil(this.options.model.contextWindow * PROVIDER_CONTEXT_RESERVE_RATIO)),
+    );
+    return Math.max(
+      MIN_BATCH_RESULT_BYTES,
+      Math.floor(Math.max(0, inputTokens - reserveTokens) * PROVIDER_CONTEXT_BYTES_PER_TOKEN),
+    );
+  }
+
+  /** 水位分配：小结果保持完整，大结果获得相同上限，未使用的份额自动回流给大结果。 */
+  private fairPerResultCap(sizes: number[], budget: number): number {
+    if (sizes.length === 0 || budget <= 0) return 0;
+    let low = 0;
+    let high = Math.max(...sizes);
+    let best = 0;
+    while (low <= high) {
+      const middle = (low + high) >> 1;
+      const used = sizes.reduce((sum, size) => sum + Math.min(size, middle), 0);
+      if (used <= budget) {
+        best = middle;
+        low = middle + 1;
+      } else {
+        high = middle - 1;
+      }
+    }
+    return best;
+  }
+
+  private resizeToolResult(message: AgentMessage, maxBytes: number): AgentMessage {
+    if (message.role !== "toolResult" || message.details === undefined) return message;
+    const encoded = serializeToolResultForLlm(message.details, Math.max(MIN_BATCH_RESULT_BYTES, maxBytes));
+    if (encoded.outputBytes > maxBytes) {
+      return {
+        ...message,
+        content: [{ type: "text", text: "[工具结果受 Provider 总上下文预算限制；请缩小条件或分页查询。]" }],
+      };
+    }
+    return { ...message, content: [{ type: "text", text: encoded.text }] };
+  }
+
+  /** details 用于本地审计；Provider 只需要脱敏且有界的 content。 */
+  private withoutToolDetails(message: AgentMessage): AgentMessage {
+    if (message.role !== "toolResult") return message;
+    const { details: _details, ...wireMessage } = message;
+    return wireMessage;
+  }
+
+  private toolResultTextBytes(message: AgentMessage): number {
+    if (message.role !== "toolResult") return 0;
+    return Buffer.byteLength(message.content.filter((item) => item.type === "text").map((item) => item.text).join(""), "utf8");
   }
 
   /** 只压缩体量大且成功的工具结果：错误结果本身很短，且失败原因是后续判断的依据。 */
