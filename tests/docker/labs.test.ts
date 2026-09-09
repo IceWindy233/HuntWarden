@@ -259,7 +259,7 @@ describe.skipIf(!enabled)("Docker 五类 Lab v2 通用取证原语", () => {
     expect(identityStable).toBe(true);
   }, 240_000);
 
-  it("Lab-Java 由控制器自动完成精确 ClassLoader 与字节码保全，并保留反射来源缺口", async () => {
+  it("Lab-Java 由控制器自动完成精确 ClassLoader 与字节码保全，并闭合完整分页来源", async () => {
     const client = await remote(2223);
     const directory = await mkdtemp(join(tmpdir(), "huntwarden-java-controller-"));
     const store = await RuntimeStore.open(directory, "runtime.db");
@@ -297,10 +297,10 @@ describe.skipIf(!enabled)("Docker 五类 Lab v2 通用取证原语", () => {
         }),
       }));
       const completion = new InvestigationCompletionValidator(store).freeze(task.taskId, result.epoch.epochId);
-      expect(completion.investigationStatus).toBe("LIMITED");
+      expect(completion.investigationStatus).toBe("CLOSED_NO_OBSERVED_FINDING");
       expect(store.listInvestigationObligations(task.taskId, result.epoch.epochId)).toContainEqual(expect.objectContaining({
-        obligationKind: "CATEGORY_SCOPE_JAVA_MEMORY_SHELL", required: true, status: "LIMITED",
-        gapRefs: expect.arrayContaining(["PARTIAL_SOURCE"]),
+        obligationKind: "CATEGORY_SCOPE_JAVA_MEMORY_SHELL", required: true, status: "SATISFIED",
+        resultRefs: expect.arrayContaining([expect.stringMatching(/^COV-/)]), gapRefs: [],
       }));
     } finally {
       store.close();
