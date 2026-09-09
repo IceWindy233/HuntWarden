@@ -1554,6 +1554,16 @@ def process_request(request: dict[str, Any]) -> dict[str, Any]:
     return current
 
 
+TRANSIENT_PROCESS_OBSERVATION_ERRORS = frozenset({
+    "process no longer exists",
+    "process disappeared during collection",
+})
+
+
+def transient_process_observation_error(error: HelperError) -> bool:
+    return str(error) in TRANSIENT_PROCESS_OBSERVATION_ERRORS
+
+
 def enumerate_stable_processes(maximum: int, include_hash: bool = True,
                                include_context: bool = True) -> tuple[list[dict[str, Any]], list[str], bool]:
     items: list[dict[str, Any]] = []
@@ -1569,8 +1579,11 @@ def enumerate_stable_processes(maximum: int, include_hash: bool = True,
         try:
             record = stable_process(int(entry.name), cache, include_hash, include_context)
         except HelperError as exc:
-            # Kernel threads and racing processes are expected, but inability to collect is explicit.
-            warnings.append(f"PID {entry.name}: {str(exc)}")
+            # /proc is volatile. A PID that disappears after the directory snapshot represents a
+            # fully visited object, not an unscanned range or collector failure. Other errors stay
+            # explicit so permission, parsing and stable-identity failures remain fail-closed.
+            if not transient_process_observation_error(exc):
+                warnings.append(f"PID {entry.name}: {str(exc)}")
             continue
         if include_context and (record.get("cgroupsTruncated") or record["environment"]["partial"]):
             truncated += 1
@@ -1615,7 +1628,8 @@ def v2_process_inventory(params: dict[str, Any], start_after_pid: int, maximum: 
         try:
             value = stable_process(next_pid, cache, include_hash)
         except HelperError as exc:
-            warnings.append(f"PID {entry.name}: {str(exc)}")
+            if not transient_process_observation_error(exc):
+                warnings.append(f"PID {entry.name}: {str(exc)}")
             continue
         row = {**value, "exe": value.get("exePath"), "command": value.get("command", value.get("comm"))}
         if params.get("predicate") is not None and not v2_predicate("process", params.get("predicate"), row):

@@ -182,6 +182,29 @@ print(json.dumps({"pages": pages, "filtered": [item["fields"]["pid"] for item in
                   "accountAll": [item["fields"]["uid"] for item in account_all],
                   "accountEndGaps": account_end_gaps, "accountScans": account_scans}))
 `;
+const volatileProcessExitHarness = `
+import json, runpy, types, sys
+ns = runpy.run_path(sys.argv[1])
+inventory = ns["v2_process_inventory"]
+globals_dict = inventory.__globals__
+entries = [types.SimpleNamespace(name=str(pid)) for pid in (10, 11, 12, 13)]
+globals_dict["pathlib"] = types.SimpleNamespace(Path=lambda _path: types.SimpleNamespace(iterdir=lambda: entries))
+globals_dict["deadline_exceeded"] = lambda: False
+def stable(pid, _cache, _include_hash):
+    if pid == 11:
+        raise ns["HelperError"]("EVIDENCE_COLLECTION", "process no longer exists")
+    if pid == 12:
+        raise ns["HelperError"]("EVIDENCE_COLLECTION", "process disappeared during collection")
+    return {"bootId": "boot", "pid": pid, "startTicks": "1", "exeInode": str(pid), "exeSha256": "a" * 64}
+globals_dict["stable_process"] = stable
+rows, warnings, partial, scan = inventory({}, 0, 500, True)
+def broken(_pid, _cache, _include_hash):
+    raise ns["HelperError"]("EVIDENCE_COLLECTION", "permission denied")
+globals_dict["stable_process"] = broken
+_rows, hard_warnings, hard_partial, _scan = inventory({}, 0, 500, True)
+print(json.dumps({"pids": [row["pid"] for row in rows], "warnings": warnings, "partial": partial, "scan": scan,
+                  "hardWarnings": hard_warnings, "hardPartial": hard_partial}))
+`;
 const resumableFileScanHarness = `
 import json, pathlib, runpy, sys
 ns = runpy.run_path(sys.argv[1])
@@ -528,6 +551,18 @@ print(json.dumps({"kind": kind, "partial": ledger.partial, "warnings": ledger.wa
       expect(pages.at(-1)?.cursor).toBeNull();
       expect(pages.at(-1)?.scan.complete).toBe(true);
     } finally { await rm(directory, { recursive: true, force: true }); }
+  });
+
+  it("短生命周期 PID 消失不降级完整进程扫描，其他采集错误仍保持 PARTIAL", () => {
+    const result = spawnSync("python3", ["-c", volatileProcessExitHarness, helper], { encoding: "utf8" });
+    expect(result.status, result.stderr).toBe(0);
+    const output = JSON.parse(result.stdout) as {
+      pids: number[]; warnings: string[]; partial: boolean;
+      scan: { scannedCount: number; matchedCount: number; complete: boolean };
+      hardWarnings: string[]; hardPartial: boolean;
+    };
+    expect(output).toMatchObject({ pids: [10, 13], warnings: [], partial: false, scan: { scannedCount: 4, matchedCount: 2, complete: true }, hardPartial: true });
+    expect(output.hardWarnings).toEqual(expect.arrayContaining([expect.stringContaining("permission denied")]));
   });
 
   it("Probe 参数不能改写对象绑定，部分输出显式降级且 ClassLoader 身份贯通", () => {

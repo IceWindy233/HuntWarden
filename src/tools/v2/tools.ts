@@ -46,13 +46,26 @@ interface RemoteResultDetails {
   cost: WireCost;
 }
 
-const PredicateSchema = Type.Any();
+// Some OpenAI-compatible providers reject local JSON Schema $ref values, while expanding a
+// recursive tree to depth six consumes tens of KiB of context. The model-visible boundary
+// therefore validates the complete top-level shape and requires every child to be an object;
+// validatePredicate recursively enforces all fields, operators, depth, nodes and UTF-8 limits.
+const PredicateChildSchema = Type.Object({ op: Type.String({ minLength: 1, maxLength: 16 }) }, { additionalProperties: true });
+const PredicateSchema = Type.Union([
+  Type.Object({ op: Type.Union([Type.Literal("eq"), Type.Literal("neq"), Type.Literal("lt"), Type.Literal("lte"), Type.Literal("gt"), Type.Literal("gte")]), field: Type.String({ minLength: 1, maxLength: 64 }), value: Type.Union([Type.String({ maxLength: 256 }), Type.Number(), Type.Boolean(), Type.Null()]) }, { additionalProperties: false }),
+  Type.Object({ op: Type.Union([Type.Literal("contains"), Type.Literal("starts_with")]), field: Type.String({ minLength: 1, maxLength: 64 }), value: Type.String({ maxLength: 256 }) }, { additionalProperties: false }),
+  Type.Object({ op: Type.Literal("in"), field: Type.String({ minLength: 1, maxLength: 64 }), value: Type.Array(Type.Union([Type.String({ maxLength: 256 }), Type.Number(), Type.Boolean()]), { minItems: 1, maxItems: 64 }) }, { additionalProperties: false }),
+  Type.Object({ op: Type.Literal("exists"), field: Type.String({ minLength: 1, maxLength: 64 }), value: Type.Optional(Type.Boolean()) }, { additionalProperties: false }),
+  Type.Object({ op: Type.Union([Type.Literal("and"), Type.Literal("or")]), args: Type.Array(PredicateChildSchema, { minItems: 1, maxItems: 32 }) }, { additionalProperties: false }),
+  Type.Object({ op: Type.Literal("not"), arg: PredicateChildSchema }, { additionalProperties: false }),
+]);
 const RefSchema = Type.String({ pattern: "^OBJ-[0-9a-f-]{36}$" });
 const CursorSchema = Type.String({ pattern: "^CURSOR-[0-9a-f-]{36}$" });
 const severities = ["CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"] as const;
 const verdicts = ["CONFIRMED_MALICIOUS", "HIGHLY_SUSPICIOUS", "SUSPICIOUS", "BENIGN", "NO_OBSERVED_FINDING", "INCONCLUSIVE"] as const;
 const MODEL_ACTION_OPERATION_NAMES = ["enumerate", "project", "read", "match", "relate", "verify", "collect", "probe", "query_facts"] as const;
 type ModelActionOperation = typeof MODEL_ACTION_OPERATION_NAMES[number];
+const SINGLE_REF_MODEL_ACTIONS = new Set<ModelActionOperation>(["project", "read", "relate", "verify", "collect", "probe"]);
 interface ModelActionProposal {
   clientRef: string;
   operationRef: ModelActionOperation;
@@ -660,7 +673,13 @@ function localTool<T extends TSchema, R>(deps: V2ToolDependencies, name: string,
     if (existing?.status === "SUCCEEDED" && existing.result) return existing.result as AgentToolResult<R>;
     if (existing && existing.status !== "STARTED") throw new SecurityError("RECOVERY_UNCERTAIN", "ToolCall 已进入终态，拒绝再次执行本地工具");
     deps.store.startToolRun({ toolCallId, taskId: deps.task.taskId, epochId: deps.epoch.epochId, toolName: name, risk: "LOCAL", replayPolicy, args: params });
-    try { const details = await run(params, toolCallId, signal); const result = modelToolResult(deps, details); deps.store.finishToolRun(toolCallId, "SUCCEEDED", result); return result; }
+    try {
+      if (!Value.Check(parameters, params)) throw new InvalidArgumentError(`${name} 参数不符合工具 Schema`);
+      const details = await run(params, toolCallId, signal);
+      const result = modelToolResult(deps, details);
+      deps.store.finishToolRun(toolCallId, "SUCCEEDED", result);
+      return result;
+    }
     catch (error) { deps.store.finishToolRun(toolCallId, "FAILED", undefined, error instanceof Error ? error.message : String(error)); throw error; }
   } };
 }
@@ -839,14 +858,14 @@ function createProposeHypothesisTool(deps: V2ToolDependencies): SecurityToolDefi
 }
 
 function createProposeActionsTool(deps: V2ToolDependencies): SecurityToolDefinition {
-  return localTool(deps, "propose_actions", "为调查义务提交受限动作组合并交由持久化调度器执行；每个 args 必须包含对应原语的完整参数（包括必需的 ref/refs），subjectRefs 不会自动填入 args", Type.Object({
+  return localTool(deps, "propose_actions", "为调查义务提交受限动作组合并交由持久化调度器执行。subjectRefs 表示动作归属；单对象动作缺少 ref 时控制端仅在唯一 subjectRef 下确定性补全。", Type.Object({
     hypothesisId: Type.String({ pattern: "^HYP-[A-Za-z0-9-]+$" }),
     obligationId: Type.String({ pattern: "^OBL-[A-Za-z0-9-]+$" }),
     actions: Type.Array(Type.Object({
       clientRef: Type.String({ minLength: 1, maxLength: 64 }),
-      operationRef: Type.Union(MODEL_ACTION_OPERATION_NAMES.map((value) => Type.Literal(value))),
-      subjectRefs: Type.Array(RefSchema, { maxItems: 32, uniqueItems: true, description: "动作归属对象；不会替代 args 中的 ref/refs。" }),
-      args: Type.Record(Type.String({ maxLength: 64 }), Type.Unknown(), { description: "对应 operationRef 的完整工具参数，必须显式包含该原语 Schema 要求的 ref/refs。" }),
+      operationRef: Type.Union(MODEL_ACTION_OPERATION_NAMES.map((value) => Type.Literal(value)), { description: "args 形状由此字段决定。" }),
+      subjectRefs: Type.Array(RefSchema, { maxItems: 32, uniqueItems: true, description: "动作归属对象。单对象动作应只放一个引用；match 可放多个文件引用。" }),
+      args: Type.Record(Type.String({ maxLength: 64 }), Type.Unknown(), { description: "完整参数。enumerate={namespace,predicate?,fields?,sort?,limit,cursorRef?,sinceHours?}; project={ref?,fields}; read={ref?,offset,length,encoding,purpose}; match={refs?,matcher:{engine:'literal'|'re2',pattern}|{engine:'yara',ruleSetRef},maxHits?,includeContext?}; relate={ref?,relation,parameters?,limit?,cursorRef?}; verify={ref?,baseline,dataSetRef?}; collect={ref?,maxBytes,purpose}; probe={ref?,probeKind,parameters}; query_facts={view,namespace?,predicate?,select?,sourceRunId?,subjectRef?,sourceKind?,completeness?,category?,authorType?,verdict?,status?,applicability?,orderBy?,limit,cursorRef?}。ref/refs 省略时只能由唯一、同类型 subjectRefs 补全。" }),
       dependsOnClientRefs: Type.Array(Type.String({ minLength: 1, maxLength: 64 }), { maxItems: 32, uniqueItems: true }),
     }, { additionalProperties: false }), { minItems: 1, maxItems: 32 }),
   }, { additionalProperties: false }), async (params, _toolCallId, signal) => {
@@ -855,7 +874,7 @@ function createProposeActionsTool(deps: V2ToolDependencies): SecurityToolDefinit
     const hypothesis = deps.store.listInvestigationHypotheses(deps.task.taskId, deps.epoch.epochId).find((item) => item.hypothesisId === params.hypothesisId);
     const obligation = deps.store.listInvestigationObligations(deps.task.taskId, deps.epoch.epochId).find((item) => item.obligationId === params.obligationId && item.hypothesisId === params.hypothesisId);
     if (!hypothesis || !obligation) throw new InvalidArgumentError("Action 必须绑定当前 Epoch 的 Hypothesis 与 Obligation");
-    const proposals = params.actions as ModelActionProposal[];
+    const proposals = (params.actions as ModelActionProposal[]).map(normalizeModelActionProposal);
     const clientRefs = new Set(proposals.map((item) => item.clientRef));
     if (clientRefs.size !== proposals.length) throw new InvalidArgumentError("clientRef 必须唯一");
     if (proposals.some((item) => item.dependsOnClientRefs.some((dependency) => !clientRefs.has(dependency)))) {
@@ -920,6 +939,29 @@ function createProposeActionsTool(deps: V2ToolDependencies): SecurityToolDefinit
   });
 }
 
+function normalizeModelActionProposal(proposal: ModelActionProposal): ModelActionProposal {
+  const args = { ...proposal.args };
+  if (SINGLE_REF_MODEL_ACTIONS.has(proposal.operationRef) && args.ref === undefined && proposal.subjectRefs.length === 1) {
+    args.ref = proposal.subjectRefs[0];
+  }
+  if (proposal.operationRef === "relate") {
+    if (args.fromRef !== undefined && args.ref === args.fromRef) delete args.fromRef;
+    if (args.limit === undefined) args.limit = 100;
+  }
+  if (proposal.operationRef === "match") {
+    if (args.refs === undefined && proposal.subjectRefs.length > 0) args.refs = [...proposal.subjectRefs];
+    if (args.matcher === undefined && (args.matchType === "literal" || args.matchType === "re2") && typeof args.pattern === "string") {
+      args.matcher = { engine: args.matchType, pattern: args.pattern };
+      delete args.matchType;
+      delete args.pattern;
+      if (args.namespace === "file") delete args.namespace;
+    }
+    if (args.maxHits === undefined) args.maxHits = 50;
+    if (args.includeContext === undefined) args.includeContext = false;
+  }
+  return { ...proposal, args };
+}
+
 function validateProposedAction(
   deps: V2ToolDependencies,
   proposal: ModelActionProposal,
@@ -930,6 +972,7 @@ function validateProposedAction(
     throw new InvalidArgumentError(`Action ${proposal.clientRef} 的 ${operationRef} 参数不符合工具 Schema`);
   }
   for (const ref of proposal.subjectRefs) resolveObject(deps, ref);
+  assertProposedActionSubjectBinding(proposal);
 
   if (operationRef === "query_facts") {
     const input = args as Omit<FactQueryAst, "select"> & { select?: string[] };
@@ -1026,12 +1069,31 @@ function validateProposedAction(
   }
 }
 
+function assertProposedActionSubjectBinding(proposal: ModelActionProposal): void {
+  if (SINGLE_REF_MODEL_ACTIONS.has(proposal.operationRef)) {
+    if (proposal.subjectRefs.length !== 1 || proposal.args.ref !== proposal.subjectRefs[0]) {
+      throw new InvalidArgumentError(`Action ${proposal.clientRef} 的 ref 必须与唯一 subjectRef 一致`);
+    }
+    return;
+  }
+  if (proposal.operationRef === "match") {
+    const refs = proposal.args.refs as string[];
+    if (refs.length !== proposal.subjectRefs.length || refs.some((ref, index) => ref !== proposal.subjectRefs[index])) {
+      throw new InvalidArgumentError(`Action ${proposal.clientRef} 的 refs 必须与 subjectRefs 顺序一致`);
+    }
+    return;
+  }
+  if (proposal.operationRef === "query_facts" && typeof proposal.args.subjectRef === "string" && !proposal.subjectRefs.includes(proposal.args.subjectRef)) {
+    throw new InvalidArgumentError(`Action ${proposal.clientRef} 的 query subjectRef 必须属于 subjectRefs`);
+  }
+}
+
 function createQueryFactsTool(deps: V2ToolDependencies): SecurityToolDefinition {
   const selectFieldSchema = Type.Union([...new Set(Object.values(FACT_QUERY_SELECT_FIELDS).flat())].map((value) => Type.Literal(value)));
   return localTool(deps, "query_facts", "查询模型事实平面；优先省略 select 使用默认字段，Preset 已有事实不要重复远程枚举", Type.Object({
     view: Type.Union([Type.Literal("facts"), Type.Literal("edges"), Type.Literal("evidence_meta"), Type.Literal("assessments"), Type.Literal("coverage")]),
     namespace: Type.Optional(Type.Union(Object.keys(PROTOCOL_MANIFEST.namespaces).map((value) => Type.Literal(value)))),
-    predicate: Type.Optional(Type.Any({ description: "仅 facts 视图可用且同时必须提供 namespace；predicate 的 field 只能是该 namespace Manifest 中标为 filterable 的 payload 字段，factId/subjectRef/sourceRunId 等事实元数据禁止写入 predicate，应改用同名顶层过滤参数。非必要不要传 predicate。" })),
+    predicate: Type.Optional(Type.Unsafe({ ...PredicateSchema, description: "仅 facts 视图可用且同时必须提供 namespace；必须传结构化对象，不能传 JSON 字符串。field 只能是该 namespace Manifest 中标为 filterable 的 payload 字段，factId/subjectRef/sourceRunId 等事实元数据禁止写入 predicate，应改用同名顶层过滤参数。非必要不要传 predicate。" })),
     select: Type.Optional(Type.Array(selectFieldSchema, { minItems: 1, maxItems: 32, description: "建议省略以使用当前 view 的安全默认字段；payload 内的路径等字段不能直接写进 select。" })),
     sourceRunId: Type.Optional(Type.String({ minLength: 1, maxLength: 128 })), subjectRef: Type.Optional(RefSchema),
     sourceKind: Type.Optional(Type.Union([Type.Literal("PRESET"), Type.Literal("MODEL"), Type.Literal("SYSTEM"), Type.Literal("EXTERNAL")])),

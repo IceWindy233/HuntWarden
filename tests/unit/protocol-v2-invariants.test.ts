@@ -99,6 +99,15 @@ describe("Tool Protocol v2 invariants", () => {
       probeKind: "jvm.class.inspect",
       parameters: { className: "example.Filter", classLoaderId: "loader-A" },
     })).toBe(true);
+    const queryFacts = investigate.find((tool) => tool.name === "query_facts")!;
+    expect(Value.Check(queryFacts.parameters, { view: "facts", namespace: "process", predicate: JSON.stringify({ op: "eq", field: "pid", value: 1 }), limit: 10 })).toBe(false);
+    expect(Value.Check(queryFacts.parameters, { view: "facts", namespace: "process", predicate: { op: "eq", field: "pid", value: 1 }, limit: 10 })).toBe(true);
+    expect(Value.Check(queryFacts.parameters, { view: "facts", namespace: "process", predicate: { op: "and", args: [{ op: "eq", field: "pid", value: 1 }] }, limit: 10 })).toBe(true);
+    expect(Buffer.byteLength(JSON.stringify(queryFacts.parameters), "utf8")).toBeLessThan(24_000);
+    await expect(queryFacts.execute("CALL-INVALID-PREDICATE-SHAPE", {
+      view: "facts", namespace: "process", predicate: JSON.stringify({ op: "eq", field: "pid", value: 1 }), limit: 10,
+    } as never)).rejects.toThrow(/参数不符合工具 Schema/);
+    expect(store.getToolRunForScope(task.taskId, epoch.epochId, "CALL-INVALID-PREDICATE-SHAPE")).toMatchObject({ status: "FAILED" });
 
     const reportNames = createV2SecurityTools(deps, "REPORT").map((tool) => tool.name);
     expect(reportNames).toEqual(["query_facts", "query_investigation", "get_assessment_projection"]);
@@ -165,7 +174,10 @@ describe("Tool Protocol v2 invariants", () => {
     store.saveTask(task);
     const helper: HelperCapabilitiesV2 = {
       protocolVersion: 2, manifestVersion: "3.0.0", helper: { name: "helper", version: "3.0.0" },
-      namespaces: { process: { fields: ["bootId", "pid", "startTicks", "exeInode", "exeSha256"], relations: ["parent"], verbs: ["enumerate", "project", "relate", "collect"] } },
+      namespaces: {
+        process: { fields: ["bootId", "pid", "startTicks", "exeInode", "exeSha256"], relations: ["parent"], verbs: ["enumerate", "project", "relate", "collect"] },
+        file: { fields: ["mountId", "device", "inode", "path", "kind", "size", "contentClass"], relations: [], verbs: ["match"] },
+      },
       matchers: ["literal"], probes: [], verbs: ["enumerate", "project", "read", "match", "relate", "verify", "collect", "probe"],
       limits: { maxObjects: 500, maxOutputBytes: 1_572_864, maxReadBytes: 65_536, maxCollectBytes: 104_857_600 },
     };
@@ -177,7 +189,10 @@ describe("Tool Protocol v2 invariants", () => {
       source: { kind: "PRESET", presetRunId: "PRUN-PROPOSAL", presetId: "linux-triage-baseline", presetVersion: "2.5.0", stepId: "processes" },
       targetFingerprint: task.target.hostFingerprint,
       requestId: "RUN-PROPOSAL", collector: { name: "enumerate", version: "2.1.0" },
-      observations: [{ namespace: "process", identity: { bootId: "boot", pid: 77, startTicks: "100", exeInode: "200", exeSha256: "a".repeat(64) }, fields: { bootId: "boot", pid: 77, startTicks: "100", exeInode: "200", exeSha256: "a".repeat(64) }, observedAt: now, consistency: "OBJECT_STABLE" }],
+      observations: [
+        { namespace: "process", identity: { bootId: "boot", pid: 77, startTicks: "100", exeInode: "200", exeSha256: "a".repeat(64) }, fields: { bootId: "boot", pid: 77, startTicks: "100", exeInode: "200", exeSha256: "a".repeat(64) }, observedAt: now, consistency: "OBJECT_STABLE" },
+        { namespace: "file", identity: { mountId: "1", device: "1", inode: "300" }, fields: { mountId: "1", device: "1", inode: "300", path: "/tmp/fixture", kind: "regular", size: 12, contentClass: "SAFE_TEXT" }, observedAt: now, consistency: "OBJECT_STABLE" },
+      ],
       edges: [], gaps: [], wireDigest: "b".repeat(64),
     });
     store.createInvestigationSession({
@@ -201,6 +216,26 @@ describe("Tool Protocol v2 invariants", () => {
     expect(proposal.details).toMatchObject({ scheduler: { executed: 1, succeeded: 1, failed: 0 } });
     expect(store.listInvestigationActions(task.taskId, epoch.epochId)).toEqual([expect.objectContaining({ requestedBy: "MODEL", status: "SUCCEEDED" })]);
     expect(store.listInvestigationObligations(task.taskId, epoch.epochId)).toEqual(expect.arrayContaining([expect.objectContaining({ obligationId: hypothesis.obligationId, status: "SATISFIED", resultRefs: [expect.stringMatching(/^QUERY-/)] })]));
+    const processRef = batch.facts.find((fact) => fact.namespace === "process")!.subjectRef;
+    const fileRef = batch.facts.find((fact) => fact.namespace === "file")!.subjectRef;
+    const normalized = await proposalTool.execute("CALL-NORMALIZED-ACTIONS", {
+      hypothesisId: hypothesis.hypothesisId,
+      obligationId: hypothesis.obligationId,
+      actions: [
+        { clientRef: "parent", operationRef: "relate", subjectRefs: [processRef], args: { fromRef: processRef, relation: "parent" }, dependsOnClientRefs: [] },
+        { clientRef: "literal", operationRef: "match", subjectRefs: [fileRef], args: { matchType: "literal", namespace: "file", pattern: "fixture" }, dependsOnClientRefs: [] },
+      ],
+    } as never);
+    expect(normalized.details).toMatchObject({ accepted: [{ clientRef: "parent" }, { clientRef: "literal" }] });
+    expect(store.listInvestigationActions(task.taskId, epoch.epochId)).toEqual(expect.arrayContaining([
+      expect.objectContaining({ operationRef: "relate", args: { ref: processRef, relation: "parent", limit: 100 } }),
+      expect.objectContaining({ operationRef: "match", args: { refs: [fileRef], matcher: { engine: "literal", pattern: "fixture" }, maxHits: 50, includeContext: false } }),
+    ]));
+    await expect(proposalTool.execute("CALL-MISMATCHED-BINDING", {
+      hypothesisId: hypothesis.hypothesisId,
+      obligationId: hypothesis.obligationId,
+      actions: [{ clientRef: "mismatch", operationRef: "relate", subjectRefs: [processRef], args: { ref: fileRef, relation: "parent", limit: 10 }, dependsOnClientRefs: [] }],
+    } as never)).rejects.toThrow(/ref 必须与唯一 subjectRef 一致/);
     await expect(proposalTool.execute("CALL-BAD-ACTIONS", {
       hypothesisId: hypothesis.hypothesisId, obligationId: hypothesis.obligationId,
       actions: [{ clientRef: "bad", operationRef: "query_facts", subjectRefs: [batch.facts[0]!.subjectRef], args: { view: "facts", limit: 0 }, dependsOnClientRefs: [] }],
@@ -327,6 +362,10 @@ describe("Tool Protocol v2 invariants", () => {
     expect(() => validatePredicate("process", { op: "contains", field: "pid", value: "1" })).toThrow(/字符串/);
     const deep = { op: "not", arg: { op: "not", arg: { op: "not", arg: { op: "not", arg: { op: "eq", field: "pid", value: 1 } } } } } as const;
     expect(() => validatePredicate("process", deep)).toThrow(/深度/);
+    expect(() => validatePredicate("process", JSON.stringify({ op: "eq", field: "pid", value: 1 }))).toThrow(/带 op 的对象/);
+    expect(() => validatePredicate("process", null)).toThrow(/带 op 的对象/);
+    expect(() => validatePredicate("process", { op: "and", args: "invalid" })).toThrow(/args 必须是数组/);
+    expect(() => validatePredicate("process", { op: "invented", field: "pid", value: 1 })).toThrow(/未知 Predicate/);
   });
 
   it("FactBatch 原子提交引用、双平面投影和 ToolRun 终态，失败批次不泄漏半批事实", async () => {
@@ -434,7 +473,7 @@ describe("Tool Protocol v2 invariants", () => {
     const query = tools.find((tool) => tool.name === "query_facts");
     if (!query) throw new Error("缺少 query_facts");
 
-    await expect(query.execute("QUERY-INVALID-SELECT", { view: "facts", namespace: "account", select: ["path"], limit: 10 })).rejects.toThrow(/非法字段/);
+    await expect(query.execute("QUERY-INVALID-SELECT", { view: "facts", namespace: "account", select: ["path"], limit: 10 })).rejects.toThrow(/参数不符合工具 Schema/);
     expect(store.remainingUsage(task.taskId, epoch.epochId, "LOCAL_QUERY_CALLS")).toBe(10);
     const result = await query.execute("QUERY-SIZE-CALL", { view: "facts", namespace: "account", limit: 10 });
     expect(Buffer.byteLength(JSON.stringify(result.details), "utf8")).toBeLessThanOrEqual(1024);
