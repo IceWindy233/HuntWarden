@@ -10,6 +10,7 @@ import { InvestigationActionExecutor } from "../../src/investigation/action-exec
 import { InvestigationCompletionValidator } from "../../src/investigation/completion-validator.js";
 import { InvestigationScheduler } from "../../src/investigation/scheduler.js";
 import type { InvestigationAction, InvestigationObligation, InvestigationSession } from "../../src/investigation/types.js";
+import { InvestigationPlaybookPlanner } from "../../src/playbooks/registry.js";
 import type { ScanEpoch } from "../../src/protocol-v2/types.js";
 import { MAX_ACTIVE_INVESTIGATION_ACTIONS, RuntimeStore } from "../../src/storage/runtime-store.js";
 import { testTask } from "../helpers.js";
@@ -122,6 +123,52 @@ function action(input: { id: string; taskId: string; epochId: string; obligation
 }
 
 describe("持久化调查状态", () => {
+  it("文件证据采集按已观察 size 预留而不是固定占用 100 MiB", async () => {
+    const { store, task, epoch, observedAt } = await fixture();
+    task.checks = ["linux_intrusion_triage"];
+    store.saveTask(task);
+    const fileIdentity = { mountId: "36", device: "259:2", inode: "9901" };
+    const fileSize = 1_234_567;
+    const batch = store.commitFactBatch({
+      taskId: task.taskId,
+      epochId: epoch.epochId,
+      sourceRunId: "PROCESS-EXECUTABLE-FILE",
+      source: { kind: "SYSTEM" },
+      targetFingerprint: task.target.hostFingerprint,
+      requestId: "PROCESS-EXECUTABLE-FILE",
+      collector: { name: "relate", version: "3.0.0" },
+      observations: [{
+        namespace: "file",
+        identity: fileIdentity,
+        fields: { ...fileIdentity, path: "/usr/sbin/nginx", kind: "regular", size: fileSize, mode: 493, uid: 0, gid: 0, mtime: observedAt },
+        observedAt,
+        consistency: "OBJECT_STABLE",
+      }],
+      edges: [{
+        relation: "executable",
+        fromIdentity: {
+          namespace: "process",
+          identity: { bootId: "boot", pid: 42, startTicks: "10", exeInode: "20", exeSha256: "a".repeat(64) },
+        },
+        toIdentity: { namespace: "file", identity: fileIdentity },
+        observedAt,
+      }],
+      gaps: [],
+      wireDigest: "e".repeat(64),
+    });
+    const investigation = session(task.taskId, epoch.epochId, observedAt);
+    store.createInvestigationSession(investigation);
+
+    new InvestigationPlaybookPlanner(store).plan(task.taskId, epoch.epochId, investigation, [batch.facts[0]!.factId]);
+
+    const preserve = store.listInvestigationActions(task.taskId, epoch.epochId)
+      .find((item) => item.operationRef === "collect" && item.subjectRefs.includes(batch.facts[0]!.subjectRef));
+    expect(preserve).toMatchObject({
+      requestedBy: "PLAYBOOK",
+      args: { ref: batch.facts[0]!.subjectRef, maxBytes: fileSize, purpose: "PROCESS_RELATED_FILE_PRESERVATION" },
+    });
+  });
+
   it.each([101, 501])("易失发现分批推进且在容量释放后继续：%s 个候选", async (candidateCount) => {
     const { store, task, epoch, observedAt } = await fixture();
     task.checks = ["linux_intrusion_triage"];

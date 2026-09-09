@@ -7,10 +7,13 @@ import type { RuntimeStore } from "../storage/runtime-store.js";
 import { projectEffectiveAssessments } from "../assessments/projection.js";
 import { isUsableJavaClassIdentifier } from "../investigation/java-class-identity.js";
 
-export const PLAYBOOK_REGISTRY_VERSION = "1.3.0";
+export const PLAYBOOK_REGISTRY_VERSION = "1.3.1";
+
+const MAX_COLLECT_BYTES = 104_857_600;
+const DEFAULT_EXECUTABLE_COLLECT_BYTES = 10 * 1_024 * 1_024;
 
 export const PLAYBOOK_DEFINITIONS = Object.freeze([
-  { id: "process-egress", version: "1.3.0", categories: ["linux_intrusion_triage"] },
+  { id: "process-egress", version: "1.3.1", categories: ["linux_intrusion_triage"] },
   { id: "web-execution-chain", version: "1.3.0", categories: ["webshell"] },
   { id: "account-trust-persistence", version: "1.3.0", categories: ["backdoor_account", "linux_persistence"] },
   { id: "java-runtime-bytecode", version: "1.3.0", categories: ["java_memory_shell"] },
@@ -186,7 +189,7 @@ function operationsForFact(fact: FactRecord, category: CheckCategory, edges: rea
   if (fact.namespace === "file" && category === "webshell") {
     const yaraHit = typeof fact.privatePayload.content === "string" && fact.privatePayload.content.startsWith("YARA_MATCH:");
     return yaraHit ? [
-      { obligationKind: "WEB_PRESERVE_CANDIDATE", operationRef: "collect", args: { ref: fact.subjectRef, maxBytes: 104_857_600, purpose: "WEB_CANDIDATE_PRESERVATION" }, required: true, replayPolicy: "RESUME_OR_RECOLLECT", priority: 96 },
+      { obligationKind: "WEB_PRESERVE_CANDIDATE", operationRef: "collect", args: { ref: fact.subjectRef, maxBytes: collectBytesForFact(fact), purpose: "WEB_CANDIDATE_PRESERVATION" }, required: true, replayPolicy: "RESUME_OR_RECOLLECT", priority: 96 },
       { obligationKind: "WEB_VERIFY_FILE_VERSION", operationRef: "project", args: { ref: fact.subjectRef, fields: ["path", "size", "mtime", "sha256", "contentClass"] }, required: true, priority: 92 },
       { obligationKind: "WEB_PACKAGE_COUNTERCHECK", operationRef: "verify", args: { ref: fact.subjectRef, baseline: "package_db" }, required: false, priority: 78 },
       { obligationKind: "WEB_TRACE_REQUESTS", operationRef: "relate", args: { ref: fact.subjectRef, relation: "requested_in", limit: 500 }, required: false, priority: 84 },
@@ -203,19 +206,19 @@ function operationsForFact(fact: FactRecord, category: CheckCategory, edges: rea
   if (fact.namespace === "file" && category === "linux_persistence") return [
     { obligationKind: "PERSISTENCE_VERIFY_TARGET_FILE", operationRef: "project", args: { ref: fact.subjectRef, fields: ["path", "size", "mtime", "sha256", "contentClass"] }, required: true, priority: 84 },
     { obligationKind: "PERSISTENCE_BASELINE_TARGET_FILE", operationRef: "verify", args: { ref: fact.subjectRef, baseline: "package_db" }, required: false, priority: 72 },
-    { obligationKind: "PERSISTENCE_PRESERVE_TARGET_FILE", operationRef: "collect", args: { ref: fact.subjectRef, maxBytes: 104_857_600, purpose: "PERSISTENCE_TARGET_PRESERVATION" }, required: true, replayPolicy: "RESUME_OR_RECOLLECT", priority: 88 },
+    { obligationKind: "PERSISTENCE_PRESERVE_TARGET_FILE", operationRef: "collect", args: { ref: fact.subjectRef, maxBytes: collectBytesForFact(fact), purpose: "PERSISTENCE_TARGET_PRESERVATION" }, required: true, replayPolicy: "RESUME_OR_RECOLLECT", priority: 88 },
   ];
   if (fact.namespace === "file" && category === "linux_intrusion_triage") return [
     { obligationKind: "PROCESS_FILE_VERIFY_VERSION", operationRef: "project", args: { ref: fact.subjectRef, fields: ["path", "size", "mtime", "sha256", "contentClass"] }, required: true, priority: 86 },
     { obligationKind: "PROCESS_FILE_PACKAGE_COUNTERCHECK", operationRef: "verify", args: { ref: fact.subjectRef, baseline: "package_db" }, required: false, priority: 76 },
-    { obligationKind: "PROCESS_FILE_PRESERVE", operationRef: "collect", args: { ref: fact.subjectRef, maxBytes: 104_857_600, purpose: "PROCESS_RELATED_FILE_PRESERVATION" }, required: true, replayPolicy: "RESUME_OR_RECOLLECT", priority: 92 },
+    { obligationKind: "PROCESS_FILE_PRESERVE", operationRef: "collect", args: { ref: fact.subjectRef, maxBytes: collectBytesForFact(fact), purpose: "PROCESS_RELATED_FILE_PRESERVATION" }, required: true, replayPolicy: "RESUME_OR_RECOLLECT", priority: 92 },
     { obligationKind: "PROCESS_FILE_TRACE_PERSISTENCE", operationRef: "relate", args: { ref: fact.subjectRef, relation: "referenced_by_persistence", limit: 100 }, required: true, priority: 82 },
     { obligationKind: "PROCESS_FILE_TRACE_OPENERS", operationRef: "relate", args: { ref: fact.subjectRef, relation: "opened_by", limit: 100 }, required: false, priority: 68 },
     { obligationKind: "PROCESS_FILE_COUNTEREVIDENCE", operationRef: "query_facts", args: { view: "facts", namespace: "file", subjectRef: fact.subjectRef, limit: 100 }, required: false, priority: 60 },
   ];
   if (fact.namespace === "file" && category === "backdoor_account") return [
     { obligationKind: "ACCOUNT_VERIFY_TRUST_FILE", operationRef: "project", args: { ref: fact.subjectRef, fields: ["path", "size", "mtime", "sha256", "contentClass"] }, required: true, priority: 86 },
-    { obligationKind: "ACCOUNT_PRESERVE_TRUST_FILE", operationRef: "collect", args: { ref: fact.subjectRef, maxBytes: 104_857_600, purpose: "SSH_TRUST_EVIDENCE" }, required: true, replayPolicy: "RESUME_OR_RECOLLECT", priority: 90 },
+    { obligationKind: "ACCOUNT_PRESERVE_TRUST_FILE", operationRef: "collect", args: { ref: fact.subjectRef, maxBytes: collectBytesForFact(fact), purpose: "SSH_TRUST_EVIDENCE" }, required: true, replayPolicy: "RESUME_OR_RECOLLECT", priority: 90 },
     { obligationKind: "ACCOUNT_TRUST_FILE_PACKAGE_COUNTERCHECK", operationRef: "verify", args: { ref: fact.subjectRef, baseline: "package_db" }, required: false, priority: 70 },
     { obligationKind: "ACCOUNT_TRUST_FILE_COUNTEREVIDENCE", operationRef: "query_facts", args: { view: "facts", namespace: "file", subjectRef: fact.subjectRef, limit: 100 }, required: false, priority: 60 },
   ];
@@ -262,7 +265,7 @@ function operationsForFact(fact: FactRecord, category: CheckCategory, edges: rea
   ];
   if (fact.namespace === "process") return [
     { obligationKind: "VERIFY_PROCESS_IDENTITY", operationRef: "project", args: { ref: fact.subjectRef, fields: ["pid", "startTicks", "exe", "exeDeleted", "exeInode", "exeSha256", "command", "launcherPath", "namespaces", "cgroups", "mapsSummary"] }, required: true, priority: 98 },
-    { obligationKind: "PRESERVE_EXECUTABLE_EVIDENCE", operationRef: "collect", args: { ref: fact.subjectRef, maxBytes: 104_857_600, purpose: "AUTONOMOUS_VOLATILE_PRESERVATION" }, required: true, replayPolicy: "RESUME_OR_RECOLLECT", priority: 97 },
+    { obligationKind: "PRESERVE_EXECUTABLE_EVIDENCE", operationRef: "collect", args: { ref: fact.subjectRef, maxBytes: collectBytesForFact(fact), purpose: "AUTONOMOUS_VOLATILE_PRESERVATION" }, required: true, replayPolicy: "RESUME_OR_RECOLLECT", priority: 97 },
     { obligationKind: "TRACE_PROCESS_EXECUTABLE", operationRef: "relate", args: { ref: fact.subjectRef, relation: "executable", limit: 20 }, required: true, priority: 94 },
     { obligationKind: "TRACE_PROCESS_COMMAND_FILES", operationRef: "relate", args: { ref: fact.subjectRef, relation: "command_file", limit: 100 }, required: true, priority: 92 },
     { obligationKind: "TRACE_PROCESS_PARENT", operationRef: "relate", args: { ref: fact.subjectRef, relation: "parent", limit: 20 }, required: true, priority: 90 },
@@ -273,6 +276,19 @@ function operationsForFact(fact: FactRecord, category: CheckCategory, edges: rea
     { obligationKind: "CHECK_PROCESS_COUNTEREVIDENCE", operationRef: "query_facts", args: { view: "facts", namespace: fact.namespace, subjectRef: fact.subjectRef, limit: 100 }, required: false, priority: 58 },
   ];
   return [];
+}
+
+/**
+ * 稳定 file Fact 已含采集时 size，按实际字节预留即可；统一预留 100 MiB 会让默认 64 MiB
+ * discovery 账户中的任何 collect 在执行前必然失败。process 的 /proc/<pid>/exe 无独立 size
+ * 字段，使用 10 MiB 上限，超大可执行文件会明确形成采集限制而不会吞掉整场预算。
+ */
+function collectBytesForFact(fact: FactRecord): number {
+  const size = fact.privatePayload.size;
+  if (fact.namespace === "file" && typeof size === "number" && Number.isSafeInteger(size) && size >= 0) {
+    return Math.min(MAX_COLLECT_BYTES, Math.max(1, size));
+  }
+  return DEFAULT_EXECUTABLE_COLLECT_BYTES;
 }
 
 function claimFor(category: CheckCategory, namespace: string): string {

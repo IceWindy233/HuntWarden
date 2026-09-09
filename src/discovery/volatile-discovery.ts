@@ -5,6 +5,8 @@ import type { FactRecord, NamespaceName } from "../protocol-v2/types.js";
 import { MAX_ACTIVE_INVESTIGATION_ACTIONS, type RuntimeStore } from "../storage/runtime-store.js";
 import { isPublicThreatIntelIp } from "../threat-intel/network-ioc.js";
 
+const EXECUTABLE_COLLECT_BYTES = 10 * 1_024 * 1_024;
+
 export interface DiscoveryPlanResult {
   leadIds: string[];
   obligationIds: string[];
@@ -135,7 +137,7 @@ export class VolatileDiscoveryPlanner {
     return candidate.subject.namespace === "process"
       ? [
           { obligationKind: "VERIFY_PROCESS_IDENTITY", operationRef: "project", args: { ref: candidate.subject.subjectRef, fields: ["pid", "startTicks", "exe", "exeDeleted", "exeInode", "exeSha256", "command", "launcherPath", "namespaces", "cgroups", "mapsSummary"] }, replayPolicy: "SAFE_REOBSERVE" as const },
-          { obligationKind: "PRESERVE_EXECUTABLE_EVIDENCE", operationRef: "collect", args: { ref: candidate.subject.subjectRef, maxBytes: 104_857_600, purpose: "AUTONOMOUS_VOLATILE_PRESERVATION" }, replayPolicy: "RESUME_OR_RECOLLECT" as const },
+          { obligationKind: "PRESERVE_EXECUTABLE_EVIDENCE", operationRef: "collect", args: { ref: candidate.subject.subjectRef, maxBytes: EXECUTABLE_COLLECT_BYTES, purpose: "AUTONOMOUS_VOLATILE_PRESERVATION" }, replayPolicy: "RESUME_OR_RECOLLECT" as const },
           { obligationKind: "TRACE_PROCESS_EXECUTABLE", operationRef: "relate", args: { ref: candidate.subject.subjectRef, relation: "executable", limit: 20 }, replayPolicy: "SAFE_REOBSERVE" as const },
           { obligationKind: "TRACE_PROCESS_COMMAND_FILES", operationRef: "relate", args: { ref: candidate.subject.subjectRef, relation: "command_file", limit: 100 }, replayPolicy: "SAFE_REOBSERVE" as const },
           { obligationKind: "TRACE_PROCESS_PARENT", operationRef: "relate", args: { ref: candidate.subject.subjectRef, relation: "parent", limit: 20 }, replayPolicy: "SAFE_REOBSERVE" as const },
