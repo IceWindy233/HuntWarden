@@ -122,6 +122,32 @@ async function readHost(remote: ProtocolV2Executor, commit: string, sequence: nu
   return response.status === "SUCCESS" && response.gaps.length === 0 ? response.objects[0] : undefined;
 }
 
+async function findEvidenceSource(remote: ProtocolV2Executor, path: string, commit: string, sequence: number): Promise<WireSuccess["objects"][number] | undefined> {
+  const baseParams = {
+    namespace: "file",
+    scope: { namespace: "file", canonicalRoot: dirname(path) },
+    fields: ["path", "size", "contentClass"],
+    predicate: { op: "eq", field: "path", value: path },
+    limit: 1,
+  };
+  let cursor: string | undefined;
+  const seenCursors = new Set<string>();
+  for (let page = 0; page < 128; page += 1) {
+    const inventory = await invoke(remote, "enumerate", { ...baseParams, ...(cursor ? { cursor } : {}) }, commit, sequence + page);
+    const source = inventory.objects.find((object) => object.namespace === "file" && object.fields.path === path);
+    // Exact discovery only needs a stable reference to this candidate. Directory-wide gaps
+    // can concern unrelated descendants; collect reopens the locator and verifies its identity.
+    if (source) return source;
+    if (!inventory.cursor) return undefined;
+    const onlyResumableNodeLimit = inventory.status === "PARTIAL" && inventory.gaps.length > 0
+      && inventory.gaps.every((gap) => gap.code === "NODE_LIMIT" && gap.resumable === true);
+    if (!onlyResumableNodeLimit || seenCursors.has(inventory.cursor)) return undefined;
+    seenCursors.add(inventory.cursor);
+    cursor = inventory.cursor;
+  }
+  return undefined;
+}
+
 export async function runPlatformQualification(input: PlatformQualificationInput): Promise<PlatformQualificationResult> {
   const failures: string[] = [];
   const manifest = input.manifest;
@@ -155,9 +181,9 @@ export async function runPlatformQualification(input: PlatformQualificationInput
     addFailure(typeof observed.timezone === "string" && observed.timezone.length > 0, failures, "目标时区未观测");
 
     let source: WireSuccess["objects"][number] | undefined;
-    for (const path of manifest.evidenceCandidates) {
-      const inventory = await invoke(first, "enumerate", { namespace: "file", scope: { namespace: "file", canonicalRoot: dirname(path) }, fields: ["path", "size", "contentClass"], predicate: { op: "eq", field: "path", value: path }, limit: 1 }, input.commit, 2);
-      if (inventory.status === "SUCCESS" && inventory.gaps.length === 0 && inventory.objects[0]) { source = inventory.objects[0]; break; }
+    for (const [candidateIndex, path] of manifest.evidenceCandidates.entries()) {
+      source = await findEvidenceSource(first, path, input.commit, 2 + candidateIndex * 128);
+      if (source) break;
     }
     addFailure(Boolean(source), failures, "未找到可完整采集的 Evidence 候选文件");
     if (source) {

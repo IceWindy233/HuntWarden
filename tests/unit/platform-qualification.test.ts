@@ -48,6 +48,26 @@ function remote(selinuxMode = "Unavailable"): ProtocolV2Executor {
   };
 }
 
+function paginatedEvidenceRemote(): ProtocolV2Executor {
+  const base = remote();
+  const original = base.invokeV2.bind(base);
+  base.invokeV2 = async (verb, request, signal) => {
+    if (verb !== "enumerate" || request.params.namespace !== "file") return original(verb, request, signal);
+    if (!request.params.cursor) {
+      const first = await original(verb, request, signal);
+      if (first.status === "ERROR") return first;
+      return {
+        ...first,
+        status: "PARTIAL",
+        cursor: "opaque-next-page",
+        gaps: [{ code: "NODE_LIMIT", detail: "enumerate limit reached", resumable: true }],
+      };
+    }
+    return response(request.requestId, []);
+  };
+  return base;
+}
+
 describe("目标平台发布资格执行器", () => {
   it("从 Helper 主机事实、Evidence、清理和 SSH 重连生成 PASS", async () => {
     const result = await runPlatformQualification({ manifest: manifest(), manifestSha256: "a".repeat(64), expectedHelperSha256: helperSha256, commit: "c".repeat(40), createRemote: () => remote(), evaluatedAt: "2026-09-08T01:00:00.000Z" });
@@ -56,6 +76,12 @@ describe("目标平台发布资格执行器", () => {
     expect(result.evidence).toMatchObject({ verified: true, bytes: payload.length, sha256: payloadSha });
     expect(result.recovery).toMatchObject({ verified: true, reconnects: 1, hostIdentityStable: true, capabilitiesStable: true });
     expect(result.cleanup).toMatchObject({ verified: true, finalAbsent: true });
+  });
+
+  it("Evidence 精确匹配已产生稳定对象时不受目录后续分页影响", async () => {
+    const result = await runPlatformQualification({ manifest: manifest(), manifestSha256: "a".repeat(64), expectedHelperSha256: helperSha256, commit: "c".repeat(40), createRemote: () => paginatedEvidenceRemote() });
+    expect(result.status, result.failures.join("\n")).toBe("PASS");
+    expect(result.evidence).toMatchObject({ verified: true, bytes: payload.length, sha256: payloadSha });
   });
 
   it("Rocky/Alma 平台在 SELinux 非 Enforcing 时失败关闭", async () => {
