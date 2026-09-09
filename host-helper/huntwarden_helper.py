@@ -3756,7 +3756,11 @@ def v2_enumerate(params: dict[str, Any], epoch_id: str) -> tuple[list[dict[str, 
     # 源在分页期间变化时不能丢弃整页：设计 §5.2 要求存在可用部分数据就返回 PARTIAL + gap
     # + cursor，游标改用当前源代，调用方才能继续；只有一条都没产出时才是纯错误。
     current_generation = v2_source_generation(str(namespace), params)
-    if cursor_source_changed or current_generation != source_generation:
+    # 完整单页已经物化了一个有界观察；读取完成后的新增/删除属于下一观察时刻，不能反过来
+    # 把这批完整结果降为 PARTIAL。源代只在需要 offset 续页或本页本身来自旧 Cursor 时决定
+    # 跨页一致性，此时仍严格报告 SOURCE_CHANGED，避免漏页/重页被误认为完整扫描。
+    source_change_affects_pagination = cursor_source_changed or (more and current_generation != source_generation)
+    if source_change_affects_pagination:
         if not objects:
             raise HelperError("SOURCE_CHANGED", "enumerate source changed before any object was produced")
         gaps.append({"code": "SOURCE_CHANGED", "detail": "分页期间数据源发生变化，本页为 CURSOR_BEST_EFFORT 结果", "resumable": True})

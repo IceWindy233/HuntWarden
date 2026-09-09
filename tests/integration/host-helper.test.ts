@@ -729,6 +729,13 @@ print(json.dumps({"kind": kind, "partial": ledger.partial, "warnings": ledger.wa
       expect(report.cursor).toEqual(expect.any(String));
       expect(report.gaps).toEqual(expect.arrayContaining([expect.objectContaining({ code: "SOURCE_CHANGED", resumable: true })]));
       expect(report.consistency).toEqual(["CURSOR_BEST_EFFORT"]);
+
+      const complete = spawnSync("python3", ["-c", sourceDriftHarness, helper], {
+        input: JSON.stringify({ ...base, requestId: "REQ-COMPLETE-DRIFT", params: { ...params, limit: 500 } }), encoding: "utf8",
+      });
+      expect(complete.status, complete.stderr).toBe(0);
+      const completeReport = JSON.parse(complete.stdout) as { objects: number; cursor: string | null; gaps: Array<{ code: string }> };
+      expect(completeReport).toMatchObject({ objects: 3, cursor: null, gaps: [] });
     } finally { await rm(directory, { recursive: true, force: true }); }
   });
 
