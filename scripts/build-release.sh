@@ -19,7 +19,7 @@ elif ((prerelease == 0)); then
   echo "缺少 HUNTWARDEN_RELEASE_QUALIFICATION；拒绝在没有真实 Provider、独立盲测、平台矩阵、真实业务 JVM 和运维演练证据时生成稳定发布资产。" >&2
   exit 1
 else
-  echo "警告：正在生成未完成正式发布资格的预发布资产（$version）。" >&2
+  echo "警告：正在生成未完成正式发布资格的预发布资产（${version}）。" >&2
 fi
 
 release_dir="$project_root/release/v$version"
