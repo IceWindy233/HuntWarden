@@ -11,7 +11,7 @@ import { testTask } from "../helpers.js";
 const directories: string[] = []; const stores: RuntimeStore[] = [];
 afterEach(async () => { for (const store of stores.splice(0)) store.close(); await Promise.all(directories.splice(0).map((path) => rm(path, { recursive: true, force: true }))); });
 
-async function seed(caseId: string, malicious: boolean) {
+async function seed(caseId: string, malicious: boolean, adjudicate = malicious) {
   const directory = await mkdtemp(join(tmpdir(), `huntwarden-eval-${caseId}-`)); directories.push(directory);
   const store = await RuntimeStore.open(directory, "runtime.db"); stores.push(store);
   const task = testTask(); task.taskId = `TASK-${caseId}`; task.protocolVersion = 2; task.checks = ["linux_intrusion_triage"]; store.createTask(task);
@@ -23,10 +23,8 @@ async function seed(caseId: string, malicious: boolean) {
   const path = malicious ? "/tmp/payload" : "/usr/bin/updater";
   const fact = store.commitFactBatch({ taskId: task.taskId, epochId: epoch.epochId, sourceRunId: `RUN-${caseId}`, source: { kind: "SYSTEM", evidenceOrigin: "TARGET_OBSERVATION" }, targetFingerprint: task.target.hostFingerprint, requestId: `RUN-${caseId}`, collector: { name: "enumerate", version: "3.0.0" }, observations: [{ namespace: "process", identity: { bootId: "boot", pid: malicious ? 41 : 42, startTicks: "1" }, fields: { bootId: "boot", pid: malicious ? 41 : 42, startTicks: "1", exe: path }, observedAt: now, consistency: "POINT_IN_TIME" }], edges: [], gaps: [], wireDigest: (malicious ? "a" : "b").repeat(64) }).facts[0]!;
   store.putInvestigationObligation({ obligationId: `OBL-${caseId}`, taskId: task.taskId, epochId: epoch.epochId, obligationKind: "PRESERVE_EXECUTABLE_EVIDENCE", dedupeKey: `PRESERVE:${caseId}`, subjectRefs: [fact.subjectRef], required: true, status: "SATISFIED", resultRefs: [fact.factId, ...(malicious ? [`EV-${caseId}`] : [])], gapRefs: [], createdAt: now, updatedAt: now });
-  if (malicious) {
-    store.putEvidence({ evidenceId: `EV-${caseId}`, taskId: task.taskId, host: task.target.host, type: "collected_object", source: path, sha256: "c".repeat(64), tool: "collect", collectedAt: now, metadata: { epochId: epoch.epochId, subjectRef: fact.subjectRef, complete: true, integrityStatus: "VERIFIED", range: { start: 0, length: 7, complete: true }, artifactSize: 7, artifactDigest: "c".repeat(64) } });
-    store.putAssessment({ assessmentId: `ASM-${caseId}`, taskId: task.taskId, epochId: epoch.epochId, authorType: "RULE", category: "linux_intrusion_triage", subjectRef: fact.subjectRef, scope: "SUBJECT", verdict: "SUSPICIOUS", severity: "MEDIUM", confidence: 0.8, rationale: "临时目录执行候选", evidenceRefs: [], factRefs: [fact.factId], queryRefs: [], createdAt: now });
-  }
+  if (malicious) store.putEvidence({ evidenceId: `EV-${caseId}`, taskId: task.taskId, host: task.target.host, type: "collected_object", source: path, sha256: "c".repeat(64), tool: "collect", collectedAt: now, metadata: { epochId: epoch.epochId, subjectRef: fact.subjectRef, complete: true, integrityStatus: "VERIFIED", range: { start: 0, length: 7, complete: true }, artifactSize: 7, artifactDigest: "c".repeat(64) } });
+  if (malicious && adjudicate) store.putAssessment({ assessmentId: `ASM-${caseId}`, taskId: task.taskId, epochId: epoch.epochId, authorType: "RULE", category: "linux_intrusion_triage", subjectRef: fact.subjectRef, scope: "SUBJECT", verdict: "SUSPICIOUS", severity: "MEDIUM", confidence: 0.8, rationale: "临时目录执行候选", evidenceRefs: [], factRefs: [fact.factId], queryRefs: [], createdAt: now });
   return { store, task, epoch };
 }
 
@@ -55,12 +53,29 @@ describe("自主调查端到端评测", () => {
     ], thresholds: { minDiscoveryRecall: 1, minEvidencePreservation: 1, minObligationClosure: 1, maxBenignFalsePositive: 0, minAutonomousCompletion: 1 } });
     const result = evaluateInvestigation(malicious.store, manifest);
     expect(result.status).toBe("PASS");
-    expect(result.metrics.discoveryRecall).toMatchObject({ numerator: 2, denominator: 2, rate: 1, confidence95: { high: 1 } });
+    expect(result.metrics.collectionRecall).toMatchObject({ numerator: 2, denominator: 2, rate: 1, confidence95: { high: 1 } });
+    expect(result.metrics.discoveryRecall).toMatchObject({ numerator: 1, denominator: 1, rate: 1, confidence95: { high: 1 } });
     expect(result.metrics.evidencePreservation.rate).toBe(1);
     expect(result.metrics.benignFalsePositive.rate).toBe(0);
     expect(result.metrics.autonomousCompletion.rate).toBe(1);
     expect(result.environment.manifestVersion).toBe("3.0.0");
     expect(result.cases.flatMap((item) => item.failureAttributions)).toEqual([]);
+  });
+
+  it("恶意样本已采集但缺少真值主体风险结论时发布发现率失败", async () => {
+    const fixture = await seed("MISSING-ADJUDICATION", true, false);
+    const manifest = parseInvestigationEvaluationManifest({ schemaVersion: 2, suiteId: "missing-adjudication", environment: {
+      targetOs: "fixture", architecture: process.arch, transport: "SSH", applicationVersion: "0.2.0", protocolVersion: 2,
+      manifestVersion: "3.0.0", helperVersion: "3.0.0", investigationEngineVersion: "1.0.0",
+      ruleRegistryVersion: "2.2.0", playbookRegistryVersion: "1.3.1", commit: "abcdef0", budgetProfile: "UNIT",
+    }, cases: [{ caseId: "malicious", taskId: fixture.task.taskId, disposition: "MALICIOUS", entryMode: "ZERO_IOC", runKind: "FIRST", expectedCategories: ["linux_intrusion_triage"], expectedFacts: [{ namespace: "process", field: "exe", value: "/tmp/payload", evidenceRequired: true }] }],
+    thresholds: { minCollectionRecall: 1, minDiscoveryRecall: 1, minEvidencePreservation: 1, minObligationClosure: 1, maxBenignFalsePositive: 0 } });
+
+    const result = evaluateInvestigation(fixture.store, manifest);
+    expect(result.status).toBe("FAIL");
+    expect(result.metrics.collectionRecall.rate).toBe(1);
+    expect(result.metrics.discoveryRecall.rate).toBe(0);
+    expect(result.cases[0]?.failureAttributions).toContain("ADJUDICATION_MISSING");
   });
 
   it("拒绝覆盖首次运行以及没有具体缺口真值的受限样本", () => {
@@ -136,7 +151,7 @@ describe("自主调查端到端评测", () => {
         ruleRegistryVersion: "2.3.0", playbookRegistryVersion: "1.3.0", commit: "a".repeat(40), budgetProfile: "STANDARD",
       },
       cases,
-      thresholds: { minDiscoveryRecall: 0.95, minEvidencePreservation: 0.95, minObligationClosure: 1, maxBenignFalsePositive: 0.05 },
+      thresholds: { minCollectionRecall: 0.95, minDiscoveryRecall: 0.95, minEvidencePreservation: 0.95, minObligationClosure: 1, maxBenignFalsePositive: 0.05 },
     };
     expect(parseInvestigationEvaluationManifest(blind).evaluationMode).toBe("BLIND_RELEASE");
     const { truthSet: _truthSet, ...withoutTruth } = blind;

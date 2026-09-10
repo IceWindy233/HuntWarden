@@ -63,7 +63,7 @@ export class InvestigationScheduler {
       // Coverage 在 Preset 的全部步骤结束后落库，不一定伴随新的 Fact 事件。
       // 每轮都重算类别范围，才能把分页期间建立的 OPEN 聚合义务收敛为
       // SATISFIED/LIMITED；有新事实时同一次调用仍负责增量规划具体对象动作。
-      const playbook = new InvestigationPlaybookPlanner(this.store).plan(this.taskId, this.epochId, this.session, factRefs);
+      const playbook = new InvestigationPlaybookPlanner(this.store).plan(this.taskId, this.epochId, this.session);
       summary.hypothesisIds.push(...playbook.hypothesisIds);
       summary.obligationIds.push(...playbook.obligationIds);
       summary.actionIds.push(...playbook.actionIds);

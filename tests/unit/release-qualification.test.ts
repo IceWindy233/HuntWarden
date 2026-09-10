@@ -15,6 +15,7 @@ async function fixture() {
   directories.push(directory);
   const commit = (await run("git", ["rev-parse", "HEAD"], { cwd: process.cwd() })).stdout.trim();
   const helperSha256 = createHash("sha256").update(await readFile(join(process.cwd(), "host-helper/huntwarden_helper.py"))).digest("hex");
+  const operationalScriptSha256 = createHash("sha256").update(await readFile(join(process.cwd(), "acceptance/operational/qualify-host.sh"))).digest("hex");
   const writeEvidence = async (name: string, value: unknown) => {
     const path = join(directory, name);
     await writeFile(path, `${JSON.stringify(value, null, 2)}\n`, "utf8");
@@ -52,7 +53,7 @@ async function fixture() {
       isolation: { targetAuthorizationContainsTruth: false, helperReceivesTruth: false, modelReceivesTruth: false },
     },
     population: { maliciousFirstRunCases: 100, benignFirstRunCases: 100, limitedFirstRunCases: 1 },
-    metrics: { discoveryRecall: { rate: 0.95 }, evidencePreservation: { rate: 0.96 }, benignFalsePositive: { rate: 0.05 } },
+    metrics: { collectionRecall: { rate: 0.95 }, discoveryRecall: { rate: 0.95 }, evidencePreservation: { rate: 0.96 }, benignFalsePositive: { rate: 0.05 } },
   });
   const businessJvm = await writeEvidence("business-jvm.json", {
     schemaVersion: 2, status: "PASS", commit, manifestVersion: "3.0.0", sourceManifestSha256: "1".repeat(64), helperSha256, hostKeyOutOfBandVerified: true,
@@ -60,6 +61,19 @@ async function fixture() {
     attach: { attempts: 12, componentMisses: 0, invalidProbeCosts: 0, incompleteInventories: 0, requiredComponentDigests: ["4".repeat(64)], wallTimeMs: Array(12).fill(10), maxWallTimeMs: 10 },
     traffic: { baselineRequests: 20, loadedRequests: 100, failures: [], failureRate: 0, baselineP95Ms: 5, loadedP95Ms: 6, loadedMaxMs: 8, postAttachHealthVerified: true },
     identityStable: true, failures: [],
+  });
+  const operational = await writeEvidence("operational.json", {
+    schemaVersion: 1, status: "PASS", commit, runtimeSchemaVersion: 6, helperSha256,
+    evaluatedAt: "2026-09-10T00:00:00.000Z",
+    host: {
+      schemaVersion: 1, status: "PASS", commit, helperSha256, scriptSha256: operationalScriptSha256,
+      evaluatedAt: "2026-09-10T00:00:00.000Z", platform: { distribution: "ubuntu", version: "24.04", architecture: "x86_64" },
+      install: { freshInstall: true, upgrade: true, permissions: true, componentDigests: true, receiptPreserved: true },
+      uninstall: { defaultPreservedState: true, purgeRemovedState: true, credentialsAbsent: true, targetJobsAbsent: true }, failures: [],
+    },
+    migration: { fromVersion: 5, toVersion: 6, backupSha256: "c".repeat(64), oldTaskReadable: true, rollbackVerified: true },
+    evidenceExport: { evidenceCount: 1, artifactCount: 1, manifestSha256: "d".repeat(64), checksumsVerified: true, sensitiveFieldsAbsent: true },
+    failures: [],
   });
   const platformIds = [
     "ubuntu-24.04-arm64", "ubuntu-24.04-x86_64", "debian-12-systemd-x86_64",
@@ -84,13 +98,13 @@ async function fixture() {
     platforms.push({ platformId, artifact });
   }
   const qualificationPath = join(directory, "qualification.json");
-  const qualification = { schemaVersion: 1, commit, manifestVersion: "3.0.0", evidence: { provider, providerContract, blindEvaluation, businessJvm, platforms } };
+  const qualification = { schemaVersion: 1, commit, manifestVersion: "3.0.0", evidence: { provider, providerContract, blindEvaluation, businessJvm, operational, platforms } };
   await writeFile(qualificationPath, `${JSON.stringify(qualification, null, 2)}\n`, "utf8");
   return { directory, qualificationPath, qualification, writeEvidence };
 }
 
 describe("发布资格硬门禁", () => {
-  it("只接受与当前提交绑定的 Provider、首跑盲测、真实业务 JVM 和五平台证据", async () => {
+  it("只接受与当前提交绑定的 Provider、首跑盲测、真实业务 JVM、运维演练和五平台证据", async () => {
     const value = await fixture();
     const result = await run("node", ["scripts/release-qualification-check.mjs", "--qualification", value.qualificationPath], { cwd: process.cwd() });
     expect(result.stdout).toContain("发布资格校验通过");
@@ -106,5 +120,15 @@ describe("发布资格硬门禁", () => {
     await writeFile(value.qualificationPath, `${JSON.stringify(value.qualification, null, 2)}\n`, "utf8");
     await expect(run("node", ["scripts/release-qualification-check.mjs", "--qualification", value.qualificationPath], { cwd: process.cwd() }))
       .rejects.toMatchObject({ stderr: expect.stringContaining("不能使用本机或夹具端点") });
+  });
+
+  it("运维证据没有完成数据库回退时失败关闭", async () => {
+    const value = await fixture();
+    const operational = JSON.parse(await readFile(join(value.directory, "operational.json"), "utf8")) as Record<string, unknown>;
+    operational.migration = { ...(operational.migration as Record<string, unknown>), rollbackVerified: false };
+    value.qualification.evidence.operational = await value.writeEvidence("operational.json", operational);
+    await writeFile(value.qualificationPath, `${JSON.stringify(value.qualification, null, 2)}\n`, "utf8");
+    await expect(run("node", ["scripts/release-qualification-check.mjs", "--qualification", value.qualificationPath], { cwd: process.cwd() }))
+      .rejects.toMatchObject({ stderr: expect.stringContaining("数据库迁移、旧任务读取、事务前备份或回退演练未通过") });
   });
 });

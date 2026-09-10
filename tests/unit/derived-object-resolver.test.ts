@@ -23,8 +23,8 @@ describe("白名单派生对象解析器", () => {
       taskId: task.taskId, epochId: epoch.epochId, sourceRunId: "RUN-DERIVED", source: { kind: "SYSTEM", evidenceOrigin: "TARGET_OBSERVATION" }, targetFingerprint: task.target.hostFingerprint,
       requestId: "REQ-DERIVED", collector: { name: "test", version: "1" }, gaps: [], edges: [], wireDigest: "a".repeat(64),
       observations: [
-        { namespace: "process", identity: { bootId: "boot", pid: 42, startTicks: "100" }, fields: { bootId: "boot", pid: 42, startTicks: "100", ppid: 1 }, observedAt: "2026-01-01T00:00:01.000Z", consistency: "CURSOR_BEST_EFFORT" },
-        { namespace: "socket", identity: { protocol: "tcp", localAddress: "127.0.0.1", localPort: 1234, remoteAddress: "203.0.113.1", remotePort: 443, inode: "9" }, fields: { protocol: "tcp", localAddress: "127.0.0.1", localPort: 1234, remoteAddress: "203.0.113.1", remotePort: 443, inode: "9", pid: 42 }, observedAt: "2026-01-01T00:00:02.000Z", consistency: "CURSOR_BEST_EFFORT" },
+        { namespace: "process", identity: { bootId: "boot", pid: 42, startTicks: "100" }, fields: { bootId: "boot", pid: 42, startTicks: "100", ppid: 1, namespaces: { pid: "pid:[100]" } }, observedAt: "2026-01-01T00:00:01.000Z", consistency: "CURSOR_BEST_EFFORT" },
+        { namespace: "socket", identity: { protocol: "tcp", localAddress: "127.0.0.1", localPort: 1234, remoteAddress: "203.0.113.1", remotePort: 443, inode: "9" }, fields: { protocol: "tcp", localAddress: "127.0.0.1", localPort: 1234, remoteAddress: "203.0.113.1", remotePort: 443, inode: "9", pid: 42, ownerBootId: "boot", ownerStartTicks: "100", ownerPidNamespace: "pid:[100]" }, observedAt: "2026-01-01T00:00:02.000Z", consistency: "CURSOR_BEST_EFFORT" },
       ],
     });
     const socket = batch.facts.find((fact) => fact.namespace === "socket")!;
@@ -34,6 +34,25 @@ describe("白名单派生对象解析器", () => {
     expect(result).toMatchObject({ status: "RESOLVED", objectRefs: [process.subjectRef] });
     expect(store.listEdges(task.taskId, epoch.epochId)).toEqual([expect.objectContaining({ relation: "owned_by", fromRef: socket.subjectRef, toRef: process.subjectRef })]);
     expect(store.listRelationProvenance(task.taskId, epoch.epochId)).toEqual([expect.objectContaining({ derivation: "DERIVED", sourceRefs: expect.arrayContaining([socket.factId, process.factId]), resolverVersion: "socket.owner_by_pid@1.0.0", timeErrorMs: 1000 })]);
+    store.close();
+  });
+
+  it("PID 相等但稳定身份不符时保留歧义且不创建确定关系", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "huntwarden-derived-pid-reuse-")); directories.push(directory);
+    const store = await RuntimeStore.open(directory, "runtime.db");
+    const task = { ...testTask(), protocolVersion: 2 as const }; store.createTask(task);
+    const epoch: ScanEpoch = { epochId: "EPOCH-PID-REUSE", taskId: task.taskId, targetFingerprint: task.target.hostFingerprint, protocolVersion: 2, manifestVersion: "3.0.0", helperVersion: "3.0.0", reason: "INITIAL", status: "RUNNING", startedAt: "2026-01-01T00:00:00.000Z" };
+    store.createScanEpoch(epoch);
+    const first = store.commitFactBatch({ taskId: task.taskId, epochId: epoch.epochId, sourceRunId: "RUN-OLD", source: { kind: "SYSTEM" }, targetFingerprint: task.target.hostFingerprint, requestId: "RUN-OLD", collector: { name: "test", version: "1" }, gaps: [], edges: [], wireDigest: "c".repeat(64), observations: [
+      { namespace: "socket", identity: { protocol: "tcp", localAddress: "127.0.0.1", localPort: 1234, remoteAddress: "203.0.113.1", remotePort: 443, inode: "9" }, fields: { protocol: "tcp", localAddress: "127.0.0.1", localPort: 1234, remoteAddress: "203.0.113.1", remotePort: 443, inode: "9", pid: 42, ownerBootId: "boot", ownerStartTicks: "100", ownerPidNamespace: "pid:[100]" }, observedAt: "2026-01-01T00:00:01.000Z", consistency: "CURSOR_BEST_EFFORT" },
+    ] });
+    store.commitFactBatch({ taskId: task.taskId, epochId: epoch.epochId, sourceRunId: "RUN-NEW", source: { kind: "SYSTEM" }, targetFingerprint: task.target.hostFingerprint, requestId: "RUN-NEW", collector: { name: "test", version: "1" }, gaps: [], edges: [], wireDigest: "d".repeat(64), observations: [
+      { namespace: "process", identity: { bootId: "boot", pid: 42, startTicks: "200" }, fields: { bootId: "boot", pid: 42, startTicks: "200", namespaces: { pid: "pid:[100]" } }, observedAt: "2026-01-01T00:00:02.000Z", consistency: "CURSOR_BEST_EFFORT" },
+    ] });
+    const authorization: AuthorizationEnvelope = { version: "AUTH", targetFingerprint: task.target.hostFingerprint, namespaces: ["socket", "process"], scopeRefs: [], derivedRelations: ["owned_by"], sensitiveRead: false, collectEvidence: true, probes: [], budget: { remoteCalls: 1, nodes: 1, bytes: 1, wallTimeMs: 1 } };
+    const result = new DerivedObjectResolver(store).resolve({ requestId: "DERIVE-PID-REUSE", taskId: task.taskId, epochId: epoch.epochId, resolverRef: "socket.owner_by_pid@1.0.0", sourceFactRef: first.facts[0]!.factId }, authorization);
+    expect(result).toMatchObject({ status: "AMBIGUOUS", edgeRefs: [] });
+    expect(store.listEdges(task.taskId, epoch.epochId)).toEqual([]);
     store.close();
   });
 

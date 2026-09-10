@@ -202,6 +202,15 @@ function registerIpc(): void {
     await access(evidence.storagePath);
     shell.showItemInFolder(evidence.storagePath);
   });
+  handle(IPC.evidenceExport, async (_event, taskIdValue) => {
+    const taskId = text(taskIdValue, "Task ID", 64);
+    const result = await dialog.showOpenDialog(mainWindow!, { title: "选择 Evidence 离线导出位置", properties: ["openDirectory", "createDirectory"] });
+    if (result.canceled || !result.filePaths[0]) return undefined;
+    const destination = join(result.filePaths[0], `HuntWarden-Evidence-${taskId}`);
+    await requireBackend().exportEvidence(taskId, destination);
+    shell.showItemInFolder(destination);
+    return destination;
+  });
   handle(IPC.reportReveal, async (_event, value) => {
     const input = exactObject(value, ["taskId", "reportId"], "报告定位参数");
     const result = await requireBackend().readReport(

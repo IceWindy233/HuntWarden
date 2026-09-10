@@ -44,7 +44,7 @@ describe("RuntimeStore", () => {
 
     const migrated = await RuntimeStore.open(directory, "runtime.db");
     expect(migrated.getSchemaVersion()).toBe(RUNTIME_SCHEMA_VERSION);
-    expect(migrated.listSchemaMigrations().map((item) => item.version)).toEqual([1, 2, 3, 4, 5]);
+    expect(migrated.listSchemaMigrations().map((item) => item.version)).toEqual([1, 2, 3, 4, 5, 6]);
     expect(migrated.getTask(task.taskId)?.taskId).toBe(task.taskId);
     expect(migrated.migrationBackupPath).toMatch(/pre-migration-v0/);
     expect((await stat(migrated.migrationBackupPath!)).size).toBeGreaterThan(0);
@@ -52,7 +52,7 @@ describe("RuntimeStore", () => {
 
     const reopened = await RuntimeStore.open(directory, "runtime.db");
     expect(reopened.migrationBackupPath).toBeUndefined();
-    expect(reopened.listSchemaMigrations()).toHaveLength(5);
+    expect(reopened.listSchemaMigrations()).toHaveLength(6);
     reopened.close();
   });
 
@@ -78,7 +78,7 @@ describe("RuntimeStore", () => {
     legacy.close();
 
     const migrated = await RuntimeStore.open(directory, "runtime.db");
-    expect(migrated.getSchemaVersion()).toBe(5);
+    expect(migrated.getSchemaVersion()).toBe(6);
     expect(migrated.migrationBackupPath).toMatch(/pre-migration-v2/);
     migrated.close();
 
@@ -119,7 +119,7 @@ describe("RuntimeStore", () => {
     legacy.close();
 
     const migrated = await RuntimeStore.open(directory, "runtime.db");
-    expect(migrated.getSchemaVersion()).toBe(5);
+    expect(migrated.getSchemaVersion()).toBe(6);
     expect(migrated.migrationBackupPath).toMatch(/pre-migration-v4/);
     expect(migrated.getToolRun("LEGACY-RUN")?.epochId).toBeUndefined();
     expect(migrated.loadMessages("TASK-LEGACY")).toHaveLength(1);
@@ -139,6 +139,90 @@ describe("RuntimeStore", () => {
     expect((verify.prepare("SELECT epoch_id FROM tool_runs WHERE tool_call_id='CURRENT-RUN'").get() as { epoch_id: string }).epoch_id).toBe("EPOCH-CURRENT");
     expect((verify.prepare("SELECT epoch_id FROM messages WHERE message_id='LEGACY-MESSAGE'").get() as { epoch_id: null }).epoch_id).toBeNull();
     expect((verify.prepare("SELECT epoch_id FROM queued_inputs WHERE input_id='LEGACY-INPUT'").get() as { epoch_id: null }).epoch_id).toBeNull();
+    verify.close();
+  });
+
+  it("v5 实体版本升级时保留关系谱系并允许内容恢复", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "huntwarden-migration-v5-entity-versions-"));
+    directories.push(directory);
+    const databasePath = join(directory, "runtime.db");
+    const store = await RuntimeStore.open(directory, "runtime.db");
+    const task = { ...testTask(), protocolVersion: 2 as const };
+    store.createTask(task);
+    const epoch = {
+      epochId: "EPOCH-LEGACY", taskId: task.taskId, targetFingerprint: task.target.hostFingerprint,
+      protocolVersion: 2 as const, manifestVersion: "3.0.0", helperVersion: "3.0.0", reason: "INITIAL" as const,
+      status: "RUNNING" as const, startedAt: "2026-01-01T00:00:00.000Z",
+    };
+    store.createScanEpoch(epoch);
+    const first = store.commitFactBatch({
+      taskId: task.taskId, epochId: epoch.epochId, sourceRunId: "RUN-LEGACY", source: { kind: "SYSTEM" as const },
+      targetFingerprint: task.target.hostFingerprint, requestId: "RUN-LEGACY", collector: { name: "test", version: "1" },
+      observations: [
+        { namespace: "process" as const, identity: { bootId: "boot", pid: 10, startTicks: "1" }, fields: { bootId: "boot", pid: 10, startTicks: "1", uid: 0 }, observedAt: "2026-01-01T00:00:01.000Z", consistency: "OBJECT_STABLE" as const },
+        { namespace: "process" as const, identity: { bootId: "boot", pid: 11, startTicks: "2" }, fields: { bootId: "boot", pid: 11, startTicks: "2", ppid: 10, uid: 1000 }, observedAt: "2026-01-01T00:00:01.000Z", consistency: "OBJECT_STABLE" as const },
+      ],
+      edges: [{ relation: "children", fromIdentity: { namespace: "process" as const, identity: { bootId: "boot", pid: 10, startTicks: "1" } }, toIdentity: { namespace: "process" as const, identity: { bootId: "boot", pid: 11, startTicks: "2" } }, observedAt: "2026-01-01T00:00:01.000Z" }],
+      gaps: [], wireDigest: "a".repeat(64),
+    });
+    const preservedProvenance = store.listRelationProvenance(task.taskId, epoch.epochId)[0]!;
+    store.close();
+
+    const legacy = new DatabaseSync(databasePath);
+    legacy.exec(`
+      PRAGMA foreign_keys=OFF;
+      BEGIN IMMEDIATE;
+      DROP INDEX IF EXISTS idx_entity_versions_identity;
+      CREATE TABLE entity_versions_v5 (
+        version_ref TEXT PRIMARY KEY, entity_ref TEXT NOT NULL, task_id TEXT NOT NULL, epoch_id TEXT NOT NULL,
+        namespace TEXT NOT NULL, identity_digest TEXT NOT NULL, content_digest TEXT, source_fact_ref TEXT NOT NULL,
+        valid_from TEXT NOT NULL, valid_to TEXT, payload TEXT NOT NULL,
+        UNIQUE(task_id, epoch_id, entity_ref, identity_digest, content_digest),
+        FOREIGN KEY(entity_ref) REFERENCES object_refs_v2(ref),
+        FOREIGN KEY(source_fact_ref) REFERENCES facts_v2(fact_id)
+      );
+      INSERT INTO entity_versions_v5 SELECT * FROM entity_versions;
+      CREATE TABLE relation_provenance_v5 (
+        edge_ref TEXT PRIMARY KEY, task_id TEXT NOT NULL, epoch_id TEXT NOT NULL, from_version_ref TEXT,
+        to_version_ref TEXT, derivation TEXT NOT NULL, resolver_version TEXT NOT NULL,
+        time_error_ms INTEGER NOT NULL CHECK(time_error_ms >= 0), payload TEXT NOT NULL,
+        FOREIGN KEY(edge_ref) REFERENCES fact_edges_v2(edge_id),
+        FOREIGN KEY(from_version_ref) REFERENCES entity_versions_v5(version_ref),
+        FOREIGN KEY(to_version_ref) REFERENCES entity_versions_v5(version_ref)
+      );
+      INSERT INTO relation_provenance_v5 SELECT * FROM relation_provenance;
+      DROP TABLE relation_provenance;
+      DROP TABLE entity_versions;
+      ALTER TABLE entity_versions_v5 RENAME TO entity_versions;
+      ALTER TABLE relation_provenance_v5 RENAME TO relation_provenance;
+      CREATE UNIQUE INDEX idx_entity_versions_identity
+        ON entity_versions(task_id, epoch_id, entity_ref, identity_digest, COALESCE(content_digest,''));
+      CREATE INDEX idx_relation_provenance_scope ON relation_provenance(task_id, epoch_id, derivation);
+      DELETE FROM schema_migrations WHERE version=6;
+      PRAGMA user_version=5;
+      COMMIT;
+    `);
+    legacy.close();
+
+    const migrated = await RuntimeStore.open(directory, "runtime.db");
+    expect(migrated.getSchemaVersion()).toBe(6);
+    expect(migrated.listRelationProvenance(task.taskId, epoch.epochId)).toEqual([preservedProvenance]);
+    const identity = { bootId: "boot", pid: 10, startTicks: "1" };
+    const observe = (sourceRunId: string, uid: number, observedAt: string) => migrated.commitFactBatch({
+      taskId: task.taskId, epochId: epoch.epochId, sourceRunId, source: { kind: "SYSTEM" as const },
+      targetFingerprint: task.target.hostFingerprint, requestId: sourceRunId, collector: { name: "test", version: "1" },
+      observations: [{ namespace: "process" as const, identity, fields: { ...identity, uid }, observedAt, consistency: "OBJECT_STABLE" as const }],
+      edges: [], gaps: [], wireDigest: sourceRunId.padEnd(64, "b").slice(0, 64),
+    }).facts[0]!;
+    observe("RUN-CONTENT-B", 1, "2026-01-01T00:00:02.000Z");
+    const restored = observe("RUN-CONTENT-A-RESTORED", 0, "2026-01-01T00:00:03.000Z");
+    const versions = migrated.listEntityVersions(task.taskId, epoch.epochId, first.facts[0]!.subjectRef);
+    expect(versions).toHaveLength(3);
+    expect(versions[2]).toMatchObject({ sourceFactRef: restored.factId });
+    migrated.close();
+
+    const verify = new DatabaseSync(databasePath, { readOnly: true });
+    expect(verify.prepare("PRAGMA foreign_key_check").all()).toEqual([]);
     verify.close();
   });
 

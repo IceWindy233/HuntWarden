@@ -42,6 +42,7 @@ export const IPC = {
   reportList: "huntwarden:report:list",
   reportRead: "huntwarden:report:read",
   evidenceReveal: "huntwarden:evidence:reveal",
+  evidenceExport: "huntwarden:evidence:export",
   reportReveal: "huntwarden:report:reveal",
   event: "huntwarden:event",
 } as const;

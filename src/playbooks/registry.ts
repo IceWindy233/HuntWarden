@@ -11,6 +11,7 @@ export const PLAYBOOK_REGISTRY_VERSION = "1.3.1";
 
 const MAX_COLLECT_BYTES = 104_857_600;
 const DEFAULT_EXECUTABLE_COLLECT_BYTES = 10 * 1_024 * 1_024;
+export const PLAYBOOK_CANDIDATE_BATCH_SIZE = 200;
 
 export const PLAYBOOK_DEFINITIONS = Object.freeze([
   { id: "process-egress", version: "1.3.1", categories: ["linux_intrusion_triage"] },
@@ -37,14 +38,10 @@ interface PlannedOperation {
 export class InvestigationPlaybookPlanner {
   constructor(private readonly store: RuntimeStore) {}
 
-  plan(taskId: string, epochId: string, session: InvestigationSession, inputFactRefs: readonly string[]): PlaybookPlanResult {
+  plan(taskId: string, epochId: string, session: InvestigationSession): PlaybookPlanResult {
     const task = this.store.getTask(taskId);
     if (!task) throw new Error(`未知任务 ${taskId}`);
     const facts = this.store.listFacts(taskId, epochId);
-    const changedSubjects = new Set(inputFactRefs.flatMap((factRef) => {
-      const fact = this.store.getFact(taskId, epochId, factRef);
-      return fact ? [fact.subjectRef] : [];
-    }));
     const assessments = this.store.listAssessments(taskId, epochId);
     const effectiveRiskIds = new Set(projectEffectiveAssessments(assessments, this.store.listAssessmentRelations(taskId, epochId))
       .filter((item) => ["SUSPICIOUS", "HIGHLY_SUSPICIOUS", "CONFIRMED_MALICIOUS"].includes(item.conclusion))
@@ -58,11 +55,21 @@ export class InvestigationPlaybookPlanner {
       categories.add(assessment.category); riskCategories.set(assessment.subjectRef!, categories);
     }
     const edges = this.store.listEdges(taskId, epochId);
-    const candidates = latestBySubject(facts).filter((fact) => (changedSubjects.has(fact.subjectRef) || riskSubjects.has(fact.subjectRef))
-      && isPlaybookCandidate(fact, riskSubjects.has(fact.subjectRef), edges));
+    const checkpointKey = "PLAYBOOK_CANDIDATES:1";
+    const checkpoint = this.store.listDiscoveryCheckpoints(taskId, epochId)
+      .find((item) => item.namespace === "task_ioc" && item.requestDigest === checkpointKey);
+    const processedFactSeq = checkpoint?.scannedCount ?? 0;
+    const plannedRiskSubjects = new Set(this.store.listInvestigationHypotheses(taskId, epochId)
+      .filter((item) => item.proposedBy === "PLAYBOOK")
+      .map((item) => item.subjectRef));
+    const latestFacts = latestBySubject(facts);
+    const candidates = latestFacts.filter((fact) => (fact.factSeq > processedFactSeq || (riskSubjects.has(fact.subjectRef) && !plannedRiskSubjects.has(fact.subjectRef)))
+      && isPlaybookCandidate(fact, riskSubjects.has(fact.subjectRef), edges))
+      .sort((left, right) => left.factSeq - right.factSeq);
+    const selected = candidates.slice(0, PLAYBOOK_CANDIDATE_BATCH_SIZE);
     const result: PlaybookPlanResult = { hypothesisIds: [], obligationIds: [], actionIds: [] };
 
-    for (const fact of candidates.slice(0, 200)) {
+    for (const fact of selected) {
       for (const category of categoriesForFact(fact, task.checks, edges, riskCategories.get(fact.subjectRef))) {
         const operations = operationsForFact(fact, category, edges);
         if (operations.length === 0) continue;
@@ -75,6 +82,17 @@ export class InvestigationPlaybookPlanner {
         }
       }
     }
+    const processedFactSeqAfterBatch = selected.at(-1)?.factSeq ?? Math.max(processedFactSeq, ...latestFacts.map((fact) => fact.factSeq), 0);
+    const remaining = candidates.length - selected.length;
+    const checkpointNow = new Date().toISOString();
+    this.store.putDiscoveryCheckpoint({
+      checkpointId: checkpoint?.checkpointId ?? `DCHK-${randomUUID()}`, taskId, epochId, namespace: "task_ioc",
+      requestDigest: checkpointKey, status: remaining > 0 ? "RUNNING" : "COMPLETE",
+      sourceGeneration: String(this.store.maxInvestigationEventSeq(taskId, epochId)), ...(remaining > 0 ? { cursorRef: String(processedFactSeqAfterBatch) } : {}),
+      scannedCount: processedFactSeqAfterBatch, matchedCount: (checkpoint?.matchedCount ?? 0) + selected.length, returnedCount: (checkpoint?.returnedCount ?? 0) + selected.length,
+      ...(remaining > 0 ? { remainingDescription: `${remaining} 个 Playbook 候选待处理` } : {}),
+      createdAt: checkpoint?.createdAt ?? checkpointNow, updatedAt: checkpointNow,
+    });
 
     for (const category of task.checks) {
       const now = new Date().toISOString();

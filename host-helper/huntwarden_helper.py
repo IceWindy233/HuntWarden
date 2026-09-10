@@ -1653,6 +1653,36 @@ def v2_process_inventory(params: dict[str, Any], start_after_pid: int, maximum: 
 def read_global_connections(maximum: int) -> tuple[list[dict[str, Any]], list[str], bool]:
     items: list[dict[str, Any]] = []
     warnings: list[str] = []
+    owners: dict[str, dict[str, Any]] = {}
+    ambiguous_inodes: set[str] = set()
+    processes, process_warnings, process_partial = enumerate_stable_processes(
+        5000, include_hash=False, include_context=True)
+    warnings.extend(process_warnings)
+    if process_partial:
+        warnings.append("套接字所有者进程枚举不完整")
+    for process in processes:
+        pid_namespace = process.get("namespaces", {}).get("pid")
+        if not isinstance(pid_namespace, str) or not pid_namespace:
+            continue
+        owner = {"processPid": process["pid"], "ownerBootId": process["bootId"],
+                 "ownerStartTicks": process["startTicks"], "ownerPidNamespace": pid_namespace}
+        try:
+            inodes: list[str] = []
+            for descriptor in pathlib.Path(f"/proc/{process['pid']}/fd").iterdir():
+                match = re.fullmatch(r"socket:\[(\d+)\]", os.readlink(descriptor))
+                if match:
+                    inodes.append(match.group(1))
+            if proc_stat_fields(process["pid"])["startTicks"] != process["startTicks"]:
+                warnings.append(f"PID {process['pid']}: PID was reused during socket ownership collection")
+                continue
+            for inode in inodes:
+                if inode in owners and owners[inode] != owner:
+                    ambiguous_inodes.add(inode)
+                    owners.pop(inode, None)
+                elif inode not in ambiguous_inodes:
+                    owners[inode] = owner
+        except OSError:
+            continue
     states = {"01": "ESTABLISHED", "02": "SYN_SENT", "03": "SYN_RECV", "06": "TIME_WAIT", "07": "CLOSE", "08": "CLOSE_WAIT", "0A": "LISTEN"}
     for protocol, name, ipv6 in (("tcp", "/proc/net/tcp", False), ("tcp6", "/proc/net/tcp6", True), ("udp", "/proc/net/udp", False), ("udp6", "/proc/net/udp6", True)):
         if deadline_exceeded():
@@ -1672,9 +1702,10 @@ def read_global_connections(maximum: int) -> tuple[list[dict[str, Any]], list[st
                 warnings.append(f"无法解析 {name} 记录")
                 continue
             try:
+                inode = fields[9]
                 items.append({"protocol": protocol, "local": decode_endpoint(fields[1], ipv6),
                               "remote": decode_endpoint(fields[2], ipv6), "state": states.get(fields[3], fields[3]),
-                              "inode": fields[9]})
+                              "inode": inode, **owners.get(inode, {})})
             except (ValueError, OSError):
                 warnings.append(f"无法解析 {protocol} socket")
             if len(items) >= maximum:
@@ -2536,7 +2567,7 @@ def disable_account(request: dict[str, Any]) -> dict[str, Any]:
 V2_NAMESPACE_FIELDS: dict[str, tuple[str, ...]] = {
     "host": ("bootId", "hostname", "os", "distribution", "distributionVersion", "release", "architecture", "timezone", "initSystem", "selinuxMode", "observedAt"),
     "process": ("bootId", "pid", "startTicks", "ppid", "uid", "username", "comm", "exe", "exeDeleted", "exeSize", "exeInode", "exeSha256", "command", "launcherPath", "cwd", "root", "environment", "namespaces", "cgroups", "cgroupsTruncated", "mapsSummary", "state", "startedAt"),
-    "socket": ("protocol", "localAddress", "localPort", "remoteAddress", "remotePort", "state", "inode", "pid"),
+    "socket": ("protocol", "localAddress", "localPort", "remoteAddress", "remotePort", "state", "inode", "pid", "ownerBootId", "ownerStartTicks", "ownerPidNamespace"),
     "file": ("mountId", "device", "inode", "path", "canonicalPath", "kind", "size", "mode", "uid", "gid", "mtime", "sha256", "contentClass", "content", "baseline", "baselineStatus"),
     "account": ("uid", "username", "gid", "home", "shell", "groups", "locked", "passwordHash"),
     "ssh_key": ("fingerprint", "ownerUid", "type", "bits", "comment", "sourceFile"),
@@ -3090,10 +3121,15 @@ def v2_socket_row(value: dict[str, Any]) -> dict[str, Any]:
     try:
         local_address, local_port = str(value.get("local", "")).rsplit(":", 1)
         remote_address, remote_port = str(value.get("remote", "")).rsplit(":", 1)
-        return {"protocol": value.get("protocol"), "localAddress": local_address,
-                "localPort": int(local_port), "remoteAddress": remote_address,
-                "remotePort": int(remote_port), "state": value.get("state"),
-                "inode": value.get("inode"), "pid": value.get("processPid")}
+        row = {"protocol": value.get("protocol"), "localAddress": local_address,
+               "localPort": int(local_port), "remoteAddress": remote_address,
+               "remotePort": int(remote_port), "state": value.get("state"),
+               "inode": value.get("inode")}
+        owner_fields = {"pid": value.get("processPid"), "ownerBootId": value.get("ownerBootId"),
+                        "ownerStartTicks": value.get("ownerStartTicks"),
+                        "ownerPidNamespace": value.get("ownerPidNamespace")}
+        row.update({key: field for key, field in owner_fields.items() if field is not None})
+        return row
     except (TypeError, ValueError) as exc:
         raise HelperError("UNSUPPORTED_ENVIRONMENT", "collector produced an invalid socket endpoint") from exc
 

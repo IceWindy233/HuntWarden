@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
-import { chmod, mkdir, open, readFile, readdir, rename, stat, unlink } from "node:fs/promises";
-import { basename, join } from "node:path";
+import { chmod, copyFile, mkdir, open, readFile, readdir, rename, rm, stat, unlink, writeFile } from "node:fs/promises";
+import { basename, join, resolve, sep } from "node:path";
 import { createDeterministicId, createId } from "../common/ids.js";
 import { SecurityError } from "../common/errors.js";
 import type { Evidence } from "../domain/types.js";
@@ -47,6 +47,14 @@ async function verifyExistingArtifact(existing: Evidence, expectedSha256?: strin
     throw new SecurityError("EVIDENCE_COLLECTION", "幂等 Evidence 文件完整性或大小校验失败");
   }
 }
+export interface EvidenceExportResult {
+  directory: string;
+  manifestPath: string;
+  evidenceCount: number;
+  artifactCount: number;
+  manifestSha256: string;
+}
+
 
 export class EvidenceStore {
   constructor(
@@ -54,6 +62,80 @@ export class EvidenceStore {
     private readonly runtime: RuntimeStore,
     private readonly checkpoint?: (name: string) => void,
   ) {}
+
+  async exportTask(taskId: string, destination: string): Promise<EvidenceExportResult> {
+    const task = this.runtime.getTask(taskId);
+    if (!task) throw new Error(`任务不存在: ${taskId}`);
+    const root = resolve(this.baseDir);
+    const directory = resolve(destination);
+    if (directory === root || directory.startsWith(`${root}${sep}`)) throw new Error("Evidence 离线导出目录必须位于 HuntWarden 受管数据目录之外");
+    try {
+      await mkdir(directory, { mode: 0o700 });
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "EEXIST") throw new Error("Evidence 离线导出目录已存在，拒绝覆盖");
+      throw error;
+    }
+    try {
+      const artifactsDir = join(directory, "artifacts");
+      const evidence = this.runtime.listEvidence(taskId).sort((left, right) => left.evidenceId.localeCompare(right.evidenceId));
+      const records: Array<Record<string, unknown>> = [];
+      let artifactCount = 0;
+      for (const item of evidence) {
+        let artifact: { path: string; bytes: number; sha256: string } | undefined;
+        if (item.storagePath) {
+          if (!item.sha256 || !/^[a-f0-9]{64}$/.test(item.sha256)) throw new Error(`Evidence ${item.evidenceId} 缺少有效 SHA-256`);
+          const sourceInfo = await stat(item.storagePath);
+          const sourceDigest = await hashFile(item.storagePath);
+          if (!sourceInfo.isFile() || sourceDigest !== item.sha256) throw new Error(`Evidence ${item.evidenceId} 本地文件完整性校验失败`);
+          if (artifactCount === 0) await mkdir(artifactsDir, { mode: 0o700 });
+          const fileName = `${item.evidenceId}_${safeName(item.source)}`;
+          const exportedPath = join(artifactsDir, fileName);
+          await copyFile(item.storagePath, exportedPath, 1);
+          await chmod(exportedPath, 0o600);
+          if (await hashFile(exportedPath) !== sourceDigest) throw new Error(`Evidence ${item.evidenceId} 导出后摘要不一致`);
+          artifact = { path: `artifacts/${fileName}`, bytes: sourceInfo.size, sha256: sourceDigest };
+          artifactCount += 1;
+        }
+        records.push({
+          evidenceId: item.evidenceId,
+          taskId: item.taskId,
+          host: item.host,
+          type: item.type,
+          source: item.source,
+          collectedAt: item.collectedAt,
+          tool: item.tool,
+          ...(item.toolCallId ? { toolCallId: item.toolCallId } : {}),
+          ...(item.sha256 ? { sha256: item.sha256 } : {}),
+          ...(item.metadata ? { metadata: sanitizeExportValue(item.metadata) } : {}),
+          ...(artifact ? { artifact } : {}),
+        });
+      }
+      const manifestPath = join(directory, "EVIDENCE-MANIFEST.json");
+      const manifest = {
+        schemaVersion: 1,
+        taskId,
+        ...(task.activeEpochId ? { epochId: task.activeEpochId } : {}),
+        exportedAt: new Date().toISOString(),
+        evidenceCount: records.length,
+        artifactCount,
+        evidence: records,
+      };
+      await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, { encoding: "utf8", mode: 0o600, flag: "wx" });
+      const manifestSha256 = await hashFile(manifestPath);
+      const checksums = [
+        `${manifestSha256}  EVIDENCE-MANIFEST.json`,
+        ...records.flatMap((record) => {
+          const exported = record.artifact as { path: string; sha256: string } | undefined;
+          return exported ? [`${exported.sha256}  ${exported.path}`] : [];
+        }),
+      ];
+      await writeFile(join(directory, "SHA256SUMS"), `${checksums.join("\n")}\n`, { encoding: "utf8", mode: 0o600, flag: "wx" });
+      return { directory, manifestPath, evidenceCount: records.length, artifactCount, manifestSha256 };
+    } catch (error) {
+      await rm(directory, { recursive: true, force: true });
+      throw error;
+    }
+  }
 
   async reconcileTask(taskId: string): Promise<{ verified: number; failed: string[]; orphanPaths: string[]; temporaryPaths: string[] }> {
     const taskDir = join(this.baseDir, "evidence", taskId);
@@ -216,6 +298,13 @@ export class EvidenceStore {
     this.runtime.putEvidence(evidence);
     return evidence;
   }
+}
+
+function sanitizeExportValue(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map((item) => sanitizeExportValue(item));
+  if (value && typeof value === "object") return Object.fromEntries(Object.entries(value as Record<string, unknown>).flatMap(([name, item]) =>
+    /(?:token|secret|credential|private.?key|storage.?path)/i.test(name) ? [] : [[name, sanitizeExportValue(item)]]));
+  return value;
 }
 
 async function hashFile(path: string): Promise<string> {

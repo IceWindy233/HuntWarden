@@ -119,6 +119,7 @@ export function createV2SecurityTools(deps: V2ToolDependencies, phase: "INVESTIG
     }, { additionalProperties: false }), "READ", "SAFE_REOBSERVE", (params) => {
       const namespace = params.namespace as NamespaceName;
       if (namespace === "task_ioc") throw new InvalidArgumentError("task_ioc 只能通过 query_facts 查询");
+      assertCategoryGrant(deps, namespace);
       if (namespace === "file" && !params.scopeRef) throw new InvalidArgumentError("enumerate(file) 必须提供已激活的 Scope Grant scopeRef");
       assertEffectiveVerb(deps, namespace, "enumerate");
       const fields = params.fields ?? identityFields(namespace);
@@ -635,8 +636,12 @@ function assertEffectiveField(deps: V2ToolDependencies, namespace: NamespaceName
   if (!deps.capabilities.namespaces[namespace]?.fields.has(field)) throw new SecurityError("UNSUPPORTED_ENVIRONMENT", `目标未声明字段能力 ${namespace}.${field}`);
 }
 
-function assertEffectiveVerb(deps: V2ToolDependencies, namespace: NamespaceName, verb: ForensicVerb): void {
+function assertCategoryGrant(deps: V2ToolDependencies, namespace: NamespaceName): void {
   if (!categoryGrantAllowsNamespace(deps.store.listTaskGrants(deps.task.taskId), namespace)) throw new SecurityError("PERMISSION_DENIED", `namespace ${namespace} 的 Category Grant 已失效或被撤销`);
+}
+
+function assertEffectiveVerb(deps: V2ToolDependencies, namespace: NamespaceName, verb: ForensicVerb): void {
+  assertCategoryGrant(deps, namespace);
   if (!deps.capabilities.verbs.has(verb) || !deps.capabilities.namespaces[namespace]?.verbs.has(verb)) throw new SecurityError("UNSUPPORTED_ENVIRONMENT", `目标未声明能力 ${namespace}.${verb}`);
 }
 
@@ -910,14 +915,13 @@ function createProposeActionsTool(deps: V2ToolDependencies): SecurityToolDefinit
     const toolsByName = new Map(modelTools.map((tool) => [tool.name, tool]));
     for (const proposal of ordered) validateProposedAction(deps, proposal, toolsByName.get(proposal.operationRef));
 
-    const actionIds = new Map(ordered.map((proposal) => [proposal.clientRef, `IACT-${randomUUID()}`]));
     const created = new Map<string, string>();
     for (const proposal of ordered) {
       const operationRef = proposal.operationRef;
       const now = new Date().toISOString();
       const argsDigest = digestObject(proposal.args);
       const action: InvestigationAction = {
-        actionId: actionIds.get(proposal.clientRef)!,
+        actionId: `IACT-${randomUUID()}`,
         taskId: deps.task.taskId,
         epochId: deps.epoch.epochId,
         kind: operationRef === "query_facts" ? "LOCAL_QUERY" : "REMOTE_PRIMITIVE",
@@ -929,7 +933,7 @@ function createProposeActionsTool(deps: V2ToolDependencies): SecurityToolDefinit
         replayPolicy: operationRef === "collect" ? "RESUME_OR_RECOLLECT" : "SAFE_REOBSERVE",
         args: proposal.args,
         argsDigest,
-        dependsOn: proposal.dependsOnClientRefs.map((ref) => actionIds.get(ref)!),
+        dependsOn: proposal.dependsOnClientRefs.map((ref) => created.get(ref)!),
         authorizationVersion: session.authorizationVersion,
         observationRound: `MODEL:${hypothesis.hypothesisId}:${hypothesis.revision}`,
         idempotencyKey: digestObject({ taskId: deps.task.taskId, epochId: deps.epoch.epochId, hypothesisId: hypothesis.hypothesisId, operationRef, argsDigest }),
@@ -995,13 +999,14 @@ function validateProposedAction(
   if (operationRef === "enumerate") {
     const namespace = args.namespace as NamespaceName;
     if (namespace === "task_ioc") throw new InvalidArgumentError("task_ioc 只能通过 query_facts 查询");
+    assertCategoryGrant(deps, namespace);
     if (namespace === "file" && typeof args.scopeRef !== "string") throw new InvalidArgumentError("enumerate(file) 必须提供已激活的 Scope Grant scopeRef");
+    assertEffectiveVerb(deps, namespace, "enumerate");
     const hasPresetFacts = deps.store.listFacts(deps.task.taskId, deps.epoch.epochId)
       .some((fact) => fact.namespace === namespace && fact.source.kind === "PRESET");
     if (hasPresetFacts && args.predicate === undefined && args.scopeRef === undefined && args.cursorRef === undefined) {
       throw new InvalidArgumentError(`当前 Epoch 已有 ${namespace} 的 PRESET 事实；请用 query_facts 复核，或用 predicate/scopeRef 提交收窄的新观察`);
     }
-    assertEffectiveVerb(deps, namespace, "enumerate");
     const fields = (args.fields as string[] | undefined) ?? identityFields(namespace);
     for (const field of fields) {
       assertManifestField(namespace, field, "enumerable");

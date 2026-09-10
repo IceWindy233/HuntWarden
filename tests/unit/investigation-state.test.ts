@@ -10,7 +10,7 @@ import { InvestigationActionExecutor } from "../../src/investigation/action-exec
 import { InvestigationCompletionValidator } from "../../src/investigation/completion-validator.js";
 import { InvestigationScheduler } from "../../src/investigation/scheduler.js";
 import type { InvestigationAction, InvestigationObligation, InvestigationSession } from "../../src/investigation/types.js";
-import { InvestigationPlaybookPlanner } from "../../src/playbooks/registry.js";
+import { InvestigationPlaybookPlanner, PLAYBOOK_CANDIDATE_BATCH_SIZE } from "../../src/playbooks/registry.js";
 import type { ScanEpoch } from "../../src/protocol-v2/types.js";
 import { MAX_ACTIVE_INVESTIGATION_ACTIONS, RuntimeStore } from "../../src/storage/runtime-store.js";
 import { testTask } from "../helpers.js";
@@ -159,7 +159,7 @@ describe("持久化调查状态", () => {
     const investigation = session(task.taskId, epoch.epochId, observedAt);
     store.createInvestigationSession(investigation);
 
-    new InvestigationPlaybookPlanner(store).plan(task.taskId, epoch.epochId, investigation, [batch.facts[0]!.factId]);
+    new InvestigationPlaybookPlanner(store).plan(task.taskId, epoch.epochId, investigation);
 
     const preserve = store.listInvestigationActions(task.taskId, epoch.epochId)
       .find((item) => item.operationRef === "collect" && item.subjectRefs.includes(batch.facts[0]!.subjectRef));
@@ -245,6 +245,53 @@ describe("持久化调查状态", () => {
     expect(store.listRelationProvenance(task.taskId, epoch.epochId)).toEqual([
       expect.objectContaining({ edgeRef: second.edges[0]?.edgeId, derivation: "OBSERVED", fromVersionRef: versions[1]?.versionRef, toVersionRef: expect.any(String) }),
     ]);
+  });
+
+  it("对象内容 A→B→A 时创建新的当前版本实例", async () => {
+    const { store, task, epoch, fact, observedAt } = await fixture();
+    const identity = { bootId: "boot", pid: 42, startTicks: "10", exeInode: "20", exeSha256: "a".repeat(64) };
+    const observe = (sourceRunId: string, uid: number, offsetMs: number) => store.commitFactBatch({
+      taskId: task.taskId, epochId: epoch.epochId, sourceRunId, source: { kind: "SYSTEM" },
+      targetFingerprint: task.target.hostFingerprint, requestId: sourceRunId, collector: { name: "project", version: "3.0.0" },
+      observations: [{ namespace: "process", identity, fields: { ...identity, uid }, observedAt: new Date(Date.parse(observedAt) + offsetMs).toISOString(), consistency: "OBJECT_STABLE" }],
+      edges: [], gaps: [], wireDigest: sourceRunId.padEnd(64, "f").slice(0, 64),
+    }).facts[0]!;
+    observe("VERSION-B", 0, 1_000);
+    const restored = observe("VERSION-A-RESTORED", 1000, 2_000);
+
+    const versions = store.listEntityVersions(task.taskId, epoch.epochId, fact.subjectRef);
+    expect(versions).toHaveLength(3);
+    expect(versions.map((version) => version.contentDigest)).toEqual([fact.payloadDigest, expect.any(String), fact.payloadDigest]);
+    expect(versions.slice(0, 2).every((version) => version.validTo !== undefined)).toBe(true);
+    expect(versions[2]).toMatchObject({ sourceFactRef: restored.factId });
+    expect(versions[2]).not.toHaveProperty("validTo");
+    expect(new Set(versions.map((version) => version.versionRef)).size).toBe(3);
+  });
+
+  it("流程规划处理超过 200 个候选且不让尾部主体静默遗漏", async () => {
+    const { store, task, epoch, observedAt } = await fixture();
+    task.checks = ["webshell"];
+    store.saveTask(task);
+    const batch = store.commitFactBatch({
+      taskId: task.taskId, epochId: epoch.epochId, sourceRunId: "WEB-CANDIDATES", source: { kind: "PRESET", presetRunId: "PRUN-WEB-CANDIDATES", presetId: "webshell-baseline", presetVersion: "2.5.0", stepId: "web-candidate-file" },
+      targetFingerprint: task.target.hostFingerprint, requestId: "WEB-CANDIDATES", collector: { name: "enumerate", version: "3.0.0" },
+      observations: Array.from({ length: 201 }, (_, index) => ({
+        namespace: "file" as const,
+        identity: { mountId: "1", device: "1", inode: String(10_000 + index) },
+        fields: { mountId: "1", device: "1", inode: String(10_000 + index), path: `/var/www/app-${index}.php`, kind: "regular", size: 64, mode: 420, uid: 33, gid: 33, mtime: observedAt },
+        observedAt, consistency: "CURSOR_BEST_EFFORT" as const,
+      })), edges: [], gaps: [], wireDigest: "e".repeat(64),
+    });
+    const investigation = session(task.taskId, epoch.epochId, observedAt);
+    const planner = new InvestigationPlaybookPlanner(store);
+    const first = planner.plan(task.taskId, epoch.epochId, investigation);
+    expect(first.hypothesisIds).toHaveLength(PLAYBOOK_CANDIDATE_BATCH_SIZE);
+    expect(store.listDiscoveryCheckpoints(task.taskId, epoch.epochId).find((item) => item.requestDigest === "PLAYBOOK_CANDIDATES:1")).toMatchObject({ status: "RUNNING" });
+    const second = planner.plan(task.taskId, epoch.epochId, investigation);
+    expect(second.hypothesisIds).toHaveLength(1);
+    expect(store.listInvestigationHypotheses(task.taskId, epoch.epochId).some((item) => item.subjectRef === batch.facts[200]!.subjectRef)).toBe(true);
+    expect(store.listDiscoveryCheckpoints(task.taskId, epoch.epochId).find((item) => item.requestDigest === "PLAYBOOK_CANDIDATES:1")).toMatchObject({ status: "COMPLETE" });
+    expect(store.listInvestigationObligations(task.taskId, epoch.epochId).find((item) => item.obligationKind === "CATEGORY_SCOPE_WEBSHELL")).toMatchObject({ status: "OPEN" });
   });
 
   it("会话使用 revision CAS，Lead 和 Obligation 按稳定键去重", async () => {

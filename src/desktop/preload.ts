@@ -46,6 +46,7 @@ const api: HuntWardenDesktopApi = {
   listReports: async (taskId) => await ipcRenderer.invoke(IPC.reportList, taskId),
   readReport: async (input) => await ipcRenderer.invoke(IPC.reportRead, input),
   revealEvidence: async (evidenceId) => await ipcRenderer.invoke(IPC.evidenceReveal, evidenceId),
+  exportEvidence: async (taskId) => await ipcRenderer.invoke(IPC.evidenceExport, taskId),
   revealReport: async (input) => await ipcRenderer.invoke(IPC.reportReveal, input),
   subscribe: (listener) => {
     const wrapped = (_event: Electron.IpcRendererEvent, value: DesktopEvent) => listener(value);

@@ -29,11 +29,13 @@ export class DerivedObjectResolver {
     const joinValue = source.privatePayload[definition.sourceJoinField];
     if (joinValue === undefined || joinValue === null || joinValue === "") return this.empty(request);
 
-    const targets = latestBySubject(this.store.listFacts(request.taskId, request.epochId, { namespace: definition.targetNamespace }))
+    const candidates = latestBySubject(this.store.listFacts(request.taskId, request.epochId, { namespace: definition.targetNamespace }))
       .filter((fact) => fact.privatePayload[definition.targetJoinField] === joinValue && fact.subjectRef !== source.subjectRef)
       .sort((left, right) => distance(source, left) - distance(source, right) || left.subjectRef.localeCompare(right.subjectRef));
-    const target = targets[0];
-    if (!target) return this.empty(request);
+    if (candidates.length === 0) return this.empty(request);
+    const targets = candidates.filter((target) => hasStableProcessRelationship(request.resolverRef, source, target));
+    if (targets.length !== 1) return this.ambiguous(request, candidates);
+    const target = targets[0]!;
 
     const edgeId = `EDGE-DERIVED-${digestObject({ taskId: request.taskId, epochId: request.epochId, resolverRef: request.resolverRef, sourceFactRef: request.sourceFactRef, targetFactRef: target.factId }).slice(0, 40)}`;
     const observedAt = later(source.observedAt, target.observedAt);
@@ -54,9 +56,50 @@ export class DerivedObjectResolver {
     return { requestId: request.requestId, resolverRef: request.resolverRef, sourceFactRef: request.sourceFactRef, status: "RESOLVED", objectRefs: [target.subjectRef], edgeRefs: [edge.edgeId] };
   }
 
+  private ambiguous(request: DerivedObjectRequest, candidates: FactRecord[]): DerivedObjectResult {
+    return { requestId: request.requestId, resolverRef: request.resolverRef, sourceFactRef: request.sourceFactRef, status: "AMBIGUOUS", objectRefs: [...new Set(candidates.map((fact) => fact.subjectRef))], edgeRefs: [] };
+  }
+
   private empty(request: DerivedObjectRequest): DerivedObjectResult {
     return { requestId: request.requestId, resolverRef: request.resolverRef, sourceFactRef: request.sourceFactRef, status: "NO_MATCH", objectRefs: [], edgeRefs: [] };
   }
+}
+
+function hasStableProcessRelationship(resolverRef: DerivedResolverRef, source: FactRecord, target: FactRecord): boolean {
+  const targetBootId = stringField(target, "bootId");
+  const targetStartTicks = integerStringField(target, "startTicks");
+  const targetPidNamespace = namespaceField(target);
+  if (!targetBootId || !targetStartTicks || !targetPidNamespace) return false;
+  if (resolverRef === "socket.owner_by_pid@1.0.0") {
+    return stringField(source, "ownerBootId") === targetBootId
+      && integerStringField(source, "ownerStartTicks") === targetStartTicks
+      && stringField(source, "ownerPidNamespace") === targetPidNamespace;
+  }
+  const sourceBootId = stringField(source, "bootId");
+  const sourceStartTicks = integerStringField(source, "startTicks");
+  const sourcePidNamespace = namespaceField(source);
+  return source.sourceRunId === target.sourceRunId
+    && sourceBootId === targetBootId
+    && sourcePidNamespace === targetPidNamespace
+    && sourceStartTicks !== undefined
+    && BigInt(targetStartTicks) < BigInt(sourceStartTicks);
+}
+
+function stringField(fact: FactRecord, field: string): string | undefined {
+  const value = fact.privatePayload[field];
+  return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+function integerStringField(fact: FactRecord, field: string): string | undefined {
+  const value = stringField(fact, field);
+  return value && /^\d+$/.test(value) ? value : undefined;
+}
+
+function namespaceField(fact: FactRecord): string | undefined {
+  const namespaces = fact.privatePayload.namespaces;
+  if (!namespaces || typeof namespaces !== "object" || Array.isArray(namespaces)) return undefined;
+  const value = (namespaces as Record<string, unknown>).pid;
+  return typeof value === "string" && value.length > 0 ? value : undefined;
 }
 
 function latestBySubject(facts: FactRecord[]): FactRecord[] {

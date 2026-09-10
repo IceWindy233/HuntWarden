@@ -59,6 +59,7 @@ function assert(condition, message) { if (!condition) failures.push(message); }
 const qualification = readJson(absoluteQualification, "发布资格清单");
 const currentCommit = execFileSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf8" }).trim();
 const currentHelperSha256 = sha256(resolve(root, "host-helper/huntwarden_helper.py"));
+const currentOperationalScriptSha256 = sha256(resolve(root, "acceptance/operational/qualify-host.sh"));
 assert(qualification.schemaVersion === 1, "发布资格清单 schemaVersion 必须为 1");
 assert(qualification.commit === currentCommit, `发布资格清单提交与当前 HEAD 不一致: ${qualification.commit ?? "缺失"} / ${currentCommit}`);
 assert(qualification.manifestVersion === "3.0.0", "发布资格清单必须绑定 Manifest 3.0.0");
@@ -113,7 +114,7 @@ assert(/^[a-f0-9]{64}$/.test(blind.truthSet?.archiveSha256 ?? "") && blind.truth
 assert(typeof blind.truthSet?.curator === "string" && typeof blind.truthSet?.runner === "string" && blind.truthSet.curator.toLowerCase() !== blind.truthSet.runner.toLowerCase(), "独立盲测结果缺少相互独立的维护者与运行者");
 assert(blind.truthSet?.isolation?.targetAuthorizationContainsTruth === false && blind.truthSet?.isolation?.helperReceivesTruth === false && blind.truthSet?.isolation?.modelReceivesTruth === false, "独立盲测结果缺少答案隔离证明");
 assert(blind.population?.maliciousFirstRunCases >= 100 && blind.population?.benignFirstRunCases >= 100 && blind.population?.limitedFirstRunCases >= 1, "独立盲测首跑总体不足");
-assert(blind.metrics?.discoveryRecall?.rate >= 0.95 && blind.metrics?.evidencePreservation?.rate >= 0.95 && blind.metrics?.benignFalsePositive?.rate <= 0.05, "独立盲测发布指标未达到冻结阈值");
+assert(blind.metrics?.collectionRecall?.rate >= 0.95 && blind.metrics?.discoveryRecall?.rate >= 0.95 && blind.metrics?.evidencePreservation?.rate >= 0.95 && blind.metrics?.benignFalsePositive?.rate <= 0.05, "独立盲测发布指标未达到冻结阈值");
 
 const businessJvm = evidence(evidenceSet.businessJvm, "真实业务 JVM 证据");
 assert(businessJvm.status === "PASS" && businessJvm.environment?.fixture === false && businessJvm.environment?.workloadKind === "BUSINESS_APPLICATION", "真实业务 JVM 证据必须来自非夹具业务应用");
@@ -133,6 +134,24 @@ assert(businessJvm.traffic?.baselineRequests >= 20 && businessJvm.traffic?.loade
   && Number.isFinite(businessJvm.traffic?.baselineP95Ms) && Number.isFinite(businessJvm.traffic?.loadedP95Ms)
   && Number.isFinite(businessJvm.traffic?.loadedMaxMs) && businessJvm.traffic?.postAttachHealthVerified === true, "真实业务 JVM 流量、延迟或 Attach 后健康验收不完整");
 
+const operational = evidence(evidenceSet.operational, "运维资格证据");
+assert(operational.schemaVersion === 1 && operational.status === "PASS" && Array.isArray(operational.failures) && operational.failures.length === 0, "运维资格证据必须由 schema v1 执行器无失败地产生");
+assert(operational.commit === currentCommit && operational.helperSha256 === currentHelperSha256, "运维资格证据未绑定当前提交或 Helper 源码");
+assert(operational.host?.schemaVersion === 1 && operational.host?.status === "PASS" && operational.host?.commit === currentCommit
+  && operational.host?.helperSha256 === currentHelperSha256 && operational.host?.scriptSha256 === currentOperationalScriptSha256
+  && Array.isArray(operational.host?.failures) && operational.host.failures.length === 0, "目标端安装/卸载演练身份、脚本摘要或状态无效");
+assert(Object.values(object(operational.host?.install) ?? {}).length === 5
+  && Object.values(operational.host.install).every((value) => value === true), "目标端全新安装、升级、权限、组件摘要或回执保留未全部通过");
+assert(Object.values(object(operational.host?.uninstall) ?? {}).length === 4
+  && Object.values(operational.host.uninstall).every((value) => value === true), "目标端默认卸载、彻底清理、凭据或目标作业清理未全部通过");
+assert(Number.isInteger(operational.migration?.fromVersion) && operational.migration.fromVersion >= 0
+  && operational.migration.fromVersion < operational.migration?.toVersion
+  && operational.migration.toVersion === operational.runtimeSchemaVersion
+  && /^[a-f0-9]{64}$/.test(operational.migration?.backupSha256 ?? "")
+  && operational.migration.oldTaskReadable === true && operational.migration.rollbackVerified === true, "数据库迁移、旧任务读取、事务前备份或回退演练未通过");
+assert(operational.evidenceExport?.evidenceCount > 0 && operational.evidenceExport?.artifactCount > 0
+  && /^[a-f0-9]{64}$/.test(operational.evidenceExport?.manifestSha256 ?? "")
+  && operational.evidenceExport.checksumsVerified === true && operational.evidenceExport.sensitiveFieldsAbsent === true, "Evidence 离线导出内容、摘要或脱敏验收未通过");
 const platformReferences = Array.isArray(evidenceSet.platforms) ? evidenceSet.platforms : [];
 const seenPlatforms = new Set();
 for (const reference of platformReferences) {
@@ -171,4 +190,4 @@ if (failures.length > 0) {
   console.error(`HuntWarden 发布资格校验失败:\n- ${failures.join("\n- ")}`);
   process.exit(1);
 }
-console.log(`HuntWarden 发布资格校验通过：commit=${currentCommit}，Provider/盲测/真实业务 JVM/${requiredPlatforms.size} 个平台证据完整`);
+console.log(`HuntWarden 发布资格校验通过:commit=${currentCommit},Provider/盲测/真实业务 JVM/运维演练/${requiredPlatforms.size} 个平台证据完整`);

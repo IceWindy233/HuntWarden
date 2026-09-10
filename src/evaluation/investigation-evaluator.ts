@@ -70,6 +70,7 @@ export const InvestigationEvaluationManifestSchema = Type.Object({
   }, { additionalProperties: false }), { minItems: 1, maxItems: 500 }),
   thresholds: Type.Object({
     minDiscoveryRecall: Type.Number({ minimum: 0, maximum: 1 }),
+    minCollectionRecall: Type.Optional(Type.Number({ minimum: 0, maximum: 1 })),
     minEvidencePreservation: Type.Number({ minimum: 0, maximum: 1 }),
     minObligationClosure: Type.Number({ minimum: 0, maximum: 1 }),
     maxBenignFalsePositive: Type.Number({ minimum: 0, maximum: 1 }),
@@ -121,12 +122,14 @@ export interface InvestigationEvaluationResult {
   cases: InvestigationCaseEvaluation[];
 }
 
-export interface InvestigationMetricSet { discoveryRecall: RateMetric; evidencePreservation: RateMetric; obligationClosure: RateMetric; benignFalsePositive: RateMetric; relationshipRecall: RateMetric; limitedRecognition: RateMetric; autonomousCompletion: RateMetric }
+export interface InvestigationMetricSet { collectionRecall: RateMetric; discoveryRecall: RateMetric; evidencePreservation: RateMetric; obligationClosure: RateMetric; benignFalsePositive: RateMetric; relationshipRecall: RateMetric; limitedRecognition: RateMetric; autonomousCompletion: RateMetric }
 
 interface MetricAccumulator {
   caseCount: number;
-  discovered: number;
-  expected: number;
+  collected: number;
+  collectionExpected: number;
+  maliciousDiscovered: number;
+  maliciousCases: number;
   preserved: number;
   preservationExpected: number;
   closedObligations: number;
@@ -181,6 +184,7 @@ export function evaluateInvestigation(store: RuntimeStore, manifest: Investigati
     const facts = store.listFacts(task.taskId, epochId);
     const evidence = store.listEvidence(task.taskId);
     const assessments = store.listAssessments(task.taskId, epochId);
+    const assessmentsById = new Map(assessments.map((item) => [item.assessmentId, item]));
     const effectiveAssessments = projectEffectiveAssessments(assessments, store.listAssessmentRelations(task.taskId, epochId));
     const investigationObligations = store.listInvestigationObligations(task.taskId, epochId);
     const attempts = store.listInvestigationActionAttempts(task.taskId, epochId);
@@ -200,14 +204,23 @@ export function evaluateInvestigation(store: RuntimeStore, manifest: Investigati
     }).length;
     const accumulator = definition.runKind === "FIRST" ? firstRun : retries;
     accumulator.caseCount += 1;
-    accumulator.expected += definition.expectedFacts.length; accumulator.discovered += caseDiscovered;
+    accumulator.collectionExpected += definition.expectedFacts.length; accumulator.collected += caseDiscovered;
     accumulator.preservationExpected += requiredEvidence.length; accumulator.preserved += casePreserved;
     accumulator.expectedRelations += definition.expectedRelations?.length ?? 0; accumulator.matchedRelations += caseMatchedRelations;
     accumulator.obligations += investigationObligations.filter((item) => item.required).length;
     accumulator.closedObligations += investigationObligations.filter((item) => item.required && ["SATISFIED", "LIMITED", "CANCELLED"].includes(item.status)).length;
-    const riskyCategories = [...new Set(effectiveAssessments
-      .filter((item) => ["SUSPICIOUS", "HIGHLY_SUSPICIOUS", "CONFIRMED_MALICIOUS", "CONFLICT"].includes(item.conclusion))
-      .map((item) => item.category))];
+    const riskProjections = effectiveAssessments.filter((item) => ["SUSPICIOUS", "HIGHLY_SUSPICIOUS", "CONFIRMED_MALICIOUS", "CONFLICT"].includes(item.conclusion));
+    const riskyCategories = [...new Set(riskProjections.map((item) => item.category))];
+    const matchedFactIds = new Set(matchedFacts.flat().map((fact) => fact.factId));
+    const matchedSubjectRefs = new Set(matchedFacts.flat().map((fact) => fact.subjectRef));
+    const maliciousDiscovered = definition.disposition === "MALICIOUS" && riskProjections.some((projection) => projection.scope === "SUBJECT"
+      && projection.subjectRef !== undefined && matchedSubjectRefs.has(projection.subjectRef)
+      && definition.expectedCategories.includes(projection.category as typeof definition.expectedCategories[number])
+      && projection.effectiveAssessmentIds.some((assessmentId) => {
+        const assessment = assessmentsById.get(assessmentId);
+        return assessment !== undefined && assessment.subjectRef === projection.subjectRef && assessment.factRefs.some((factRef) => matchedFactIds.has(factRef));
+      }));
+    if (definition.disposition === "MALICIOUS") { accumulator.maliciousCases += 1; if (maliciousDiscovered) accumulator.maliciousDiscovered += 1; }
     if (definition.disposition === "BENIGN") { accumulator.benignCases += 1; if (riskyCategories.length > 0) accumulator.benignFalsePositive += 1; }
     const openRequiredObligationIds = investigationObligations.filter((item) => item.required && ["OPEN", "QUEUED"].includes(item.status)).map((item) => item.obligationId);
     const observedGapCodes = [...new Set([
@@ -220,7 +233,7 @@ export function evaluateInvestigation(store: RuntimeStore, manifest: Investigati
     if (caseDiscovered < definition.expectedFacts.length) failureAttributions.add("COLLECTION_MISSING");
     const reachedRefs = new Set(investigationObligations.flatMap((item) => item.resultRefs));
     if (matchedFacts.some((items) => items.length > 0 && !items.some((fact) => reachedRefs.has(fact.factId)))) failureAttributions.add("INVESTIGATION_NOT_REACHED");
-    if (definition.disposition === "MALICIOUS" && !definition.expectedCategories.some((category) => riskyCategories.includes(category as CheckCategory))) failureAttributions.add("ADJUDICATION_MISSING");
+    if (definition.disposition === "MALICIOUS" && !maliciousDiscovered) failureAttributions.add("ADJUDICATION_MISSING");
     if (casePreserved < requiredEvidence.length) failureAttributions.add("PRESERVATION_FAILED");
     if (openRequiredObligationIds.length > 0) failureAttributions.add("OBLIGATION_INCOMPLETE");
     const completionStatus = session?.investigationStatus ?? "NOT_STARTED";
@@ -236,6 +249,7 @@ export function evaluateInvestigation(store: RuntimeStore, manifest: Investigati
   const metrics = metricSet(firstRun);
   const retryMetrics = retries.caseCount > 0 ? metricSet(retries) : null;
   const thresholdResults: InvestigationEvaluationResult["thresholdResults"] = [
+    compare("collectionRecall", ">=", manifest.thresholds.minCollectionRecall ?? manifest.thresholds.minDiscoveryRecall, metrics.collectionRecall.rate),
     compare("discoveryRecall", ">=", manifest.thresholds.minDiscoveryRecall, metrics.discoveryRecall.rate),
     compare("evidencePreservation", ">=", manifest.thresholds.minEvidencePreservation, metrics.evidencePreservation.rate),
     compare("obligationClosure", ">=", manifest.thresholds.minObligationClosure, metrics.obligationClosure.rate),
@@ -276,19 +290,20 @@ function validateBlindRelease(value: InvestigationEvaluationManifest): void {
   const benign = first.filter((item) => item.disposition === "BENIGN").length;
   const limited = first.filter((item) => item.disposition === "LIMITED").length;
   if (malicious < 100 || benign < 100 || limited < 1) throw new Error(`BLIND_RELEASE 首跑样本不足: malicious=${malicious}, benign=${benign}, limited=${limited}`);
-  if (value.thresholds.minDiscoveryRecall < 0.95 || value.thresholds.minEvidencePreservation < 0.95 || value.thresholds.maxBenignFalsePositive > 0.05) {
-    throw new Error("BLIND_RELEASE 阈值不得低于发现率/保全率 95% 或放宽良性误报率 5%");
+  if ((value.thresholds.minCollectionRecall ?? 0) < 0.95 || value.thresholds.minDiscoveryRecall < 0.95 || value.thresholds.minEvidencePreservation < 0.95 || value.thresholds.maxBenignFalsePositive > 0.05) {
+    throw new Error("BLIND_RELEASE 阈值不得低于采集率/恶意发现率/保全率 95% 或放宽良性误报率 5%");
   }
   if (!/^[a-f0-9]{40}$|^[a-f0-9]{64}$/.test(value.environment.commit) || /^0+$/.test(value.environment.commit)) throw new Error("BLIND_RELEASE 必须绑定非零完整提交摘要");
 }
 
 function emptyAccumulator(): MetricAccumulator {
-  return { caseCount: 0, discovered: 0, expected: 0, preserved: 0, preservationExpected: 0, closedObligations: 0, obligations: 0, benignFalsePositive: 0, benignCases: 0, matchedRelations: 0, expectedRelations: 0, recognizedLimits: 0, limitedCases: 0, autonomousCompleted: 0 };
+  return { caseCount: 0, collected: 0, collectionExpected: 0, maliciousDiscovered: 0, maliciousCases: 0, preserved: 0, preservationExpected: 0, closedObligations: 0, obligations: 0, benignFalsePositive: 0, benignCases: 0, matchedRelations: 0, expectedRelations: 0, recognizedLimits: 0, limitedCases: 0, autonomousCompleted: 0 };
 }
 
 function metricSet(values: MetricAccumulator): InvestigationMetricSet {
   return {
-    discoveryRecall: metric(values.discovered, values.expected),
+    collectionRecall: metric(values.collected, values.collectionExpected),
+    discoveryRecall: metric(values.maliciousDiscovered, values.maliciousCases),
     evidencePreservation: metric(values.preserved, values.preservationExpected),
     obligationClosure: metric(values.closedObligations, values.obligations),
     benignFalsePositive: metric(values.benignFalsePositive, values.benignCases),

@@ -7,7 +7,7 @@
     "architecture": "arm64",
     "transport": "SSH",
     "provider": "replace-with-provider-or-remove",
-    "applicationVersion": "0.2.0",
+    "applicationVersion": "0.3.0-beta.1",
     "protocolVersion": 2,
     "manifestVersion": "3.0.0",
     "helperVersion": "3.0.0",
@@ -26,5 +26,5 @@
     "expectedCategories": ["linux_intrusion_triage"],
     "expectedFacts": [{ "namespace": "process", "field": "exe", "value": "/tmp/payload", "evidenceRequired": true }]
   }],
-  "thresholds": { "minDiscoveryRecall": 0.95, "minEvidencePreservation": 0.95, "minObligationClosure": 1, "maxBenignFalsePositive": 0.05, "minRelationshipRecall": 0.95, "minLimitedRecognition": 1, "minAutonomousCompletion": 0.95 }
+  "thresholds": { "minCollectionRecall": 0.95, "minDiscoveryRecall": 0.95, "minEvidencePreservation": 0.95, "minObligationClosure": 1, "maxBenignFalsePositive": 0.05, "minRelationshipRecall": 0.95, "minLimitedRecognition": 1, "minAutonomousCompletion": 0.95 }
 }

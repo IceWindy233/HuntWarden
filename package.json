@@ -1,7 +1,7 @@
 {
   "name": "huntwarden-agent",
   "productName": "HuntWarden",
-  "version": "0.2.0",
+  "version": "0.3.0-beta.1",
   "description": "AI-assisted Linux host investigation and controlled remediation agent with evidence, approvals, and crash recovery.",
   "author": "IceWindy",
   "license": "MIT",
@@ -69,6 +69,7 @@
     "qualify:provider:tasks": "tsx src/cli/run-provider-qualification.ts",
     "qualify:business-jvm": "tsx src/cli/qualify-business-jvm.ts",
     "qualify:platform": "tsx src/cli/qualify-platform.ts",
+    "qualify:operational": "tsx src/cli/qualify-operational.ts",
     "lab:up": "bash labs/lab-up.sh",
     "lab:reset": "bash labs/lab-reset.sh",
     "lab:down": "docker compose -f labs/docker-compose.yml down",

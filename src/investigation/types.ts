@@ -62,7 +62,7 @@ export interface DerivedObjectResult {
   requestId: string;
   resolverRef: DerivedResolverRef;
   sourceFactRef: string;
-  status: "RESOLVED" | "NO_MATCH";
+  status: "RESOLVED" | "NO_MATCH" | "AMBIGUOUS";
   objectRefs: string[];
   edgeRefs: string[];
 }

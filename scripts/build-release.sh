@@ -9,16 +9,31 @@ if [[ -n "$(git status --porcelain)" ]]; then
   exit 1
 fi
 
-qualification="${HUNTWARDEN_RELEASE_QUALIFICATION:-}"
-if [[ -z "$qualification" ]]; then
-  echo "缺少 HUNTWARDEN_RELEASE_QUALIFICATION；拒绝在没有真实 Provider、独立盲测、平台矩阵和真实业务 JVM 证据时生成发布资产。" >&2
-  exit 1
-fi
-node scripts/release-qualification-check.mjs --qualification "$qualification"
-
 version="$(node -p "require('./package.json').version")"
+qualification="${HUNTWARDEN_RELEASE_QUALIFICATION:-}"
+prerelease=0
+if [[ "$version" == *-* ]]; then prerelease=1; fi
+if [[ -n "$qualification" ]]; then
+  node scripts/release-qualification-check.mjs --qualification "$qualification"
+elif ((prerelease == 0)); then
+  echo "缺少 HUNTWARDEN_RELEASE_QUALIFICATION；拒绝在没有真实 Provider、独立盲测、平台矩阵、真实业务 JVM 和运维演练证据时生成稳定发布资产。" >&2
+  exit 1
+else
+  echo "警告：正在生成未完成正式发布资格的预发布资产（$version）。" >&2
+fi
+
 release_dir="$project_root/release/v$version"
 mkdir -p "$release_dir"
+if ((prerelease == 1)) && [[ -z "$qualification" ]]; then
+  cat > "$release_dir/PRERELEASE-NOTICE.txt" <<EOF
+HuntWarden $version is a prerelease build.
+It has not passed the complete stable-release qualification matrix.
+Missing external evidence is documented in docs/版本发布说明.md.
+Do not represent this build as a stable or fully qualified release.
+EOF
+else
+  rm -f "$release_dir/PRERELEASE-NOTICE.txt"
+fi
 
 npm ci
 npm run audit:prod
@@ -64,10 +79,9 @@ fi
 
 (
   cd "$release_dir"
-  shasum -a 256 ./*.zip ./*.dmg ./COMPONENTS.json 2>/dev/null > SHA256SUMS ||
-    find . -maxdepth 1 -type f \( -name '*.zip' -o -name '*.dmg' -o -name 'COMPONENTS.json' \) -print0 |
-      sort -z |
-      xargs -0 shasum -a 256 > SHA256SUMS
+  checksum_inputs=(./*.zip ./*.dmg ./COMPONENTS.json)
+  if [[ -f ./PRERELEASE-NOTICE.txt ]]; then checksum_inputs+=(./PRERELEASE-NOTICE.txt); fi
+  shasum -a 256 "${checksum_inputs[@]}" > SHA256SUMS
 )
 
 npm run release:self-check -- --require-probe --require-build-identity --artifacts "release/v${version}"

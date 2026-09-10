@@ -223,6 +223,22 @@ describe("Tool Protocol v2 invariants", () => {
     expect(proposal.details).toMatchObject({ scheduler: { executed: 1, succeeded: 1, failed: 0 } });
     expect(store.listInvestigationActions(task.taskId, epoch.epochId)).toEqual([expect.objectContaining({ requestedBy: "MODEL", status: "SUCCEEDED" })]);
     expect(store.listInvestigationObligations(task.taskId, epoch.epochId)).toEqual(expect.arrayContaining([expect.objectContaining({ obligationId: hypothesis.obligationId, status: "SATISFIED", resultRefs: [expect.stringMatching(/^QUERY-/)] })]));
+    const existingActionId = store.listInvestigationActions(task.taskId, epoch.epochId)[0]!.actionId;
+    const dependentProposal = await proposalTool.execute("CALL-DEPENDENT-DEDUPE", {
+      hypothesisId: hypothesis.hypothesisId,
+      obligationId: hypothesis.obligationId,
+      actions: [
+        { clientRef: "existing", operationRef: "query_facts", subjectRefs: [batch.facts[0]!.subjectRef], args: { view: "facts", namespace: "process", subjectRef: batch.facts[0]!.subjectRef, limit: 10 }, dependsOnClientRefs: [] },
+        { clientRef: "dependent", operationRef: "query_facts", subjectRefs: [batch.facts[0]!.subjectRef], args: { view: "facts", namespace: "process", subjectRef: batch.facts[0]!.subjectRef, limit: 9 }, dependsOnClientRefs: ["existing"] },
+      ],
+    } as never);
+    expect(dependentProposal.details).toMatchObject({ accepted: [
+      { clientRef: "existing", actionId: existingActionId },
+      { clientRef: "dependent", actionId: expect.stringMatching(/^IACT-/) },
+    ] });
+    expect(store.listInvestigationActions(task.taskId, epoch.epochId).find((item) => item.args.limit === 9)).toMatchObject({
+      status: "SUCCEEDED", dependsOn: [existingActionId],
+    });
     const processRef = batch.facts.find((fact) => fact.namespace === "process")!.subjectRef;
     const fileRef = batch.facts.find((fact) => fact.namespace === "file")!.subjectRef;
     const normalized = await proposalTool.execute("CALL-NORMALIZED-ACTIONS", {

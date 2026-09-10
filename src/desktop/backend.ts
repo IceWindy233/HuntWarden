@@ -32,6 +32,7 @@ import { RuntimeStore } from "../storage/runtime-store.js";
 import { DbappThreatIntelClient } from "../threat-intel/dbapp-client.js";
 import type { KnownHashDataSetSummary } from "../datasets/known-hash-registry.js";
 import { projectEffectiveAssessments } from "../assessments/projection.js";
+import { EvidenceStore, type EvidenceExportResult } from "../evidence/evidence-store.js";
 
 export interface DesktopBackendOptions {
   userDataDir: string;
@@ -335,6 +336,12 @@ export class DesktopBackend extends EventEmitter {
       if (evidence) return evidence;
     }
     throw new Error(`Evidence 不存在: ${evidenceId}`);
+  }
+
+  async exportEvidence(taskId: string, destination: string): Promise<EvidenceExportResult> {
+    this.requireTaskExists(taskId);
+    const application = this.requireApplication();
+    return await new EvidenceStore(application.config.storage.baseDir, application.store).exportTask(taskId, destination);
   }
 
   async listReports(taskId: string): Promise<ReportRecord[]> {

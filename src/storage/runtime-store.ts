@@ -55,7 +55,7 @@ import type {
 interface JsonRow { payload: string }
 interface CountRow { count: number }
 
-export const RUNTIME_SCHEMA_VERSION = 5;
+export const RUNTIME_SCHEMA_VERSION = 6;
 export const MAX_ACTIVE_INVESTIGATION_ACTIONS = 1_000;
 
 export interface SchemaMigrationRecord {
@@ -528,7 +528,7 @@ export class RuntimeStore {
           valid_from TEXT NOT NULL,
           valid_to TEXT,
           payload TEXT NOT NULL,
-          UNIQUE(task_id, epoch_id, entity_ref, identity_digest, content_digest),
+          UNIQUE(task_id, epoch_id, entity_ref, source_fact_ref),
           FOREIGN KEY(entity_ref) REFERENCES object_refs_v2(ref),
           FOREIGN KEY(source_fact_ref) REFERENCES facts_v2(fact_id)
         );
@@ -660,7 +660,7 @@ export class RuntimeStore {
           created_at TEXT NOT NULL
         );
         CREATE INDEX IF NOT EXISTS idx_entity_versions_subject ON entity_versions(task_id, epoch_id, entity_ref, valid_from);
-        CREATE UNIQUE INDEX IF NOT EXISTS idx_entity_versions_identity ON entity_versions(task_id, epoch_id, entity_ref, identity_digest, COALESCE(content_digest,''));
+        CREATE INDEX IF NOT EXISTS idx_entity_versions_identity ON entity_versions(task_id, epoch_id, entity_ref, identity_digest, content_digest);
         CREATE INDEX IF NOT EXISTS idx_relation_provenance_scope ON relation_provenance(task_id, epoch_id, derivation);
         CREATE INDEX IF NOT EXISTS idx_investigation_leads_status ON investigation_leads(task_id, epoch_id, status, priority, created_at);
         CREATE INDEX IF NOT EXISTS idx_investigation_obligations_status ON investigation_obligations(task_id, epoch_id, required, status);
@@ -715,6 +715,60 @@ export class RuntimeStore {
         CREATE INDEX IF NOT EXISTS idx_queued_inputs_epoch ON queued_inputs(task_id, epoch_id, status, created_at);
       `);
       this.recordMigration(5, "runtime-epoch-binding", digestObject({ version: 5, schema: "runtime-epoch-binding" }));
+      const entityVersionIndexes = this.db.prepare("PRAGMA index_list(entity_versions)").all() as Array<{ name?: string; unique?: number; origin?: string }>;
+      const hasLegacyVersionUniqueness = entityVersionIndexes.some((index) => {
+        if (index.unique !== 1 || index.origin === "pk" || !index.name) return false;
+        const columns = this.db.prepare(`PRAGMA index_info(${index.name})`).all() as Array<{ name?: string }>;
+        const names = columns.map((column) => column.name).filter((name): name is string => Boolean(name));
+        return names.includes("entity_ref") && names.includes("identity_digest") && names.includes("content_digest");
+      });
+      if (hasLegacyVersionUniqueness) {
+        this.db.exec(`
+          DROP INDEX IF EXISTS idx_entity_versions_identity;
+          CREATE TABLE entity_versions_v6 (
+            version_ref TEXT PRIMARY KEY,
+            entity_ref TEXT NOT NULL,
+            task_id TEXT NOT NULL,
+            epoch_id TEXT NOT NULL,
+            namespace TEXT NOT NULL,
+            identity_digest TEXT NOT NULL,
+            content_digest TEXT,
+            source_fact_ref TEXT NOT NULL,
+            valid_from TEXT NOT NULL,
+            valid_to TEXT,
+            payload TEXT NOT NULL,
+            UNIQUE(task_id, epoch_id, entity_ref, source_fact_ref),
+            FOREIGN KEY(entity_ref) REFERENCES object_refs_v2(ref),
+            FOREIGN KEY(source_fact_ref) REFERENCES facts_v2(fact_id)
+          );
+          INSERT INTO entity_versions_v6 SELECT * FROM entity_versions;
+          CREATE TABLE relation_provenance_v6 (
+            edge_ref TEXT PRIMARY KEY,
+            task_id TEXT NOT NULL,
+            epoch_id TEXT NOT NULL,
+            from_version_ref TEXT,
+            to_version_ref TEXT,
+            derivation TEXT NOT NULL,
+            resolver_version TEXT NOT NULL,
+            time_error_ms INTEGER NOT NULL CHECK(time_error_ms >= 0),
+            payload TEXT NOT NULL,
+            FOREIGN KEY(edge_ref) REFERENCES fact_edges_v2(edge_id),
+            FOREIGN KEY(from_version_ref) REFERENCES entity_versions_v6(version_ref),
+            FOREIGN KEY(to_version_ref) REFERENCES entity_versions_v6(version_ref)
+          );
+          INSERT INTO relation_provenance_v6 SELECT * FROM relation_provenance;
+          DROP TABLE relation_provenance;
+          DROP TABLE entity_versions;
+          ALTER TABLE entity_versions_v6 RENAME TO entity_versions;
+          ALTER TABLE relation_provenance_v6 RENAME TO relation_provenance;
+        `);
+      }
+      this.db.exec(`
+        CREATE INDEX IF NOT EXISTS idx_entity_versions_subject ON entity_versions(task_id, epoch_id, entity_ref, valid_from);
+        CREATE INDEX IF NOT EXISTS idx_entity_versions_identity ON entity_versions(task_id, epoch_id, entity_ref, identity_digest, content_digest);
+        CREATE INDEX IF NOT EXISTS idx_relation_provenance_scope ON relation_provenance(task_id, epoch_id, derivation);
+      `);
+      this.recordMigration(6, "entity-version-observation-instances", digestObject({ version: 6, schema: "entity-version-observation-instances" }));
       this.db.exec(`PRAGMA user_version=${RUNTIME_SCHEMA_VERSION}; COMMIT`);
     } catch (error) {
       try { this.db.exec("ROLLBACK"); } catch { /* transaction may already be closed */ }
@@ -782,10 +836,10 @@ export class RuntimeStore {
     const subject = this.listObjectReferences(value.taskId, value.epochId).find((item) => item.ref === value.entityRef && item.namespace === value.namespace);
     const fact = this.getFact(value.taskId, value.epochId, value.sourceFactRef);
     if (!subject || !fact || fact.subjectRef !== value.entityRef) throw new InvalidArgumentError("实体版本必须绑定当前对象及其来源 Fact");
-    this.db.prepare("INSERT OR IGNORE INTO entity_versions(version_ref,entity_ref,task_id,epoch_id,namespace,identity_digest,content_digest,source_fact_ref,valid_from,valid_to,payload) VALUES(?,?,?,?,?,?,?,?,?,?,?)")
+    this.db.prepare("INSERT INTO entity_versions(version_ref,entity_ref,task_id,epoch_id,namespace,identity_digest,content_digest,source_fact_ref,valid_from,valid_to,payload) VALUES(?,?,?,?,?,?,?,?,?,?,?)")
       .run(value.versionRef, value.entityRef, value.taskId, value.epochId, value.namespace, value.identityDigest, value.contentDigest ?? null, value.sourceFactRef, value.validFrom, value.validTo ?? null, JSON.stringify(value));
-    const row = this.db.prepare("SELECT payload FROM entity_versions WHERE task_id=? AND epoch_id=? AND entity_ref=? AND identity_digest=? AND content_digest IS ?")
-      .get(value.taskId, value.epochId, value.entityRef, value.identityDigest, value.contentDigest ?? null) as unknown as JsonRow;
+    const row = this.db.prepare("SELECT payload FROM entity_versions WHERE version_ref=?")
+      .get(value.versionRef) as unknown as JsonRow;
     return JSON.parse(row.payload) as EntityVersion;
   }
 
@@ -1344,15 +1398,16 @@ export class RuntimeStore {
         fact.factSeq = nextSeq++;
         putFact.run(fact.factSeq, fact.factId, fact.taskId, fact.epochId, fact.namespace, fact.subjectRef, fact.sourceRunId, fact.source.kind,
           JSON.stringify(fact.privatePayload), JSON.stringify(fact.modelPayload), JSON.stringify(fact), fact.observedAt);
-        const openVersions = this.db.prepare("SELECT version_ref,payload FROM entity_versions WHERE task_id=? AND epoch_id=? AND entity_ref=? AND valid_to IS NULL AND COALESCE(content_digest,'')<>?")
-          .all(fact.taskId, fact.epochId, fact.subjectRef, fact.payloadDigest) as Array<Record<string, unknown>>;
+        const openVersions = this.db.prepare("SELECT version_ref,content_digest,payload FROM entity_versions WHERE task_id=? AND epoch_id=? AND entity_ref=? AND valid_to IS NULL")
+          .all(fact.taskId, fact.epochId, fact.subjectRef) as Array<Record<string, unknown>>;
+        if (openVersions.some((row) => String(row.content_digest ?? "") === fact.payloadDigest)) continue;
         for (const row of openVersions) {
           const previous = JSON.parse(String(row.payload)) as EntityVersion;
           const closed: EntityVersion = { ...previous, validTo: fact.observedAt };
           this.db.prepare("UPDATE entity_versions SET valid_to=?,payload=? WHERE version_ref=?")
             .run(fact.observedAt, JSON.stringify(closed), String(row.version_ref));
         }
-        const versionRef = `EVER-${digestObject({ subjectRef: fact.subjectRef, identityDigest: fact.provenance.stableIdentityDigest, contentDigest: fact.payloadDigest }).slice(0, 40)}`;
+        const versionRef = `EVER-${digestObject({ subjectRef: fact.subjectRef, identityDigest: fact.provenance.stableIdentityDigest, contentDigest: fact.payloadDigest, sourceFactRef: fact.factId }).slice(0, 40)}`;
         const version: EntityVersion = {
           versionRef,
           entityRef: fact.subjectRef,
@@ -1365,7 +1420,7 @@ export class RuntimeStore {
           validFrom: fact.observedAt,
           assertions: [{ kind: "OBSERVATION_PAYLOAD", valueDigest: fact.payloadDigest }],
         };
-        this.db.prepare("INSERT OR IGNORE INTO entity_versions(version_ref,entity_ref,task_id,epoch_id,namespace,identity_digest,content_digest,source_fact_ref,valid_from,valid_to,payload) VALUES(?,?,?,?,?,?,?,?,?,?,?)")
+        this.db.prepare("INSERT INTO entity_versions(version_ref,entity_ref,task_id,epoch_id,namespace,identity_digest,content_digest,source_fact_ref,valid_from,valid_to,payload) VALUES(?,?,?,?,?,?,?,?,?,?,?)")
           .run(version.versionRef, version.entityRef, version.taskId, version.epochId, version.namespace, version.identityDigest, fact.payloadDigest, version.sourceFactRef, version.validFrom, null, JSON.stringify(version));
       }
       const putEdge = this.db.prepare("INSERT INTO fact_edges_v2(edge_id,task_id,epoch_id,from_ref,to_ref,relation,source_run_id,payload) VALUES(?,?,?,?,?,?,?,?)");

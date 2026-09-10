@@ -160,7 +160,7 @@ export function TaskWorkspace({ snapshot, refresh, notify, liveStream }: { snaps
       {tab === "调查" ? <Investigation snapshot={snapshot} {...(liveStream ? { liveStream } : {})} /> : null}
       {tab === "工具" ? <ToolTimeline snapshot={snapshot} /> : null}
       {tab === "发现" ? <Findings snapshot={snapshot} refresh={refresh} notify={notify} readOnly={archived} /> : null}
-      {tab === "证据" ? <EvidenceList snapshot={snapshot} notify={notify} /> : null}
+      {tab === "证据" ? <EvidenceList snapshot={snapshot} notify={notify} busy={busy === "evidence-export"} onExport={() => action("evidence-export", () => window.huntwarden.exportEvidence(task.taskId), "Evidence 离线导出完成")} /> : null}
       {tab === "情报" ? <ThreatIntelView snapshot={snapshot} /> : null}
       {tab === "审计" ? <AuditLog snapshot={snapshot} /> : null}
       {tab === "报告" ? <ReportView taskId={task.taskId} reports={reports} selectedReportId={selectedReportId} report={report} onSelect={selectReport} onGenerate={generateReport} busy={busy === "report"} notify={notify} readOnly={archived} firstReportLabel={firstReportLabel} /> : null}
@@ -248,9 +248,8 @@ function Findings({ snapshot, refresh, notify, readOnly }: { snapshot: TaskSnaps
   }
 }
 
-function EvidenceList({ snapshot, notify }: { snapshot: TaskSnapshot; notify: (message: string, tone?: "success" | "error" | "info") => void }) {
-  if (snapshot.evidence.length === 0) return <EmptyState icon="▣" title="暂无 Evidence" description="采集结果、哈希和本地受管文件会在这里展示。" />;
-  return <div className="evidence-grid">{snapshot.evidence.map((item) => <article className="evidence-card" key={item.evidenceId}><div className="evidence-icon">{item.storagePath ? "FILE" : "JSON"}</div><div className="evidence-main"><span className="mono">{item.evidenceId}</span><h3>{item.type}</h3><p title={item.source}>{item.source}</p><div className="evidence-meta"><span>采集 {formatTime(item.collectedAt)}</span><span>工具 {item.tool}</span>{item.sha256 ? <span className="mono">SHA {shortId(item.sha256)}</span> : null}</div></div>{item.storagePath ? <Button variant="ghost" onClick={async () => { try { await window.huntwarden.revealEvidence(item.evidenceId); } catch (error) { notify(error instanceof Error ? error.message : String(error), "error"); } }}>在 Finder 显示</Button> : null}</article>)}</div>;
+function EvidenceList({ snapshot, notify, busy, onExport }: { snapshot: TaskSnapshot; notify: (message: string, tone?: "success" | "error" | "info") => void; busy: boolean; onExport: () => Promise<boolean> }) {
+  return <div className="audit-sections"><section className="receipt-section"><div className="receipt-heading"><strong>离线 Evidence 清单</strong><Button variant="secondary" onClick={() => void onExport()} busy={busy}>导出 Evidence</Button></div><span className="muted">导出清单、受管 Artifact 副本与 SHA256SUMS；不会包含 storagePath、凭据、Token 或私钥字段。</span></section>{snapshot.evidence.length === 0 ? <EmptyState icon="▣" title="暂无 Evidence" description="当前可导出空清单；后续采集结果、哈希和本地受管文件会在这里展示。" /> : <div className="evidence-grid">{snapshot.evidence.map((item) => <article className="evidence-card" key={item.evidenceId}><div className="evidence-icon">{item.storagePath ? "FILE" : "JSON"}</div><div className="evidence-main"><span className="mono">{item.evidenceId}</span><h3>{item.type}</h3><p title={item.source}>{item.source}</p><div className="evidence-meta"><span>采集 {formatTime(item.collectedAt)}</span><span>工具 {item.tool}</span>{item.sha256 ? <span className="mono">SHA {shortId(item.sha256)}</span> : null}</div></div>{item.storagePath ? <Button variant="ghost" onClick={async () => { try { await window.huntwarden.revealEvidence(item.evidenceId); } catch (error) { notify(error instanceof Error ? error.message : String(error), "error"); } }}>在 Finder 显示</Button> : null}</article>)}</div>}</div>;
 }
 
 function ThreatIntelView({ snapshot }: { snapshot: TaskSnapshot }) {

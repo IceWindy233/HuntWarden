@@ -4,11 +4,14 @@
 
 ## [Unreleased]
 
+## [0.3.0-beta.1] - 2026-09-10
+
 ### Added
 
 - 新 Epoch 固定控制端完整提交和目标 Helper 源文件 SHA-256，恢复时拒绝控制端或 Helper 身份变化；发布构建生成并打包干净提交身份文件。
 - Provider、业务 JVM 与平台资格结果升级为 schema v2：三者交叉核验当前 Helper 摘要，Provider 额外要求在线冒烟前后 DNS 集合稳定且全部为全局可路由地址。
 - 新增三套正式资格生成器：真实 Provider 从在线 Tool Call、RuntimeStore 双任务和故障契约计算；真实业务 JVM 在冻结业务流量下执行至少 12 次 Attach；五平台从目标 `host` 观测、Evidence 流传输、Artifact 清理和 SSH 重连生成证据。发布门禁逐字段交叉核验这些执行器产物，不接受只含手工 PASS 布尔值的模板。
+- 新增运维发布资格生成器：在可销毁 Linux 环境实跑全新安装、升级、权限/组件摘要、Action Receipt 保留及两种卸载；控制端再验证旧 schema 事务前备份、迁移、旧任务读取、回退、重新迁移和带摘要的脱敏 Evidence 离线导出。发布门禁绑定当前提交、Helper 与演练脚本摘要。
 - `host` Namespace 新增目标观测的发行版 ID/版本、真实 PID 1 与 SELinux 模式，用于确定性验证完整 systemd VM 和 SELinux Enforcing，而不依赖运行者填写环境结论。
 - 新增 OpenAI Chat Completions 与 Responses 本机 HTTP/SSE 协议契约验收，严格核对请求工具 Schema、流式 Tool Call 分片重组、完成原因和 usage；故障矩阵实际覆盖 429→200 有界重试、SSE 首分片后停滞和空 assistant。
 - Ubuntu 24.04 ARM64 真 VM 新增 systemd transient unit 专项：核对运行态 fragment、active/transient、规范化 ExecStart、执行文件关系和测试后无残留清理。
@@ -16,7 +19,7 @@
 - Debian 12 真实 SSH 验收新增 100 MiB Evidence 固定 256 KiB 分块流式传输，并核对 400 块、总字节数与 SHA-256。
 - Docker Tomcat 9/JDK 17 验收新增固定摘要的 Spring MVC 5.3.39、真实 `/spring/health` Controller、Interceptor 与 `/ws/{id}` WebSocket endpoint，并在静态页/Spring Controller 混合的持续 8 路 HTTP 流量下完成 12 次连续受控 Attach：1,758 次负载请求零失败，P95 2 ms、最大 5 ms；Attach 最慢 82 ms，四类必需组件、每次探针成本和 JVM identity 稳定性均通过。
 - 调查评测器新增 `BLIND_RELEASE` 门禁：发布指标只计算 FIRST，RETRY 保持相同真值并单独报告；正式总体强制冻结摘要、独立角色、答案隔离、至少 100 恶意 + 100 良性和独立受限首跑。
-- 发布构建新增资格清单硬门禁，逐一校验真实 Provider、正式盲测、真实业务 JVM 和五个目标平台证据的摘要与语义；`COMPONENTS.json` 补充应用、协议、调查引擎、规则和流程包的版本及确定性源码树摘要。
+- 发布构建新增资格清单硬门禁，逐一校验真实 Provider、正式盲测、真实业务 JVM、运维演练和五个目标平台证据的摘要与语义；`COMPONENTS.json` 补充应用、协议、调查引擎、规则和流程包的版本及确定性源码树摘要。
 - 新增 Manifest/Helper `3.0.0` 自主调查控制面：持久化 Session、EntityVersion、RelationProvenance、Lead、Hypothesis、Obligation、Action/Attempt、事件水位、发现检查点和完成快照。
 - 新增易失优先发现、进程外连/Web/账户持久化/Java 四个版本化流程包、增量规则和统一 Action 调度器；Preset 与模型动作自动消费远程 Cursor 至完成或明确 LIMITED。
 - 新增 `propose_hypothesis`、`propose_actions`、`query_investigation` 和完成投影工具；模型提案只接受既有原语、受限参数与当前 Epoch 引用。
@@ -163,7 +166,8 @@
 - 重启前未消费授权全部过期；远端写动作恢复时优先核对 Action Receipt，禁止盲目重放。
 - `PARTIAL`、`ERROR` 与 `NOT_CHECKED` 不会被报告为安全，Prompt Injection 不得扩展工具范围。
 
-[Unreleased]: https://github.com/IceWindy233/HuntWarden/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/IceWindy233/HuntWarden/compare/v0.3.0-beta.1...HEAD
+[0.3.0-beta.1]: https://github.com/IceWindy233/HuntWarden/compare/v0.2.0...v0.3.0-beta.1
 [0.2.0]: https://github.com/IceWindy233/HuntWarden/releases/tag/v0.2.0
 [0.1.1]: https://github.com/IceWindy233/HuntWarden/releases/tag/v0.1.1
 [0.1.0]: https://github.com/IceWindy233/HuntWarden/releases/tag/v0.1.0

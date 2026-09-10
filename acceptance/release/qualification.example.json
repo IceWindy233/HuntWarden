@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "commit": "replace-with-current-full-git-commit",
+  "manifestVersion": "3.0.0",
+  "evidence": {
+    "provider": { "path": "provider-real.json", "sha256": "replace-with-sha256" },
+    "providerContract": { "path": "provider-contract.json", "sha256": "replace-with-sha256" },
+    "blindEvaluation": { "path": "blind-evaluation.json", "sha256": "replace-with-sha256" },
+    "businessJvm": { "path": "business-jvm.json", "sha256": "replace-with-sha256" },
+    "operational": { "path": "operational.json", "sha256": "replace-with-sha256" },
+    "platforms": [
+      { "platformId": "ubuntu-24.04-arm64", "artifact": { "path": "ubuntu-24.04-arm64.json", "sha256": "replace-with-sha256" } },
+      { "platformId": "ubuntu-24.04-x86_64", "artifact": { "path": "ubuntu-24.04-x86_64.json", "sha256": "replace-with-sha256" } },
+      { "platformId": "debian-12-systemd-x86_64", "artifact": { "path": "debian-12-systemd-x86_64.json", "sha256": "replace-with-sha256" } },
+      { "platformId": "rocky-or-alma-9-x86_64-selinux-enforcing", "artifact": { "path": "rocky-or-alma-9-x86_64-selinux-enforcing.json", "sha256": "replace-with-sha256" } },
+      { "platformId": "amazon-linux-2023-x86_64", "artifact": { "path": "amazon-linux-2023-x86_64.json", "sha256": "replace-with-sha256" } }
+    ]
+  }
+}
