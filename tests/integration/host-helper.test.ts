@@ -242,6 +242,7 @@ def invoke(request_id, probe_kind, parameters):
 
 invalid = invoke("REQ-PROBE-INVALID", "jvm.tomcat.inventory", {"pid": 999})
 invalid_loader = invoke("REQ-PROBE-INVALID-LOADER", "jvm.class.inspect", {"className": "example.Filter", "classLoaderId": "loader\\u0000A"})
+invalid_class_prefix = invoke("REQ-PROBE-INVALID-CLASS-PREFIX", "jvm.class.inspect", {"className": "example."})
 globals_dict["run_tomcat_probe"] = lambda _request: {"components": [], "partial": True, "warnings": ["attach output truncated"]}
 partial = invoke("REQ-PROBE-PARTIAL", "jvm.tomcat.inventory", {})
 captured = {}
@@ -256,7 +257,7 @@ def dump(request):
     return {"command": "dump_class", "className": request["className"], "classLoaderId": request["classLoaderId"], "loaded": True, "modifiable": True, "sha256": "c" * 64, "artifact": {"artifactToken": "ART-" + "a" * 32, "sha256": "c" * 64, "size": 321, "expiresAt": "2099-01-01T00:00:00.000Z"}}
 globals_dict["run_tomcat_probe"] = dump
 dumped = invoke("REQ-PROBE-DUMP", "jvm.class.dump", {"className": "example.Filter", "classLoaderId": "loader-A"})
-print(json.dumps({"invalid": invalid, "invalidLoader": invalid_loader, "partial": partial, "captured": inspect_captured, "dumpCaptured": captured, "success": success, "dumped": dumped}))
+print(json.dumps({"invalid": invalid, "invalidLoader": invalid_loader, "invalidClassPrefix": invalid_class_prefix, "partial": partial, "captured": inspect_captured, "dumpCaptured": captured, "success": success, "dumped": dumped}))
 `;
 const advancingJournalRelationHarness = `
 import json, runpy, sys
@@ -571,6 +572,7 @@ print(json.dumps({"kind": kind, "partial": ledger.partial, "warnings": ledger.wa
     const output = JSON.parse(result.stdout) as {
       invalid: { status: string; error: { code: string } };
       invalidLoader: { status: string; error: { code: string } };
+      invalidClassPrefix: { status: string; error: { code: string } };
       partial: { status: string; gaps: Array<{ code: string }> };
       captured: { pid: number; command: string; className: string; classLoaderId: string };
       dumpCaptured: { pid: number; command: string; className: string; classLoaderId: string };
@@ -579,6 +581,7 @@ print(json.dumps({"kind": kind, "partial": ledger.partial, "warnings": ledger.wa
     };
     expect(output.invalid).toMatchObject({ status: "ERROR", error: { code: "INVALID_ARGUMENT" } });
     expect(output.invalidLoader).toMatchObject({ status: "ERROR", error: { code: "INVALID_ARGUMENT" } });
+    expect(output.invalidClassPrefix).toMatchObject({ status: "ERROR", error: { code: "INVALID_ARGUMENT" } });
     expect(output.partial).toMatchObject({ status: "PARTIAL", gaps: [expect.objectContaining({ code: "COLLECTOR_ERROR" })] });
     expect(output.captured).toEqual({ pid: 100, command: "inspect_class", className: "example.Filter", classLoaderId: "loader-A" });
     expect(output.success).toMatchObject({ status: "SUCCESS", objects: [{ namespace: "class", fields: { loaderId: "loader-A" } }] });

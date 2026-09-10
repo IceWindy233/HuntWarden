@@ -33,6 +33,7 @@ import { projectEffectiveAssessments } from "../../assessments/projection.js";
 import { DERIVED_RESOLVERS, DerivedObjectResolver } from "../../investigation/derived-object-resolver.js";
 import type { DerivedResolverRef, InvestigationEvent } from "../../investigation/types.js";
 import { serializeToolResultForLlm } from "../../agent/data-sanitizer.js";
+import { observedJavaClassLoaderIds } from "../../investigation/java-class-identity.js";
 
 interface RemoteResultDetails {
   status: "success" | "partial";
@@ -61,6 +62,14 @@ const PredicateSchema = Type.Union([
 ]);
 const RefSchema = Type.String({ pattern: "^OBJ-[0-9a-f-]{36}$" });
 const CursorSchema = Type.String({ pattern: "^CURSOR-[0-9a-f-]{36}$" });
+// JVM inspect/dump perform an exact Class.getName() lookup. Reject prefixes and wildcards at
+// the model boundary so an unsupported inventory request cannot become a misleading remote gap.
+const ExactJavaClassNameSchema = Type.String({
+  minLength: 1,
+  maxLength: 512,
+  pattern: "^(?:[A-Za-z_$][A-Za-z0-9_$]*\\.)*[A-Za-z_$][A-Za-z0-9_$]*$",
+  description: "现有 Fact 中的精确 Java 二进制类名，例如 lab.DynamicMarkerFilter；不能使用包前缀、尾随点或通配符。",
+});
 const severities = ["CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"] as const;
 const verdicts = ["CONFIRMED_MALICIOUS", "HIGHLY_SUSPICIOUS", "SUSPICIOUS", "BENIGN", "NO_OBSERVED_FINDING", "INCONCLUSIVE"] as const;
 const MODEL_ACTION_OPERATION_NAMES = ["enumerate", "project", "read", "match", "relate", "verify", "collect", "probe", "query_facts"] as const;
@@ -220,7 +229,7 @@ export function createV2SecurityTools(deps: V2ToolDependencies, phase: "INVESTIG
       ref: RefSchema,
       probeKind: Type.Union([Type.Literal("jvm.tomcat.inventory"), Type.Literal("jvm.class.inspect"), Type.Literal("jvm.class.dump")]),
       parameters: Type.Object({
-        className: Type.Optional(Type.String({ pattern: "^[A-Za-z_$][A-Za-z0-9_$.]{0,511}$" })),
+        className: Type.Optional(ExactJavaClassNameSchema),
         classLoaderId: Type.Optional(Type.String({ minLength: 1, maxLength: 1024, pattern: "^[^\\u0000-\\u001f\\u007f]+$" })),
       }, { additionalProperties: false }),
     }, { additionalProperties: false }), "INTRUSIVE_READ", "SAFE_REOBSERVE", (params) => {
@@ -231,6 +240,9 @@ export function createV2SecurityTools(deps: V2ToolDependencies, phase: "INVESTIG
       }
       if ((params.probeKind === "jvm.class.inspect" || params.probeKind === "jvm.class.dump") && !params.parameters.className) {
         throw new InvalidArgumentError(`${params.probeKind} 必须提供 className`);
+      }
+      if (params.probeKind === "jvm.class.inspect" || params.probeKind === "jvm.class.dump") {
+        assertObservedJavaProbeTarget(deps, params.parameters.className!, params.parameters.classLoaderId);
       }
       const granted = deps.store.listTaskGrants(deps.task.taskId).some((grant) => grant.kind === "PROBE" && grant.status === "ACTIVE" && grant.targetFingerprint === deps.task.target.hostFingerprint && grant.binding.probeKind === params.probeKind && (!grant.expiresAt || Date.parse(grant.expiresAt) > Date.now()));
       if (!granted) throw new SecurityError("PERMISSION_DENIED", `Probe ${params.probeKind} 未获得任务级授权`);
@@ -865,7 +877,7 @@ function createProposeActionsTool(deps: V2ToolDependencies): SecurityToolDefinit
       clientRef: Type.String({ minLength: 1, maxLength: 64 }),
       operationRef: Type.Union(MODEL_ACTION_OPERATION_NAMES.map((value) => Type.Literal(value)), { description: "args 形状由此字段决定。" }),
       subjectRefs: Type.Array(RefSchema, { maxItems: 32, uniqueItems: true, description: "动作归属对象。单对象动作应只放一个引用；match 可放多个文件引用。" }),
-      args: Type.Record(Type.String({ maxLength: 64 }), Type.Unknown(), { description: "完整参数。enumerate={namespace,predicate?,fields?,sort?,limit,cursorRef?,sinceHours?}; project={ref?,fields}; read={ref?,offset,length,encoding,purpose}; match={refs?,matcher:{engine:'literal'|'re2',pattern}|{engine:'yara',ruleSetRef},maxHits?,includeContext?}; relate={ref?,relation,parameters?,limit?,cursorRef?}; verify={ref?,baseline,dataSetRef?}; collect={ref?,maxBytes,purpose}; probe={ref?,probeKind,parameters}; query_facts={view,namespace?,predicate?,select?,sourceRunId?,subjectRef?,sourceKind?,completeness?,category?,authorType?,verdict?,status?,applicability?,orderBy?,limit,cursorRef?}。ref/refs 省略时只能由唯一、同类型 subjectRefs 补全。" }),
+      args: Type.Record(Type.String({ maxLength: 64 }), Type.Unknown(), { description: "完整参数。enumerate={namespace,predicate?,fields?,sort?,limit,cursorRef?,sinceHours?}; project={ref?,fields}; read={ref?,offset,length,encoding,purpose}; match={refs?,matcher:{engine:'literal'|'re2',pattern}|{engine:'yara',ruleSetRef},maxHits?,includeContext?}; relate={ref?,relation,parameters?,limit?,cursorRef?}; verify={ref?,baseline,dataSetRef?}; collect={ref?,maxBytes,purpose}; probe inventory={ref,probeKind:'jvm.tomcat.inventory',parameters:{}}；probe 精确类操作={ref,probeKind:'jvm.class.inspect'|'jvm.class.dump',parameters:{className,classLoaderId?}}，className/classLoaderId 必须原样来自已有 Fact，不能用包前缀、通配符或虚构 loader，也不能用 class.inspect/dump 枚举全部已加载类；query_facts={view,namespace?,predicate?,select?,sourceRunId?,subjectRef?,sourceKind?,completeness?,category?,authorType?,verdict?,status?,applicability?,orderBy?,limit,cursorRef?}。ref/refs 省略时只能由唯一、同类型 subjectRefs 补全。" }),
       dependsOnClientRefs: Type.Array(Type.String({ minLength: 1, maxLength: 64 }), { maxItems: 32, uniqueItems: true }),
     }, { additionalProperties: false }), { minItems: 1, maxItems: 32 }),
   }, { additionalProperties: false }), async (params, _toolCallId, signal) => {
@@ -1063,9 +1075,28 @@ function validateProposedAction(
     const parameters = args.parameters as Record<string, unknown>;
     if (probeKind === "jvm.tomcat.inventory" && Object.keys(parameters).length > 0) throw new InvalidArgumentError("jvm.tomcat.inventory 不接受 parameters");
     if ((probeKind === "jvm.class.inspect" || probeKind === "jvm.class.dump") && !parameters.className) throw new InvalidArgumentError(`${probeKind} 必须提供 className`);
+    if (probeKind === "jvm.class.inspect" || probeKind === "jvm.class.dump") {
+      assertObservedJavaProbeTarget(deps, parameters.className as string, parameters.classLoaderId as string | undefined);
+    }
     const granted = deps.store.listTaskGrants(deps.task.taskId).some((grant) => grant.kind === "PROBE" && grant.status === "ACTIVE" && grant.targetFingerprint === deps.task.target.hostFingerprint && grant.binding.probeKind === probeKind && (!grant.expiresAt || Date.parse(grant.expiresAt) > Date.now()));
     if (!granted) throw new SecurityError("PERMISSION_DENIED", `Probe ${probeKind} 未获得任务级授权`);
     resolveObject(deps, args.ref as string, "jvm");
+  }
+}
+
+function assertObservedJavaProbeTarget(deps: V2ToolDependencies, className: string, classLoaderId?: string): void {
+  const observedLoaderIds = observedJavaClassLoaderIds(
+    deps.store.listFacts(deps.task.taskId, deps.epoch.epochId),
+    className,
+  );
+  if (observedLoaderIds.length === 0) {
+    throw new InvalidArgumentError(`className ${className} 未在当前 Epoch 的 java_component/class Fact 中观察到`);
+  }
+  if (classLoaderId !== undefined && !observedLoaderIds.includes(classLoaderId)) {
+    throw new InvalidArgumentError(`classLoaderId 未与当前 Epoch 中 ${className} 的 Fact 绑定`);
+  }
+  if (classLoaderId === undefined && observedLoaderIds.length > 1) {
+    throw new InvalidArgumentError(`${className} 对应多个已观察 ClassLoader，必须提供 Fact 中的精确 classLoaderId`);
   }
 }
 

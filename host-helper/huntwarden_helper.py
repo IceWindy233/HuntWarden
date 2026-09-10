@@ -48,7 +48,7 @@ PROTOCOL_VERSION = 2
 MANIFEST_VERSION = "3.0.0"
 PROBE_JAR = pathlib.Path("/opt/huntwarden/huntwarden-tomcat-probe.jar")
 USERNAME = re.compile(r"^[a-z_][a-z0-9_-]{0,31}$", re.I)
-CLASS_NAME = re.compile(r"^[A-Za-z_$][A-Za-z0-9_$.]{0,511}$")
+CLASS_NAME = re.compile(r"^(?=.{1,512}$)(?:[A-Za-z_$][A-Za-z0-9_$]*\.)*[A-Za-z_$][A-Za-z0-9_$]*$")
 CLASS_LOADER_ID = re.compile(r"^[^\x00-\x1f\x7f]{1,1024}$")
 SYSTEM_PERSISTENCE_ROOTS = {
     "cron": ("/etc/crontab", "/etc/cron.d", "/etc/cron.hourly", "/etc/cron.daily", "/etc/cron.weekly", "/etc/cron.monthly", "/var/spool/cron"),

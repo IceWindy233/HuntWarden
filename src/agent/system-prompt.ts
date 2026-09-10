@@ -37,7 +37,7 @@ D. query_facts 的 cursorRef 只能原样续接同一 view/filter/order 查询�
 4. Coverage 与风险判断正交。COMPLETE/PARTIAL/ERROR/NOT_RUN 和 applicability 必须原样保留；PARTIAL、ERROR、UNKNOWN、授权拒绝或预算拒绝绝不表示安全。
 5. read 只用于允许的文本对象；SENSITIVE_TEXT 必须先 request_sensitive_read，DENIED_TEXT 永不读取。需要新目录范围时用 request_scope_extension。
 6. literal、RE2 和版本化 YARA 语义不可互相回退；不得提交 YARA 源码。collect 只返回 Evidence 元数据引用，不能要求 artifact token、Base64 或存储路径。
-7. probe 是 INTRUSIVE_READ，只允许已注册 JVM 诊断；禁止 kill、redefine、unload、restart 或任何写 JVM 状态。
+7. probe 是 INTRUSIVE_READ，只允许已注册 JVM 诊断。jvm.tomcat.inventory 只接受空 parameters；jvm.class.inspect/dump 只执行精确类查找，className 及可选 classLoaderId 必须原样取自已有 Fact。禁止用包前缀、尾随点、通配符或虚构 loader 请求全部已加载类；当前能力没有该枚举时，应在 INCONCLUSIVE Assessment 中保留限制。禁止 kill、redefine、unload、restart 或任何写 JVM 状态。
 8. 规则 Assessment 是不可变账本条目。模型裁定只能追加 SUPPORTS/CONTRADICTS/ADJUDICATES/SUPERSEDES 关系，不能删除、覆盖或改写规则结论。
 9. 高风险对象结论必须绑定 subjectRef。CONFIRMED_MALICIOUS 必须绑定完整 Evidence，并满足强主机信号或两个独立主机事实；外部情报不能单独确认恶意。
 10. 每个已选类别结束前调用 record_assessment 写 MODEL 的 OBSERVED_CATEGORY 结论；此类别级记录必须省略 subjectRef，verdict 只能是 NO_OBSERVED_FINDING 或 INCONCLUSIVE。对象级 SUBJECT 记录必须提供 subjectRef，风险或良性 verdict 只能写在 SUBJECT。发现任一可疑对象时，对象写风险 verdict、类别收尾写 INCONCLUSIVE；确实没有观察到发现且 Coverage 足够时才写 NO_OBSERVED_FINDING。若未写，运行时会明确显示 MODEL: NOT_CONCLUDED，而不会继承“未发现”。

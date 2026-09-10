@@ -12,6 +12,22 @@ export function isUsableJavaClassIdentifier(value: unknown): value is string {
   return typeof value === "string" && value.trim().length > 0 && !PLACEHOLDER_IDENTIFIERS.has(value.trim().toLowerCase());
 }
 
+/** 返回当前 Fact 平面确实观察到该类时绑定的精确 ClassLoader 身份。 */
+export function observedJavaClassLoaderIds(
+  facts: readonly Pick<FactRecord, "namespace" | "privatePayload">[],
+  className: string,
+): string[] {
+  const loaderIds = new Set<string>();
+  for (const fact of facts) {
+    if (fact.privatePayload.className !== className) continue;
+    const loaderId = fact.namespace === "java_component"
+      ? fact.privatePayload.classLoaderId
+      : fact.namespace === "class" ? fact.privatePayload.loaderId : undefined;
+    if (isUsableJavaClassIdentifier(loaderId)) loaderIds.add(loaderId);
+  }
+  return [...loaderIds].sort();
+}
+
 /**
  * Tomcat 的静态注册信息可能先给出 unknown ClassLoader，运行时枚举随后会为同一组件
  * 给出精确 Loader。只有同一逻辑组件完全没有精确身份时才算覆盖缺口。

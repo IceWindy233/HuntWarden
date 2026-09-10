@@ -23,7 +23,9 @@ public final class Main {
         String className = args.length > 3 ? args[3] : "";
         String classLoaderId = args.length > 4 ? args[4] : "";
         if (!command.matches("list_components|inspect_class|dump_class")) throw new IllegalArgumentException("invalid command");
-        if (!className.isEmpty() && !className.matches("[A-Za-z_$][A-Za-z0-9_$.]{0,511}")) throw new IllegalArgumentException("invalid class name");
+        if (!className.isEmpty() && (className.length() > 512 || !className.matches("(?:[A-Za-z_$][A-Za-z0-9_$]*\\.)*[A-Za-z_$][A-Za-z0-9_$]*"))) {
+            throw new IllegalArgumentException("invalid class name");
+        }
         if (!classLoaderId.isEmpty() && (classLoaderId.length() > 1024 || classLoaderId.chars().anyMatch(value -> value < 0x20 || value == 0x7f))) {
             throw new IllegalArgumentException("invalid class loader id");
         }

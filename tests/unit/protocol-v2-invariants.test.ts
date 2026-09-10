@@ -97,8 +97,15 @@ describe("Tool Protocol v2 invariants", () => {
     expect(Value.Check(probe!.parameters, {
       ref: "OBJ-00000000-0000-4000-8000-000000000001",
       probeKind: "jvm.class.inspect",
-      parameters: { className: "example.Filter", classLoaderId: "loader-A" },
+      parameters: { className: "example.Filter$Inner1", classLoaderId: "loader-A" },
     })).toBe(true);
+    for (const className of ["lab.", "org.apache.catalina.core.", "lab.*", ".lab.Filter", "lab..Filter"]) {
+      expect(Value.Check(probe!.parameters, {
+        ref: "OBJ-00000000-0000-4000-8000-000000000001",
+        probeKind: "jvm.class.inspect",
+        parameters: { className },
+      }), className).toBe(false);
+    }
     const queryFacts = investigate.find((tool) => tool.name === "query_facts")!;
     expect(Value.Check(queryFacts.parameters, { view: "facts", namespace: "process", predicate: JSON.stringify({ op: "eq", field: "pid", value: 1 }), limit: 10 })).toBe(false);
     expect(Value.Check(queryFacts.parameters, { view: "facts", namespace: "process", predicate: { op: "eq", field: "pid", value: 1 }, limit: 10 })).toBe(true);
