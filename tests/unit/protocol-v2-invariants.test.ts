@@ -249,6 +249,11 @@ describe("Tool Protocol v2 invariants", () => {
     } as never)).rejects.toThrow(/不符合工具 Schema/);
 
     const actionCount = store.listInvestigationActions(task.taskId, epoch.epochId).length;
+    await expect(proposalTool.execute("CALL-FILE-ENUMERATE-WITHOUT-SCOPE", {
+      hypothesisId: hypothesis.hypothesisId, obligationId: hypothesis.obligationId,
+      actions: [{ clientRef: "unscoped-file", operationRef: "enumerate", subjectRefs: [fileRef], args: { namespace: "file", predicate: { op: "starts_with", field: "path", value: "/tmp" }, limit: 100 }, dependsOnClientRefs: [] }],
+    } as never)).rejects.toThrow(/Scope Grant scopeRef/);
+    expect(store.listInvestigationActions(task.taskId, epoch.epochId)).toHaveLength(actionCount);
     await expect(proposalTool.execute("CALL-REDUNDANT-ENUMERATE", {
       hypothesisId: hypothesis.hypothesisId, obligationId: hypothesis.obligationId,
       actions: [{ clientRef: "redundant", operationRef: "enumerate", subjectRefs: [], args: { namespace: "process", limit: 100 }, dependsOnClientRefs: [] }],
@@ -311,11 +316,14 @@ describe("Tool Protocol v2 invariants", () => {
     const deps = { task, epoch, config: testConfig(directory), store, executor, evidence: new EvidenceStore(directory, store), capabilities, approvals: new ApprovalService(store), budgetOwner: "MODEL" as const };
     const read = createV2SecurityTools(deps).find((tool) => tool.name === "read");
     if (!read) throw new Error("read 工具未注册");
+    const enumerate = createV2SecurityTools(deps).find((tool) => tool.name === "enumerate");
+    if (!enumerate) throw new Error("enumerate 工具未注册");
     const args = { offset: 0, length: 512, encoding: "utf-8", purpose: "CONFIG_REVIEW" };
 
     // 内容出境上限由工具 Schema 承担：Agent 在调用前用同一 Schema 校验模型参数。
     expect(Value.Check(read.parameters, { ...args, ref: sensitiveRef })).toBe(true);
     expect(Value.Check(read.parameters, { ...args, ref: sensitiveRef, length: 65_537 })).toBe(false);
+    await expect(enumerate.execute("CALL-FILE-ENUMERATE-WITHOUT-SCOPE", { namespace: "file", limit: 10 } as never)).rejects.toThrow(/Scope Grant scopeRef/);
     await expect(read.execute("CALL-READ-DENIED", { ...args, ref: deniedRef } as never)).rejects.toThrow(/DENIED_TEXT/);
     await expect(read.execute("CALL-READ-NOGRANT", { ...args, ref: sensitiveRef } as never)).rejects.toThrow(/Sensitive-read Grant/);
     await expect(read.execute("CALL-READ-PROCESS", { ...args, ref: processRef } as never)).rejects.toThrow(/ObjectRef/);

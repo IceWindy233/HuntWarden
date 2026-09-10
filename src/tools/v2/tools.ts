@@ -119,6 +119,7 @@ export function createV2SecurityTools(deps: V2ToolDependencies, phase: "INVESTIG
     }, { additionalProperties: false }), "READ", "SAFE_REOBSERVE", (params) => {
       const namespace = params.namespace as NamespaceName;
       if (namespace === "task_ioc") throw new InvalidArgumentError("task_ioc 只能通过 query_facts 查询");
+      if (namespace === "file" && !params.scopeRef) throw new InvalidArgumentError("enumerate(file) 必须提供已激活的 Scope Grant scopeRef");
       assertEffectiveVerb(deps, namespace, "enumerate");
       const fields = params.fields ?? identityFields(namespace);
       for (const field of fields) {
@@ -877,7 +878,7 @@ function createProposeActionsTool(deps: V2ToolDependencies): SecurityToolDefinit
       clientRef: Type.String({ minLength: 1, maxLength: 64 }),
       operationRef: Type.Union(MODEL_ACTION_OPERATION_NAMES.map((value) => Type.Literal(value)), { description: "args 形状由此字段决定。" }),
       subjectRefs: Type.Array(RefSchema, { maxItems: 32, uniqueItems: true, description: "动作归属对象。单对象动作应只放一个引用；match 可放多个文件引用。" }),
-      args: Type.Record(Type.String({ maxLength: 64 }), Type.Unknown(), { description: "完整参数。enumerate={namespace,predicate?,fields?,sort?,limit,cursorRef?,sinceHours?}; project={ref?,fields}; read={ref?,offset,length,encoding,purpose}; match={refs?,matcher:{engine:'literal'|'re2',pattern}|{engine:'yara',ruleSetRef},maxHits?,includeContext?}; relate={ref?,relation,parameters?,limit?,cursorRef?}; verify={ref?,baseline,dataSetRef?}; collect={ref?,maxBytes,purpose}; probe inventory={ref,probeKind:'jvm.tomcat.inventory',parameters:{}}；probe 精确类操作={ref,probeKind:'jvm.class.inspect'|'jvm.class.dump',parameters:{className,classLoaderId?}}，className/classLoaderId 必须原样来自已有 Fact，不能用包前缀、通配符或虚构 loader，也不能用 class.inspect/dump 枚举全部已加载类；query_facts={view,namespace?,predicate?,select?,sourceRunId?,subjectRef?,sourceKind?,completeness?,category?,authorType?,verdict?,status?,applicability?,orderBy?,limit,cursorRef?}。ref/refs 省略时只能由唯一、同类型 subjectRefs 补全。" }),
+      args: Type.Record(Type.String({ maxLength: 64 }), Type.Unknown(), { description: "完整参数。enumerate={namespace,scopeRef?,predicate?,fields?,sort?,limit,cursorRef?,sinceHours?}，其中 namespace=file 必须先用 request_scope_extension 获得并显式填写 scopeRef；project={ref?,fields}; read={ref?,offset,length,encoding,purpose}; match={refs?,matcher:{engine:'literal'|'re2',pattern}|{engine:'yara',ruleSetRef},maxHits?,includeContext?}; relate={ref?,relation,parameters?,limit?,cursorRef?}; verify={ref?,baseline,dataSetRef?}; collect={ref?,maxBytes,purpose}; probe inventory={ref,probeKind:'jvm.tomcat.inventory',parameters:{}}；probe 精确类操作={ref,probeKind:'jvm.class.inspect'|'jvm.class.dump',parameters:{className,classLoaderId?}}，className/classLoaderId 必须原样来自已有 Fact，不能用包前缀、通配符或虚构 loader，也不能用 class.inspect/dump 枚举全部已加载类；query_facts={view,namespace?,predicate?,select?,sourceRunId?,subjectRef?,sourceKind?,completeness?,category?,authorType?,verdict?,status?,applicability?,orderBy?,limit,cursorRef?}。ref/refs 省略时只能由唯一、同类型 subjectRefs 补全。" }),
       dependsOnClientRefs: Type.Array(Type.String({ minLength: 1, maxLength: 64 }), { maxItems: 32, uniqueItems: true }),
     }, { additionalProperties: false }), { minItems: 1, maxItems: 32 }),
   }, { additionalProperties: false }), async (params, _toolCallId, signal) => {
@@ -994,6 +995,7 @@ function validateProposedAction(
   if (operationRef === "enumerate") {
     const namespace = args.namespace as NamespaceName;
     if (namespace === "task_ioc") throw new InvalidArgumentError("task_ioc 只能通过 query_facts 查询");
+    if (namespace === "file" && typeof args.scopeRef !== "string") throw new InvalidArgumentError("enumerate(file) 必须提供已激活的 Scope Grant scopeRef");
     const hasPresetFacts = deps.store.listFacts(deps.task.taskId, deps.epoch.epochId)
       .some((fact) => fact.namespace === namespace && fact.source.kind === "PRESET");
     if (hasPresetFacts && args.predicate === undefined && args.scopeRef === undefined && args.cursorRef === undefined) {
