@@ -3,8 +3,10 @@ import type { ActionReceipt, AgentStreamUpdate, ApprovalTicket, AuditEvent, Evid
 import type { SshHostKeyDiscovery } from "../executor/ssh-host-key-service.js";
 import type { Assessment, AssessmentVerdict, CoverageRun, GrantRequest, InvestigationGap, ScanEpoch, TaskGrant } from "../protocol-v2/types.js";
 import type { KnownHashDataSetSummary } from "../datasets/known-hash-registry.js";
+import type { CompletionSnapshot, DiscoveryCheckpoint, InvestigationAction, InvestigationHypothesis, InvestigationLead, InvestigationObligation, InvestigationSession } from "../investigation/types.js";
+import type { EffectiveAssessmentProjection } from "../assessments/projection.js";
 
-export const DESKTOP_API_VERSION = 10 as const;
+export const DESKTOP_API_VERSION = 13 as const;
 
 export interface ConfigProfileSummary {
   profileId: string;
@@ -116,8 +118,18 @@ export interface TaskSnapshot {
     epoch: ScanEpoch;
     coverage: CoverageRun[];
     assessments: Assessment[];
+    effectiveAssessments: EffectiveAssessmentProjection[];
     investigationGaps: InvestigationGap[];
     modelState: Array<{ category: CheckCategory; state: "CONCLUDED" | "NOT_CONCLUDED" }>;
+    investigation?: {
+      session?: InvestigationSession;
+      completion?: CompletionSnapshot;
+      leads: InvestigationLead[];
+      hypotheses: InvestigationHypothesis[];
+      obligations: InvestigationObligation[];
+      actions: InvestigationAction[];
+      discovery: DiscoveryCheckpoint[];
+    };
   };
 }
 
@@ -173,6 +185,8 @@ export interface HuntWardenDesktopApi {
   getTaskSnapshot(taskId: string): Promise<TaskSnapshot>;
   createTask(input: NewTaskInput): Promise<TaskContext>;
   startTask(taskId: string): Promise<void>;
+  pauseTask(taskId: string): Promise<void>;
+  resumeTask(taskId: string): Promise<void>;
   abortTask(taskId: string): Promise<void>;
   archiveTask(taskId: string): Promise<TaskContext>;
   restoreTask(taskId: string): Promise<TaskContext>;
@@ -186,6 +200,7 @@ export interface HuntWardenDesktopApi {
   listReports(taskId: string): Promise<ReportRecord[]>;
   readReport(input: { taskId: string; reportId?: string }): Promise<{ report: ReportRecord; markdown: string } | undefined>;
   revealEvidence(evidenceId: string): Promise<void>;
+  exportEvidence(taskId: string): Promise<string | undefined>;
   revealReport(input: { taskId: string; reportId?: string }): Promise<void>;
 
   subscribe(listener: (event: DesktopEvent) => void): () => void;

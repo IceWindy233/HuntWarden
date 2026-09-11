@@ -22,19 +22,10 @@ export function testConfig(baseDir: string): AppConfig {
     },
     storage: { baseDir, databaseFile: "runtime.db" },
     llmData: { maxTextBytes: 65_536 },
-    webshell: {
-      modifiedWithinHours: 168, maxCandidateFiles: 500, maxFileSizeBytes: 10 * 1024 * 1024,
-      maxScriptExcerptBytes: 65_536, maxAccessLogLines: 500,
-      yaraRuleDir: `${baseDir}/rules`,
-    },
-    java: { supportedContainers: ["tomcat"], allowClassDump: true, allowRuntimeModification: false, probeJar: `${baseDir}/probe.jar` },
-    account: { checkAuthorizedKeys: true, checkLoginHistory: true, maxLoginHistoryEntries: 100 },
-    persistence: { maxItemsPerSource: 500, includeUserScope: true },
-    triage: { maxProcesses: 2_000, maxConnections: 5_000, maxFiles: 5_000, maxTimelineEvents: 5_000, maxArtifactBytes: 10 * 1024 * 1024, maxProcessTreeDepth: 12 },
+    webshell: { modifiedWithinHours: 168 },
     threatIntel: {
       enabled: false, provider: "dbapp-ti", baseUrl: "https://ti.dbappsecurity.com.cn/oapi/v1/",
       apiKeyEnv: "DBAPP_TI_API_KEY", timeoutSeconds: 15, maxBatchSize: 100, cacheTtlSeconds: 3_600,
-      autoEnrichConnections: true, includePrivateAddresses: false,
     },
     remediation: { requireApproval: true, allowedTools: ["quarantine_file", "disable_account"], quarantineRoot: "/var/lib/huntwarden/quarantine" },
   };

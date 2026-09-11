@@ -1,0 +1,8 @@
+{
+  "host": "replace-with-target",
+  "port": 22,
+  "username": "replace-with-user",
+  "hostFingerprint": "SHA256:replace-with-out-of-band-fingerprint",
+  "privateKeyPath": "/absolute/path/to/id_ed25519",
+  "knownHostsPath": "/absolute/path/to/known_hosts"
+}

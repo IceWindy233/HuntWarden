@@ -10,14 +10,38 @@ if [[ -n "$(git status --porcelain)" ]]; then
 fi
 
 version="$(node -p "require('./package.json').version")"
+qualification="${HUNTWARDEN_RELEASE_QUALIFICATION:-}"
+prerelease=0
+if [[ "$version" == *-* ]]; then prerelease=1; fi
+if [[ -n "$qualification" ]]; then
+  node scripts/release-qualification-check.mjs --qualification "$qualification"
+elif ((prerelease == 0)); then
+  echo "缺少 HUNTWARDEN_RELEASE_QUALIFICATION；拒绝在没有真实 Provider、独立盲测、平台矩阵、真实业务 JVM 和运维演练证据时生成稳定发布资产。" >&2
+  exit 1
+else
+  echo "警告：正在生成未完成正式发布资格的预发布资产（${version}）。" >&2
+fi
+
 release_dir="$project_root/release/v$version"
 mkdir -p "$release_dir"
+if ((prerelease == 1)) && [[ -z "$qualification" ]]; then
+  cat > "$release_dir/PRERELEASE-NOTICE.txt" <<EOF
+HuntWarden $version is a prerelease build.
+It has not passed the complete stable-release qualification matrix.
+Missing external evidence is documented in docs/版本发布说明.md.
+Do not represent this build as a stable or fully qualified release.
+EOF
+else
+  rm -f "$release_dir/PRERELEASE-NOTICE.txt"
+fi
 
 npm ci
 npm run audit:prod
 npm run build
+node scripts/write-build-identity.mjs --output dist/build-identity.json
 npm test
 npm run probe:build
+npm run release:self-check -- --require-probe --require-build-identity --write-manifest "release/v${version}/COMPONENTS.json"
 npm run make:gui
 
 packaged_asar="$(find "$project_root/out" -path '*/HuntWarden.app/Contents/Resources/app.asar' -print -quit)"
@@ -27,6 +51,10 @@ if [[ -z "$packaged_asar" ]]; then
 fi
 if npx --no-install asar list "$packaged_asar" | grep -Eq '^/release($|/)'; then
   echo "发布资产目录被递归打入 app.asar；拒绝生成 Release。" >&2
+  exit 1
+fi
+if ! npx --no-install asar list "$packaged_asar" | grep -Fxq '/dist/build-identity.json'; then
+  echo "发布包缺少 dist/build-identity.json；无法把运行时 Epoch 绑定到构建提交。" >&2
   exit 1
 fi
 
@@ -51,11 +79,12 @@ fi
 
 (
   cd "$release_dir"
-  shasum -a 256 ./*.zip ./*.dmg 2>/dev/null > SHA256SUMS ||
-    find . -maxdepth 1 -type f \( -name '*.zip' -o -name '*.dmg' \) -print0 |
-      sort -z |
-      xargs -0 shasum -a 256 > SHA256SUMS
+  checksum_inputs=(./*.zip ./*.dmg ./COMPONENTS.json)
+  if [[ -f ./PRERELEASE-NOTICE.txt ]]; then checksum_inputs+=(./PRERELEASE-NOTICE.txt); fi
+  shasum -a 256 "${checksum_inputs[@]}" > SHA256SUMS
 )
+
+npm run release:self-check -- --require-probe --require-build-identity --artifacts "release/v${version}"
 
 echo "发布资产已生成：$release_dir"
 cat "$release_dir/SHA256SUMS"

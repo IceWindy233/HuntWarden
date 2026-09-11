@@ -10,20 +10,27 @@ describe.skipIf(!enabled)("Docker Lab-Linux-IR v2 通用入侵分诊", () => {
   afterAll(async () => await client?.close());
 
   it("稳定进程身份、关系与 process executable collect 全走 v2", async () => {
-    const processes = await client.enumerate("process", ["pid", "ppid", "uid", "username", "comm", "exe", "exeSha256", "command", "state"]);
+    const processes = await client.enumerate("process", ["pid", "ppid", "uid", "username", "comm", "exe", "exeInode", "exeSha256", "command", "state"]);
     const suspicious = processes.find((item) => String(item.fields.command).includes("/tmp/.update"));
     const deleted = processes.find((item) => String(item.fields.exe).includes(".cache-worker"));
-    expect(suspicious?.identity).toMatchObject({ bootId: expect.stringMatching(/^[0-9a-f-]{36}$/), pid: expect.any(Number), startTicks: expect.stringMatching(/^\d+$/), exeInode: expect.stringMatching(/^\d+$/), exeSha256: expect.stringMatching(/^[a-f0-9]{64}$/) });
+    expect(suspicious?.identity).toMatchObject({ bootId: expect.stringMatching(/^[0-9a-f-]{36}$/), pid: expect.any(Number), startTicks: expect.stringMatching(/^\d+$/) });
+    expect(suspicious?.fields).toMatchObject({ exeInode: expect.stringMatching(/^\d+$/), exeSha256: expect.stringMatching(/^[a-f0-9]{64}$/) });
     if (!suspicious || !deleted) throw new Error("缺少 Linux IR 进程样本");
-    const binding = { namespace: "process", identity: suspicious.identity, locator: {} };
+    const binding = { namespace: "process", identity: suspicious.identity, locator: { exeInode: suspicious.fields.exeInode, exeSha256: suspicious.fields.exeSha256 } };
     const children = await client.invoke("relate", { ...binding, relation: "children", limit: 500 });
     const connections = await client.invoke("relate", { ...binding, relation: "connects", limit: 500 });
     expect(children.edges).toBeInstanceOf(Array);
     expect(connections.objects.some((item) => item.namespace === "socket" && item.fields.remotePort === 46666)).toBe(true);
-    const collected = await client.invoke("collect", { namespace: "process", identity: deleted.identity, locator: {}, maxBytes: 10 * 1024 * 1024, purpose: "PROCESS_EXECUTABLE" }, { remoteCalls: 1, nodes: 1, bytes: 10 * 1024 * 1024, wallTimeMs: 60_000, probeCalls: 0 });
+    const executable = await client.invoke("relate", { ...binding, relation: "executable", limit: 20 });
+    expect(executable.objects.some((item) => item.namespace === "file" && /^\/usr\/bin\/python3(?:\.\d+)?$/.test(String(item.fields.path)))).toBe(true);
+    const commandFiles = await client.invoke("relate", { ...binding, relation: "command_file", limit: 20 });
+    expect(commandFiles.objects.some((item) => item.namespace === "file" && item.fields.path === "/tmp/.update")).toBe(true);
+    const startup = await client.invoke("relate", { ...binding, relation: "started_by", limit: 100 });
+    expect(startup.objects.some((item) => item.namespace === "cron_entry" && String(item.fields.command).includes("/tmp/.update"))).toBe(true);
+    const collected = await client.invoke("collect", { namespace: "process", identity: deleted.identity, locator: { exeInode: deleted.fields.exeInode, exeSha256: deleted.fields.exeSha256 }, maxBytes: 10 * 1024 * 1024, purpose: "PROCESS_EXECUTABLE" }, { remoteCalls: 1, nodes: 1, bytes: 10 * 1024 * 1024, wallTimeMs: 60_000, probeCalls: 0 });
     expect(collected.artifact?.complete).toBe(true);
     const chunks: Buffer[] = []; await client.executor.downloadArtifact({ artifactToken: collected.artifact!.token, sha256: collected.artifact!.sha256, size: collected.artifact!.size, expiresAt: collected.artifact!.expiresAt }, (chunk) => { chunks.push(Buffer.from(chunk)); });
-    expect(createHash("sha256").update(Buffer.concat(chunks)).digest("hex")).toBe(deleted.identity.exeSha256);
+    expect(createHash("sha256").update(Buffer.concat(chunks)).digest("hex")).toBe(deleted.fields.exeSha256);
     await client.maintenance("artifact_release", { artifactToken: collected.artifact!.token });
     await expect(client.invoke("project", { namespace: "process", identity: { ...suspicious.identity, startTicks: String(BigInt(String(suspicious.identity.startTicks)) + 1n) }, locator: {}, fields: ["comm"] })).rejects.toThrow(/EVIDENCE_COLLECTION_FAILED|STALE_REF/);
   }, 180_000);

@@ -78,7 +78,9 @@ export class SSHExecutor implements ProtocolV2Executor {
       throw new SecurityError("UNSUPPORTED_ENVIRONMENT", "Helper v2 capabilities Envelope 不符合协议");
     }
     const capabilities = envelope.capabilities as unknown as HelperCapabilitiesV2;
-    if (capabilities.protocolVersion !== PROTOCOL_VERSION || capabilities.manifestVersion !== MANIFEST_VERSION || !Array.isArray(capabilities.verbs)) {
+    if (capabilities.protocolVersion !== PROTOCOL_VERSION || capabilities.manifestVersion !== MANIFEST_VERSION
+      || !isRecord(capabilities.helper) || typeof capabilities.helper.version !== "string" || !/^[a-f0-9]{64}$/.test(String(capabilities.helper.sha256 ?? ""))
+      || !Array.isArray(capabilities.verbs)) {
       throw new SecurityError("UNSUPPORTED_ENVIRONMENT", "Helper v2 capabilities 与控制端 Manifest 不兼容");
     }
     return capabilities;
@@ -280,7 +282,7 @@ export class SSHExecutor implements ProtocolV2Executor {
             finish(new SecurityError("BUDGET_EXCEEDED",
               `目标输出超过 ${MAX_OUTPUT_BYTES} 字节协议硬顶。目标端 helper 自身有 ${HELPER_OUTPUT_BUDGET_BYTES} 字节（1.5 MiB）输出预算并会截断后置 partial，`
               + "因此触发硬顶说明目标端 helper 未启用输出预算或协议异常：请确认目标端 helper 版本，"
-              + "并降低配置中的 triage.maxProcesses / triage.maxConnections / triage.maxFiles / triage.maxTimelineEvents 或缩小任务时间窗后重试。"
+              + "并收窄本次原语的 limit、Scope 或任务时间窗后重试。"
               + "本次结果已整体丢弃，这是数据量问题而不是目标能力缺失。",
               { limitBytes: MAX_OUTPUT_BYTES, helperBudgetBytes: HELPER_OUTPUT_BUDGET_BYTES }));
           }

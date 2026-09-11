@@ -149,6 +149,11 @@ function registerIpc(): void {
     const taskId = text(taskIdValue, "Task ID", 64);
     void requireBackend().startTask(taskId).catch(() => undefined);
   });
+  handle(IPC.taskPause, (_event, taskId) => requireBackend().pauseTask(text(taskId, "Task ID", 64)));
+  handle(IPC.taskResume, (_event, taskIdValue) => {
+    const taskId = text(taskIdValue, "Task ID", 64);
+    void requireBackend().resumeTask(taskId).catch(() => undefined);
+  });
   handle(IPC.taskAbort, (_event, taskId) => requireBackend().abortTask(text(taskId, "Task ID", 64)));
   handle(IPC.taskArchive, (_event, taskId) => requireBackend().archiveTask(text(taskId, "Task ID", 64)));
   handle(IPC.taskRestore, (_event, taskId) => requireBackend().restoreTask(text(taskId, "Task ID", 64)));
@@ -196,6 +201,15 @@ function registerIpc(): void {
     if (!evidence.storagePath || !requireBackend().isManagedPath(evidence.storagePath)) throw new Error("该 Evidence 没有可显示的受管本地文件");
     await access(evidence.storagePath);
     shell.showItemInFolder(evidence.storagePath);
+  });
+  handle(IPC.evidenceExport, async (_event, taskIdValue) => {
+    const taskId = text(taskIdValue, "Task ID", 64);
+    const result = await dialog.showOpenDialog(mainWindow!, { title: "选择 Evidence 离线导出位置", properties: ["openDirectory", "createDirectory"] });
+    if (result.canceled || !result.filePaths[0]) return undefined;
+    const destination = join(result.filePaths[0], `HuntWarden-Evidence-${taskId}`);
+    await requireBackend().exportEvidence(taskId, destination);
+    shell.showItemInFolder(destination);
+    return destination;
   });
   handle(IPC.reportReveal, async (_event, value) => {
     const input = exactObject(value, ["taskId", "reportId"], "报告定位参数");
@@ -285,7 +299,7 @@ async function repairStoredProfiles(configurationDir: string, currentUserData: s
     if (!/\.ya?ml$/i.test(name)) continue;
     const path = join(profilesDir, name);
     const config = parseConfig(await readFile(path, "utf8"), path);
-    const changed = repairProfilePaths(config, { appPath: app.getAppPath(), currentUserData, ...(labStateDir ? { labStateDir } : {}) });
+    const changed = repairProfilePaths(config, { currentUserData, ...(labStateDir ? { labStateDir } : {}) });
     if (!changed) continue;
     await writeFile(path, serializeConfig(config), { encoding: "utf8", mode: 0o600 });
     await chmod(path, 0o600);

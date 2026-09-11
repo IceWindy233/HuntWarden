@@ -22,6 +22,15 @@ export function parseWireResponse(raw: string, expectedRequestId: string): WireR
   if (value.status !== "SUCCESS" && value.status !== "PARTIAL") throw new SecurityError("UNSUPPORTED_ENVIRONMENT", "Helper v2 返回未知状态");
   if (!Array.isArray(value.objects) || !Array.isArray(value.edges) || !Array.isArray(value.gaps)) throw new SecurityError("UNSUPPORTED_ENVIRONMENT", "Helper v2 成功 Envelope 缺少集合字段");
   for (const gap of value.gaps) if (!record(gap) || typeof gap.code !== "string" || !gapCodes.has(gap.code as CoverageGap["code"]) || typeof gap.resumable !== "boolean") throw new SecurityError("UNSUPPORTED_ENVIRONMENT", "Helper v2 返回非法 CoverageGap");
+  if (value.scan !== undefined) {
+    if (!record(value.scan)) throw new SecurityError("UNSUPPORTED_ENVIRONMENT", "Helper v2 返回非法 scan 进度");
+    const scan = value.scan;
+    if (typeof scan.sourceGeneration !== "string"
+      || !["scannedCount", "matchedCount", "returnedCount", "nextOffset"].every((key) => Number.isSafeInteger(scan[key]) && Number(scan[key]) >= 0)
+      || (scan.upperBound !== undefined && (!Number.isSafeInteger(scan.upperBound) || Number(scan.upperBound) < Number(scan.nextOffset)))
+      || typeof scan.complete !== "boolean" || scan.returnedCount !== value.objects.length
+      || scan.complete !== (value.cursor === undefined)) throw new SecurityError("UNSUPPORTED_ENVIRONMENT", "Helper v2 返回非法 scan 进度");
+  }
   if (value.status === "PARTIAL" && value.gaps.length === 0) throw new SecurityError("UNSUPPORTED_ENVIRONMENT", "PARTIAL 必须声明 CoverageGap");
   return value as unknown as WireResponse;
 }

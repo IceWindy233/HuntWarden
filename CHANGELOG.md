@@ -4,6 +4,57 @@
 
 ## [Unreleased]
 
+## [0.3.0-beta.1] - 2026-09-10
+
+### Added
+
+- 新 Epoch 固定控制端完整提交和目标 Helper 源文件 SHA-256，恢复时拒绝控制端或 Helper 身份变化；发布构建生成并打包干净提交身份文件。
+- Provider、业务 JVM 与平台资格结果升级为 schema v2：三者交叉核验当前 Helper 摘要，Provider 额外要求在线冒烟前后 DNS 集合稳定且全部为全局可路由地址。
+- 新增三套正式资格生成器：真实 Provider 从在线 Tool Call、RuntimeStore 双任务和故障契约计算；真实业务 JVM 在冻结业务流量下执行至少 12 次 Attach；五平台从目标 `host` 观测、Evidence 流传输、Artifact 清理和 SSH 重连生成证据。发布门禁逐字段交叉核验这些执行器产物，不接受只含手工 PASS 布尔值的模板。
+- 新增运维发布资格生成器：在可销毁 Linux 环境实跑全新安装、升级、权限/组件摘要、Action Receipt 保留及两种卸载；控制端再验证旧 schema 事务前备份、迁移、旧任务读取、回退、重新迁移和带摘要的脱敏 Evidence 离线导出。发布门禁绑定当前提交、Helper 与演练脚本摘要。
+- `host` Namespace 新增目标观测的发行版 ID/版本、真实 PID 1 与 SELinux 模式，用于确定性验证完整 systemd VM 和 SELinux Enforcing，而不依赖运行者填写环境结论。
+- 新增 OpenAI Chat Completions 与 Responses 本机 HTTP/SSE 协议契约验收，严格核对请求工具 Schema、流式 Tool Call 分片重组、完成原因和 usage；故障矩阵实际覆盖 429→200 有界重试、SSE 首分片后停滞和空 assistant。
+- Ubuntu 24.04 ARM64 真 VM 新增 systemd transient unit 专项：核对运行态 fragment、active/transient、规范化 ExecStart、执行文件关系和测试后无残留清理。
+- Debian 12 真实 SSH 验收现在核对易失前导事实、Discovery 保全 Action 与完整 Preset FactBatch 的事件顺序。
+- Debian 12 真实 SSH 验收新增 100 MiB Evidence 固定 256 KiB 分块流式传输，并核对 400 块、总字节数与 SHA-256。
+- Docker Tomcat 9/JDK 17 验收新增固定摘要的 Spring MVC 5.3.39、真实 `/spring/health` Controller、Interceptor 与 `/ws/{id}` WebSocket endpoint，并在静态页/Spring Controller 混合的持续 8 路 HTTP 流量下完成 12 次连续受控 Attach：1,758 次负载请求零失败，P95 2 ms、最大 5 ms；Attach 最慢 82 ms，四类必需组件、每次探针成本和 JVM identity 稳定性均通过。
+- 调查评测器新增 `BLIND_RELEASE` 门禁：发布指标只计算 FIRST，RETRY 保持相同真值并单独报告；正式总体强制冻结摘要、独立角色、答案隔离、至少 100 恶意 + 100 良性和独立受限首跑。
+- 发布构建新增资格清单硬门禁，逐一校验真实 Provider、正式盲测、真实业务 JVM、运维演练和五个目标平台证据的摘要与语义；`COMPONENTS.json` 补充应用、协议、调查引擎、规则和流程包的版本及确定性源码树摘要。
+- 新增 Manifest/Helper `3.0.0` 自主调查控制面：持久化 Session、EntityVersion、RelationProvenance、Lead、Hypothesis、Obligation、Action/Attempt、事件水位、发现检查点和完成快照。
+- 新增易失优先发现、进程外连/Web/账户持久化/Java 四个版本化流程包、增量规则和统一 Action 调度器；Preset 与模型动作自动消费远程 Cursor 至完成或明确 LIMITED。
+- 新增 `propose_hypothesis`、`propose_actions`、`query_investigation` 和完成投影工具；模型提案只接受既有原语、受限参数与当前 Epoch 引用。
+- 新增 evaluator schema v2 与 4 恶意 + 4 良性 + 4 受限控制端矩阵，分别统计发现、关系、Evidence、义务、受限识别、自主完成和 Wilson 区间。
+- 新增 Apache 运行态 Include、PHP-FPM、`sshd -T -C` Match、SSH Key/CA/principals、wtmp/btmp、systemd drop-in/用户服务、删除后运行映像和 JVM 类字节码 Evidence 的真实 Lab 覆盖。
+- 新增发布自检和组件摘要，统一核对协议、Manifest、Helper、固定 YARA RuleSet、Tomcat Probe 与发布资产 SHA-256。
+- 新增 1000/10000 个真实进程与 100000 个文件的隔离负载夹具、生产 Helper 总集校验和机器可读验收制品。
+- 规模验收新增生产控制端 SSH 完整链、50 ms 资源采样和预算快照；逐页 FactBatch 提交后立即推进调查，使首屏异常进程在末页前完成 Evidence 保全。
+
+### Changed
+
+- 配置中心改为直接编辑实际生效的 V2 Preset/Model 远程预算、本地查询预算、内容/Evidence 预算、Grant 上限与外部情报预算；配置 Schema 现在拒绝未知字段。
+- 任务设置的调查时间窗现在真实约束 Web 候选文件、认证事件和执行事件 Preset；未显式指定时仍使用各 Preset 的安全默认值。
+- 调查结束改由独立完成校验器决定；执行成功、局部风险结论与调查闭合分别呈现，报告生成不再覆盖未完成义务。
+
+### Fixed
+
+- Provider 调用现在用独立 `AbortSignal` 覆盖完整 SSE 消费期，并将带部分文本的超时 `aborted` 响应归为 Provider failure；HTTP 尝试只记录序号、状态、耗时和可重试性，不落请求正文或凭据。
+- WebSocket 运行态检查现在能调用非 public JSR356 实现类上声明的固定 public 只读 getter；真实 Tomcat `DefaultServerEndpointConfig` 不再因声明类可见性漏掉 endpoint。
+- `log_event` 改用绑定源代次与逻辑扫描位置的流式 Cursor，避免先截断为 5000 条再分页；10 万条活动/gzip 轮转日志可在声明边界内完整耗尽，并按每页实际扫描节点结算成本。
+- Preset 每页 FactBatch 提交后立即推进同一持久化调度器；Coverage 落库后即使没有新 Fact 事件，也会重算类别范围义务，避免首屏保全延迟和永久 OPEN 的聚合义务。
+- 发现范围聚合义务在候选分批规划完成后解除暂时队列限制，与检查点保持一致，并通过事件记录状态变化。
+- 易失候选动作组按活动队列剩余容量接纳，容量不足时保留候选，后续槽位释放后继续规划。
+- 易失发现按尚未完成动作规划的候选分批推进，前 100 个已规划候选不会永久阻挡后续候选；重入时保留动作幂等性。
+- 同次分页扫描的不可恢复缺口跨页保留，成功末页不会把受限检查点覆盖为 COMPLETE；从头重新扫描后重新判定完成状态。
+- Probe 参数、Java context/ClassLoader 身份、partial 传播、Evidence 主体绑定、日志源关系、事件身份、稳定分页、源变化与输出截断均改为失败关闭并保留结构化 Gap。
+- 进程枚举改用带首屏高水位的 PID keyset Cursor，单次最多扫描 5000 个节点；修复对象超过 5000 后不可达的问题，并按实际扫描节点结算远程成本。
+- Action 幂等键重复时合并义务并分别结算；活动队列达到 1000 项时阻断新增动作、记录容量 Gap，避免静默丢任务。
+- 模型返回空 assistant 时保留原始响应和审计，按 Provider failure 固化未审查类别；Provider 重试和流式硬超时由配置传入运行时。
+- Docker 删除后运行映像夹具等待 `/proc/<pid>/exe` 就绪后再 unlink，消除动态加载竞态；Apache 与 Nginx 使用独立监听端口。
+
+### Removed
+
+- 新 Profile 不再保存不被 V2 运行时消费的 Java/账户/持久化/分诊细分旋钮、本地 YARA/Probe 路径和“自动威胁情报”开关；已有 Profile 加载时会自动移除这些退役键。
+
 ## [0.2.0] - 2026-09-01
 
 ### Changed
@@ -115,7 +166,8 @@
 - 重启前未消费授权全部过期；远端写动作恢复时优先核对 Action Receipt，禁止盲目重放。
 - `PARTIAL`、`ERROR` 与 `NOT_CHECKED` 不会被报告为安全，Prompt Injection 不得扩展工具范围。
 
-[Unreleased]: https://github.com/IceWindy233/HuntWarden/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/IceWindy233/HuntWarden/compare/v0.3.0-beta.1...HEAD
+[0.3.0-beta.1]: https://github.com/IceWindy233/HuntWarden/compare/v0.2.0...v0.3.0-beta.1
 [0.2.0]: https://github.com/IceWindy233/HuntWarden/releases/tag/v0.2.0
 [0.1.1]: https://github.com/IceWindy233/HuntWarden/releases/tag/v0.1.1
 [0.1.0]: https://github.com/IceWindy233/HuntWarden/releases/tag/v0.1.0

@@ -3,15 +3,14 @@ import { resolve } from "node:path";
 import { loadConfig } from "../config/load-config.js";
 import { evaluateModelCapability, parseModelCapabilityManifest, renderModelCapabilityMarkdown } from "../evaluation/model-capability.js";
 import { RuntimeStore } from "../storage/runtime-store.js";
+import { optionValue } from "./options.js";
 
-function argument(name: string): string | undefined {
-  const index = process.argv.indexOf(name);
-  return index >= 0 ? process.argv[index + 1] : undefined;
-}
+const args = process.argv.slice(2);
+const argument = (name: string): string | undefined => optionValue(args, name);
 
 const manifestPath = argument("--manifest");
 if (!manifestPath) throw new Error("用法: npm run eval:model -- --manifest <labels.json> [--storage-dir dir] [--database-file runtime.db] [--json result.json] [--markdown result.md]");
-const config = await loadConfig();
+const config = await loadConfig(argument("--config"));
 const manifest = parseModelCapabilityManifest(JSON.parse(await readFile(resolve(manifestPath), "utf8")));
 const storageDir = argument("--storage-dir") ?? config.storage.baseDir;
 const databaseFile = argument("--database-file") ?? config.storage.databaseFile;

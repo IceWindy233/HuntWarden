@@ -1,0 +1,61 @@
+{
+  "status": "PASS",
+  "environment": {
+    "target": "tomcat:9.0-jdk17-temurin-jammy Docker + Spring MVC 5.3.39",
+    "architecture": "arm64",
+    "endpoints": [
+      "http://127.0.0.1:8081/lab/",
+      "http://127.0.0.1:8081/lab/spring/health"
+    ]
+  },
+  "traffic": {
+    "concurrency": 8,
+    "baselineRequests": 20,
+    "loadedRequests": 2018,
+    "failures": [],
+    "baselineP95Ms": 4,
+    "loadedP95Ms": 3,
+    "loadedMaxMs": 9
+  },
+  "attach": {
+    "attempts": 12,
+    "componentMisses": 0,
+    "invalidProbeCosts": 0,
+    "requiredComponents": [
+      {
+        "componentKind": "filter",
+        "className": "lab.DynamicMarkerFilter"
+      },
+      {
+        "componentKind": "websocket_endpoint",
+        "className": "lab.LabWebSocketEndpoint",
+        "mapping": "/ws/{id}"
+      },
+      {
+        "componentKind": "spring_controller",
+        "className": "lab.LabSpringController",
+        "mapping": "/health"
+      },
+      {
+        "componentKind": "spring_interceptor",
+        "className": "lab.LabSpringInterceptor"
+      }
+    ],
+    "wallTimeMs": [
+      108,
+      108,
+      92,
+      91,
+      94,
+      80,
+      80,
+      68,
+      70,
+      82,
+      86,
+      72
+    ],
+    "maxWallTimeMs": 108
+  },
+  "identityStable": true
+}

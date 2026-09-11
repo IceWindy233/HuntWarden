@@ -58,6 +58,7 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .sidebar-tasks > button.selected { border-color: rgba(57, 212, 221, .17); background: rgba(57, 212, 221, .07); }
 .task-dot { width: 6px; height: 6px; margin-top: 6px; border-radius: 50%; background: var(--muted-2); }
 .status-running, .status-recovering { background: var(--cyan); box-shadow: 0 0 8px var(--cyan); }
+.status-paused { background: var(--amber); box-shadow: 0 0 8px var(--amber); }
 .status-waiting_approval { background: var(--amber); box-shadow: 0 0 8px var(--amber); }
 .status-completed { background: var(--green); }
 .status-failed, .status-aborted { background: var(--red); }
@@ -209,6 +210,17 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .table-row > div small { margin-top: 3px; color: var(--muted-2); font-size: 8px; }
 .error-text { color: var(--red) !important; }
 .card-list { display: grid; gap: 10px; }
+.investigation-layout { display: grid; gap: 14px; }
+.investigation-state-panel { display: grid; gap: 12px; padding: 16px; border: 1px solid var(--line-soft); border-radius: 8px; background: var(--panel); }
+.investigation-state-panel > header { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.investigation-state-panel > header > div:last-child { display: flex; gap: 6px; }
+.investigation-state-panel h2, .investigation-state-panel h3 { margin: 3px 0 0; }
+.investigation-state-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
+.investigation-state-grid > div { display: grid; gap: 4px; padding: 10px; border: 1px solid var(--line-soft); border-radius: 6px; }
+.investigation-state-grid span, .investigation-items small { color: var(--muted); }
+.investigation-items { display: grid; gap: 6px; }
+.investigation-items > div { display: grid; grid-template-columns: 110px minmax(180px, 1fr) auto minmax(180px, 1fr); align-items: center; gap: 8px; padding: 8px 10px; border-top: 1px solid var(--line-soft); }
+@media (max-width: 900px) { .investigation-state-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } .investigation-items > div { grid-template-columns: 90px 1fr auto; } .investigation-items small { grid-column: 1 / -1; } }
 .finding-card { padding: 15px; border: 1px solid var(--line-soft); border-left: 2px solid var(--amber); border-radius: 8px; background: rgba(11, 25, 35, .75); }
 .finding-card header { display: flex; justify-content: space-between; gap: 12px; }
 .finding-card header > div:last-child { display: flex; gap: 5px; align-items: start; }

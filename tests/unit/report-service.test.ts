@@ -20,7 +20,7 @@ async function fixture() {
   task.checks = ["webshell"];
   task.activeEpochId = "EPOCH-00000000-0000-4000-8000-000000000041";
   store.createTask(task);
-  const epoch: ScanEpoch = { epochId: task.activeEpochId, taskId: task.taskId, targetFingerprint: task.target.hostFingerprint, protocolVersion: 2, manifestVersion: "2.1.0", helperVersion: "2.1.0", reason: "INITIAL", status: "PARTIAL", startedAt: new Date().toISOString(), finishedAt: new Date().toISOString() };
+  const epoch: ScanEpoch = { epochId: task.activeEpochId, taskId: task.taskId, targetFingerprint: task.target.hostFingerprint, protocolVersion: 2, manifestVersion: "3.0.0", helperVersion: "3.0.0", reason: "INITIAL", status: "PARTIAL", startedAt: new Date().toISOString(), finishedAt: new Date().toISOString() };
   store.createScanEpoch(epoch);
   store.putCoverageRun({ coverageId: "COV-00000000-0000-4000-8000-000000000041", taskId: task.taskId, epochId: epoch.epochId, category: "webshell", presetId: "webshell-baseline", presetVersion: "2.0.0", status: "PARTIAL", applicability: "APPLICABLE", completedCriteria: ["web-root"], missingCriteria: [{ criterion: "web-log", reasonCode: "CAPABILITY_UNAVAILABLE" }], createdAt: new Date().toISOString() });
   store.putAssessment({ assessmentId: "ASM-00000000-0000-4000-8000-000000000041", taskId: task.taskId, epochId: epoch.epochId, authorType: "RULE", category: "webshell", scope: "OBSERVED_CATEGORY", verdict: "INCONCLUSIVE", severity: "INFO", confidence: 0.5, rationale: "日志覆盖不完整", evidenceRefs: [], factRefs: [], queryRefs: [], createdAt: new Date().toISOString() });
@@ -31,7 +31,12 @@ async function fixture() {
 describe("ReportService v2", () => {
   it("INV-14/INV-20：模型报告校验失败后回退确定性投影，并保留 Coverage/Assessment/Gap", async () => {
     const { directory, store, task } = await fixture();
-    store.appendAudit({ taskId: task.taskId, event: "recovery_completed", level: "info", data: {} });
+    const previousEpochEvidenceId = "EV-00000000-0000-4000-8000-000000000040";
+    const currentEpochEvidenceId = "EV-00000000-0000-4000-8000-000000000041";
+    store.putEvidence({ evidenceId: previousEpochEvidenceId, taskId: task.taskId, host: task.target.host, type: "file", source: "/tmp/old", tool: "collect", sha256: "a".repeat(64), collectedAt: new Date().toISOString(), metadata: { epochId: "EPOCH-OLD", complete: true, integrityStatus: "VERIFIED" } });
+    store.putEvidence({ evidenceId: currentEpochEvidenceId, taskId: task.taskId, host: task.target.host, type: "file", source: "/tmp/current", tool: "collect", sha256: "b".repeat(64), collectedAt: new Date().toISOString(), metadata: { epochId: task.activeEpochId, complete: true, integrityStatus: "VERIFIED" } });
+    store.appendAudit({ taskId: task.taskId, event: "recovery_completed", level: "info", data: { epochId: "EPOCH-OLD", marker: "OLD-RECOVERY-MARKER" } });
+    store.appendAudit({ taskId: task.taskId, event: "recovery_completed", level: "info", data: { epochId: task.activeEpochId, marker: "CURRENT-RECOVERY-MARKER" } });
     const promptWithoutTools = vi.fn(async () => undefined);
     const runtime = { promptWithoutTools, lastAssistantText: () => "# 无效报告" } as unknown as SecurityAgentRuntime;
     const report = await new ReportService(directory, store).generate(task, runtime);
@@ -42,15 +47,23 @@ describe("ReportService v2", () => {
     expect(markdown).toContain("MODEL: NOT_CONCLUDED");
     expect(markdown).toContain("ASM-00000000-0000-4000-8000-000000000041");
     expect(markdown).toContain("IGAP-00000000-0000-4000-8000-000000000041");
+    expect(markdown).toContain(currentEpochEvidenceId);
+    expect(markdown).not.toContain(previousEpochEvidenceId);
+    expect(markdown).toContain("CURRENT-RECOVERY-MARKER");
+    expect(markdown).not.toContain("OLD-RECOVERY-MARKER");
     expect(report.generationMode).toBe("FALLBACK");
+    expect(report.epochId).toBe(task.activeEpochId);
     expect((await stat(report.path)).mode & 0o777).toBe(0o600);
+    await writeFile(report.path, "tampered", "utf8");
+    await expect(new ReportService(directory, store).read(task.taskId, report.reportId)).rejects.toThrow(/完整性校验失败/);
+    expect(store.listAudit(task.taskId).at(-1)?.event).toBe("report_integrity_failed");
     store.close();
   });
 
   it("INV-20：拒绝投影外的 v2 引用", async () => {
     const { directory, store, task } = await fixture();
     const service = new ReportService(directory, store);
-    const valid = [task.activeEpochId, "COV-00000000-0000-4000-8000-000000000041 PARTIAL APPLICABLE", "MODEL: NOT_CONCLUDED", "ASM-00000000-0000-4000-8000-000000000041 INCONCLUSIVE", "IGAP-00000000-0000-4000-8000-000000000041 MODEL_DID_NOT_INVESTIGATE", "INCOMPLETE"].join("\n");
+    const valid = [task.activeEpochId, "INVESTIGATION: OPEN / INCOMPLETE", "COV-00000000-0000-4000-8000-000000000041 PARTIAL APPLICABLE", "MODEL: NOT_CONCLUDED", "ASM-00000000-0000-4000-8000-000000000041 INCONCLUSIVE", "webshell::OBSERVED_CATEGORY::OBSERVED_CATEGORY INCONCLUSIVE", "IGAP-00000000-0000-4000-8000-000000000041 MODEL_DID_NOT_INVESTIGATE", "INCOMPLETE"].join("\n");
     expect(service.validate(task.taskId, valid).valid).toBe(true);
     expect(service.validate(task.taskId, `${valid}\nFACT-00000000-0000-4000-8000-999999999999`).valid).toBe(true);
     const invalid = `${valid}\nASM-00000000-0000-4000-8000-999999999999\nEV-00000000-0000-4000-8000-999999999999`;

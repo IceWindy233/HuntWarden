@@ -1,4 +1,6 @@
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { access, mkdir, mkdtemp, readFile, realpath, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
@@ -43,7 +45,7 @@ def drifting(namespace, params):
     value = original(namespace, params)
     return value if calls["n"] == 1 else "drifted-" + value
 globals_dict["v2_source_generation"] = drifting
-objects, edges, cursor, gaps = enumerate_fn(request["params"], request["epochId"])
+objects, edges, cursor, gaps, _scan = enumerate_fn(request["params"], request["epochId"])
 print(json.dumps({"objects": len(objects), "cursor": cursor, "gaps": gaps,
                   "consistency": sorted({item["consistency"] for item in objects})}, ensure_ascii=False))
 `;
@@ -63,6 +65,34 @@ prefix = "x" * 512
 cursor_a = ns["log_event_cursor"]("journald", "2026-08-27T00:00:00.000Z", "sshd", prefix + "A")
 cursor_b = ns["log_event_cursor"]("journald", "2026-08-27T00:00:00.000Z", "sshd", prefix + "B")
 print(json.dumps({"before": before, "after": after, "cursorA": cursor_a, "cursorB": cursor_b}))
+`;
+const logHistoryPaginationHarness = `
+import datetime as dt, json, pathlib, runpy, sys
+ns = runpy.run_path(sys.argv[1])
+path = pathlib.Path(sys.argv[2])
+moment = dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+path.write_text("".join(f"{moment} fixture host-helper: event={index:04d}\\n" for index in range(1200)), encoding="utf-8")
+enumerate_fn = ns["v2_enumerate"]
+globals_dict = enumerate_fn.__globals__
+globals_dict["SYSTEM_LOG_PATTERNS"] = (str(path),)
+globals_dict["AUTH_LOG_PATTERNS"] = ()
+globals_dict["journal_binary"] = lambda: None
+params = {"namespace": "log_event", "fields": ["sourceId", "cursor", "timestamp", "program", "message"], "sinceHours": 1, "limit": 500}
+objects = []
+pages = 0
+scanned = 0
+gap_codes = set()
+for _ in range(10):
+    page, _edges, cursor, gaps, scan = enumerate_fn(params, "EPOCH-LOG-HISTORY")
+    pages += 1
+    objects.extend(page)
+    scanned += scan["scannedCount"]
+    gap_codes.update(gap["code"] for gap in gaps)
+    if cursor is None:
+        break
+    params = {**params, "cursor": cursor}
+print(json.dumps({"returned": len(objects), "unique": len({json.dumps(item["identity"], sort_keys=True) for item in objects}),
+                  "pages": pages, "scanned": scanned, "gapCodes": sorted(gap_codes)}))
 `;
 const yaraIntegrityHarness = `
 import json, pathlib, runpy, sys
@@ -92,7 +122,7 @@ def forbidden_inspection(_request):
     inspections["count"] += 1
     raise RuntimeError("basic account enumeration must not inspect shadow/group data")
 globals_dict["inspect_account"] = forbidden_inspection
-objects, _edges, _cursor, _gaps = enumerate_fn({"namespace": "account", "fields": ["uid", "username"], "limit": 1}, "EPOCH-ACCOUNT")
+objects, _edges, _cursor, _gaps, _scan = enumerate_fn({"namespace": "account", "fields": ["uid", "username"], "limit": 1}, "EPOCH-ACCOUNT")
 def exploding_accounts():
     raise RuntimeError("collector must not run before predicate validation")
 globals_dict["pwd"] = types.SimpleNamespace(getpwall=exploding_accounts)
@@ -102,6 +132,132 @@ try:
 except ns["HelperError"] as exc:
     invalid_code = exc.code
 print(json.dumps({"fields": sorted(objects[0]["fields"]), "inspections": inspections["count"], "invalidCode": invalid_code}))
+`;
+const stablePaginationHarness = `
+import json, runpy, sys
+ns = runpy.run_path(sys.argv[1])
+enumerate_fn = ns["v2_enumerate"]
+globals_dict = enumerate_fn.__globals__
+globals_dict["v2_source_generation"] = lambda _namespace, _params: "stable-generation"
+rows = [{"bootId": "00000000-0000-4000-8000-000000000001", "pid": pid, "startTicks": "1", "exeInode": str(pid), "exeSha256": "a" * 64, "uid": 1000} for pid in [1, 2, 3, 10, 11]]
+def process_page(params, start_after_pid, maximum, include_hash=False, upper_bound=None):
+    upper_bound = max(row["pid"] for row in rows) if upper_bound is None else upper_bound
+    candidates = [row for row in rows if start_after_pid < row["pid"] <= upper_bound]
+    scanned = 0
+    matched = []
+    next_pid = start_after_pid
+    for row in candidates:
+        scanned += 1
+        next_pid = row["pid"]
+        predicate = params.get("predicate")
+        if predicate is None or globals_dict["v2_predicate"]("process", predicate, row):
+            matched.append(row)
+        if len(matched) >= maximum:
+            break
+    complete = scanned == len(candidates)
+    return matched, [], False, {"scannedCount": scanned, "matchedCount": len(matched), "nextOffset": next_pid, "upperBound": upper_bound, "complete": complete}
+globals_dict["v2_process_inventory"] = process_page
+params = {"namespace": "process", "fields": ["pid"], "limit": 2}
+pages = []
+for _ in range(10):
+    objects, _edges, cursor, _gaps, _scan = enumerate_fn(params, "EPOCH-STABLE-PAGE")
+    pages.append([item["fields"]["pid"] for item in objects])
+    if cursor is None:
+        break
+    params = {**params, "cursor": cursor}
+filtered, _edges, filtered_cursor, filtered_gaps, _filtered_scan = enumerate_fn({"namespace": "process", "fields": ["pid"], "predicate": {"op": "eq", "field": "pid", "value": 11}, "limit": 1}, "EPOCH-STABLE-PAGE")
+globals_dict["v2_account_base_rows"] = lambda: ([{"uid": uid, "username": f"user-{uid}", "gid": uid, "home": f"/home/{uid}", "shell": "/bin/sh"} for uid in range(6001)], [], False)
+account_params = {"namespace": "account", "fields": ["uid"], "predicate": {"op": "eq", "field": "uid", "value": 6000}, "limit": 1}
+account_first, _edges, account_cursor, account_gaps, account_first_scan = enumerate_fn(account_params, "EPOCH-STABLE-PAGE")
+account_all = list(account_first)
+account_scans = [account_first_scan]
+account_end_gaps = account_gaps
+while account_cursor is not None:
+    account_page, _edges, account_cursor, account_end_gaps, account_scan = enumerate_fn({**account_params, "cursor": account_cursor}, "EPOCH-STABLE-PAGE")
+    account_all.extend(account_page)
+    account_scans.append(account_scan)
+print(json.dumps({"pages": pages, "filtered": [item["fields"]["pid"] for item in filtered], "filteredCursor": filtered_cursor, "filteredGaps": filtered_gaps,
+                  "accountFirst": [item["fields"]["uid"] for item in account_first], "accountCursor": account_cursor,
+                  "accountFirstGaps": account_gaps, "accountFirstScan": account_first_scan,
+                  "accountAll": [item["fields"]["uid"] for item in account_all],
+                  "accountEndGaps": account_end_gaps, "accountScans": account_scans}))
+`;
+const volatileProcessExitHarness = `
+import json, runpy, types, sys
+ns = runpy.run_path(sys.argv[1])
+inventory = ns["v2_process_inventory"]
+globals_dict = inventory.__globals__
+entries = [types.SimpleNamespace(name=str(pid)) for pid in (10, 11, 12, 13)]
+globals_dict["pathlib"] = types.SimpleNamespace(Path=lambda _path: types.SimpleNamespace(iterdir=lambda: entries))
+globals_dict["deadline_exceeded"] = lambda: False
+def stable(pid, _cache, _include_hash):
+    if pid == 11:
+        raise ns["HelperError"]("EVIDENCE_COLLECTION", "process no longer exists")
+    if pid == 12:
+        raise ns["HelperError"]("EVIDENCE_COLLECTION", "process disappeared during collection")
+    return {"bootId": "boot", "pid": pid, "startTicks": "1", "exeInode": str(pid), "exeSha256": "a" * 64}
+globals_dict["stable_process"] = stable
+rows, warnings, partial, scan = inventory({}, 0, 500, True)
+def broken(_pid, _cache, _include_hash):
+    raise ns["HelperError"]("EVIDENCE_COLLECTION", "permission denied")
+globals_dict["stable_process"] = broken
+_rows, hard_warnings, hard_partial, _scan = inventory({}, 0, 500, True)
+print(json.dumps({"pids": [row["pid"] for row in rows], "warnings": warnings, "partial": partial, "scan": scan,
+                  "hardWarnings": hard_warnings, "hardPartial": hard_partial}))
+`;
+const resumableFileScanHarness = `
+import json, pathlib, runpy, sys
+ns = runpy.run_path(sys.argv[1])
+enumerate_fn = ns["v2_enumerate"]
+globals_dict = enumerate_fn.__globals__
+globals_dict["WALK_VISIT_LIMIT"] = 3
+root = pathlib.Path(sys.argv[2])
+params = {"namespace": "file", "scope": {"namespace": "file", "canonicalRoot": str(root)}, "fields": ["path"], "predicate": {"op": "ends_with"}, "limit": 1}
+# Predicate Schema 不提供 ends_with；用精确 path 让前两个扫描段都是空页。
+params["predicate"] = {"op": "eq", "field": "path", "value": str(root / "z-target.txt")}
+pages = []
+for _ in range(10):
+    objects, _edges, cursor, gaps, scan = enumerate_fn(params, "EPOCH-FILE-RESUME")
+    pages.append({"paths": [item["fields"]["path"] for item in objects], "cursor": cursor, "gaps": gaps, "scan": scan})
+    if cursor is None:
+        break
+    params = {**params, "cursor": cursor}
+print(json.dumps(pages))
+`;
+const probeContractHarness = `
+import json, runpy, sys
+ns = runpy.run_path(sys.argv[1])
+dispatch = ns["v2_dispatch"]
+globals_dict = dispatch.__globals__
+globals_dict["v2_bound_jvm"] = lambda _identity: 100
+estimate = {"remoteCalls": 1, "nodes": 10, "bytes": 1572864, "wallTimeMs": 10000, "probeCalls": 1}
+base = {"protocolVersion": 2, "epochId": "EPOCH-PROBE", "deadlineMs": 10000, "reservation": {"reservationId": "BRES-PROBE", "estimate": estimate}}
+identity = {"bootId": "00000000-0000-4000-8000-000000000001", "pid": 100, "startTicks": "123"}
+
+def invoke(request_id, probe_kind, parameters):
+    try:
+        return dispatch("probe", {**base, "requestId": request_id, "params": {"namespace": "jvm", "identity": identity, "locator": {}, "probeKind": probe_kind, "parameters": parameters}})
+    except ns["HelperError"] as exc:
+        return {"status": "ERROR", "error": {"code": exc.code}}
+
+invalid = invoke("REQ-PROBE-INVALID", "jvm.tomcat.inventory", {"pid": 999})
+invalid_loader = invoke("REQ-PROBE-INVALID-LOADER", "jvm.class.inspect", {"className": "example.Filter", "classLoaderId": "loader\\u0000A"})
+invalid_class_prefix = invoke("REQ-PROBE-INVALID-CLASS-PREFIX", "jvm.class.inspect", {"className": "example."})
+globals_dict["run_tomcat_probe"] = lambda _request: {"components": [], "partial": True, "warnings": ["attach output truncated"]}
+partial = invoke("REQ-PROBE-PARTIAL", "jvm.tomcat.inventory", {})
+captured = {}
+def inspect(request):
+    captured.update(request)
+    return {"command": "inspect_class", "className": request["className"], "classLoaderId": request["classLoaderId"], "loaded": True, "modifiable": True, "sha256": "b" * 64}
+globals_dict["run_tomcat_probe"] = inspect
+success = invoke("REQ-PROBE-SUCCESS", "jvm.class.inspect", {"className": "example.Filter", "classLoaderId": "loader-A"})
+inspect_captured = dict(captured)
+def dump(request):
+    captured.clear(); captured.update(request)
+    return {"command": "dump_class", "className": request["className"], "classLoaderId": request["classLoaderId"], "loaded": True, "modifiable": True, "sha256": "c" * 64, "artifact": {"artifactToken": "ART-" + "a" * 32, "sha256": "c" * 64, "size": 321, "expiresAt": "2099-01-01T00:00:00.000Z"}}
+globals_dict["run_tomcat_probe"] = dump
+dumped = invoke("REQ-PROBE-DUMP", "jvm.class.dump", {"className": "example.Filter", "classLoaderId": "loader-A"})
+print(json.dumps({"invalid": invalid, "invalidLoader": invalid_loader, "invalidClassPrefix": invalid_class_prefix, "partial": partial, "captured": inspect_captured, "dumpCaptured": captured, "success": success, "dumped": dumped}))
 `;
 const advancingJournalRelationHarness = `
 import json, runpy, sys
@@ -119,14 +275,44 @@ generation["value"] = "relation-generation-b"
 next_objects, next_edges, next_cursor, next_gaps = relate_fn({**params, "cursor": cursor}, "EPOCH-JOURNAL")
 enumerate_fn = ns["v2_enumerate"]
 globals_dict["v2_query_events"] = lambda namespace, hours, maximum: {"items": [{"sourceId": source_id, "cursor": f"{index:064x}", "timestamp": "2026-08-27T00:00:00.000Z", "program": "fixture", "message": f"marker-{index}", "fields": {}} for index in range(510)], "partial": False, "warnings": []}
+def log_page(params, start, maximum, predicate):
+    all_rows = [{"sourceId": source_id, "cursor": f"{index:064x}", "timestamp": "2026-08-27T00:00:00.000Z", "program": "fixture", "message": f"marker-{index}", "fields": {}} for index in range(510)]
+    page = all_rows[start:start + maximum]
+    next_offset = start + len(page)
+    return page, [], False, {"scannedCount": len(page), "matchedCount": len(page), "nextOffset": next_offset, "complete": next_offset >= len(all_rows)}
+globals_dict["v2_log_event_inventory"] = log_page
 generation["value"] = "enumerate-generation-a"
 enumerate_params = {"namespace": "log_event", "fields": ["sourceId", "cursor", "program", "message"], "sinceHours": 1, "limit": 500}
-enum_objects, enum_edges, enum_cursor, enum_gaps = enumerate_fn(enumerate_params, "EPOCH-JOURNAL")
+enum_objects, enum_edges, enum_cursor, enum_gaps, _enum_scan = enumerate_fn(enumerate_params, "EPOCH-JOURNAL")
 generation["value"] = "enumerate-generation-b"
-enum_next_objects, enum_next_edges, enum_next_cursor, enum_next_gaps = enumerate_fn({**enumerate_params, "cursor": enum_cursor}, "EPOCH-JOURNAL")
+enum_next_objects, enum_next_edges, enum_next_cursor, enum_next_gaps, _enum_next_scan = enumerate_fn({**enumerate_params, "cursor": enum_cursor}, "EPOCH-JOURNAL")
 print(json.dumps({"objects": len(objects), "fromGeneration": edges[0]["fromIdentity"]["identity"]["generation"], "gaps": gaps,
                   "nextObjects": len(next_objects), "nextGaps": next_gaps,
                   "enumNextObjects": len(enum_next_objects), "enumNextGaps": enum_next_gaps}))
+`;
+const accountSourceHarness = `
+import datetime as dt, json, pathlib, runpy, sys, types
+ns = runpy.run_path(sys.argv[1])
+root = pathlib.Path(sys.argv[2])
+wtmp, btmp = root / "wtmp", root / "btmp"
+login_fn = ns["binary_login_events"]
+globals_dict = login_fn.__globals__
+globals_dict["LOGIN_DATABASE_PATHS"] = (str(wtmp), str(btmp))
+globals_dict["shutil"].which = lambda name: "/usr/bin/last" if name == "last" else None
+def fixture_run(argv, timeout=20, check=False):
+    failed = pathlib.Path(argv[-1]).name == "btmp"
+    line = ("baduser ssh:notty 198.51.100.9 2026-09-07T00:00:00+00:00 - 2026-09-07T00:00:00+00:00  (00:00)" if failed
+            else "labroot pts/0 192.0.2.44 2026-09-07T01:00:00+00:00 - 2026-09-07T01:10:00+00:00  (00:10)")
+    return types.SimpleNamespace(returncode=0, stdout=line + "\\n", stderr="")
+globals_dict["run"] = fixture_run
+rows, warnings, sources = login_fn(dt.datetime(2026, 9, 6, tzinfo=dt.timezone.utc), 10)
+relation_fn = ns["v2_web_stack_serves_root"]
+effective = {"kind": "nginx", "_customConfig": None, "_effectiveConfigPaths": ["/etc/nginx/site.conf"]}
+root_row = {"server": "nginx", "_runtimeEffective": True, "_configSource": "/etc/nginx/site.conf"}
+print(json.dumps({"events": [item for _, item in rows], "warnings": warnings, "sources": sources,
+                  "exact": relation_fn(effective, root_row),
+                  "customRejected": relation_fn({**effective, "_customConfig": "/etc/nginx/other.conf"}, root_row),
+                  "staticRejected": relation_fn(effective, {**root_row, "_runtimeEffective": False})}))
 `;
 
 function invoke(operation: string, input: unknown) {
@@ -137,6 +323,37 @@ function invoke(operation: string, input: unknown) {
 }
 
 describe("目标辅助程序边界", () => {
+  it("轮转日志超过文件与模式上限时明确报告未扫描来源", async () => {
+    const directory = await mkdtemp(resolve(tmpdir(), "huntwarden-log-source-limit-"));
+    try {
+      await Promise.all(Array.from({ length: 205 }, (_, index) => writeFile(resolve(directory, `syslog.${index}`), "fixture")));
+      const result = spawnSync("python3", ["-c", `
+import json, runpy, sys
+ns = runpy.run_path(sys.argv[1])
+ledger = ns["SkipLedger"]()
+paths = ns["log_file_set"]((sys.argv[2] + "/syslog.*",), ledger)
+print(json.dumps({"count": len(paths), "partial": ledger.partial, "warnings": ledger.warnings()}))
+`, helper, directory], { encoding: "utf8" });
+      expect(result.status, result.stderr).toBe(0);
+      expect(JSON.parse(result.stdout)).toEqual({ count: 20, partial: true, warnings: [
+        expect.stringContaining("205 个路径"), expect.stringContaining("剩余 180 个来源未扫描"),
+      ] });
+    } finally { await rm(directory, { recursive: true, force: true }); }
+  });
+  it("不存在的可选来源路径不计为权限或 I/O 覆盖缺口", async () => {
+    const directory = await mkdtemp(resolve(tmpdir(), "huntwarden-absent-source-"));
+    try {
+      const result = spawnSync("python3", ["-c", `
+import json, pathlib, runpy, sys
+ns = runpy.run_path(sys.argv[1])
+ledger = ns["SkipLedger"]()
+kind = ns["path_kind"](pathlib.Path(sys.argv[2]) / "not-installed", ledger, follow=True)
+print(json.dumps({"kind": kind, "partial": ledger.partial, "warnings": ledger.warnings()}))
+`, helper, directory], { encoding: "utf8" });
+      expect(result.status, result.stderr).toBe(0);
+      expect(JSON.parse(result.stdout)).toEqual({ kind: "unavailable", partial: false, warnings: [] });
+    } finally { await rm(directory, { recursive: true, force: true }); }
+  });
   it("返回版本化能力清单并声明 Artifact 传输", () => {
     const result = invoke("capabilities", {
       protocolVersion: 2, requestId: "REQ-CAPABILITIES", epochId: "PRECHECK", deadlineMs: 10_000,
@@ -144,10 +361,10 @@ describe("目标辅助程序边界", () => {
     });
     expect(result.status).toBe(0);
     expect(result.envelope).toMatchObject({ protocolVersion: 2, requestId: "REQ-CAPABILITIES", status: "SUCCESS", capabilities: {
-      protocolVersion: 2, manifestVersion: "2.1.0", helper: { name: "huntwarden-helper-v2", version: "2.1.0" },
+      protocolVersion: 2, manifestVersion: "3.0.0", helper: { name: "huntwarden-helper-v2", version: "3.0.0" },
       verbs: ["enumerate", "project", "read", "match", "relate", "verify", "collect", "probe"],
       namespaces: {
-        process: { fields: expect.arrayContaining(["pid", "startTicks", "exeInode", "exeSha256"]), relations: expect.arrayContaining(["parent", "children", "opens", "connects"]) },
+        process: { fields: expect.arrayContaining(["pid", "startTicks", "exeInode", "exeSha256"]), relations: expect.arrayContaining(["parent", "children", "opens", "connects", "executable", "command_file", "started_by"]) },
         file: { relations: expect.arrayContaining(["opened_by", "referenced_by_persistence", "requested_in"]) },
         account: { relations: expect.arrayContaining(["authorized_key", "login_event"]) },
         delegation_rule: { fields: expect.arrayContaining(["mechanism", "sourceDigest", "line", "ruleDigest", "statement"]), verbs: expect.arrayContaining(["enumerate"]) },
@@ -160,6 +377,7 @@ describe("目标辅助程序边界", () => {
       limits: { maxObjects: 500, maxOutputBytes: 1_572_864, maxReadBytes: 65_536 },
     } });
     const capabilities = result.envelope.capabilities as HelperCapabilitiesV2;
+    expect(capabilities.helper.sha256).toBe(createHash("sha256").update(readFileSync(resolve(projectRoot, "host-helper/huntwarden_helper.py"))).digest("hex"));
     for (const [namespace, advertised] of Object.entries(capabilities.namespaces)) {
       const manifest = PROTOCOL_MANIFEST.namespaces[namespace as keyof typeof PROTOCOL_MANIFEST.namespaces];
       expect(manifest, `Helper 不得声明 Manifest 外 namespace: ${namespace}`).toBeDefined();
@@ -296,6 +514,81 @@ describe("目标辅助程序边界", () => {
     expect(invoke("v2_wire_error_code", "INVENTED_HELPER_ERROR").envelope).toMatchObject({ ok: true, result: "INTERNAL_ERROR" });
   });
 
+  it("稳定源分页在全局排序后切页，谓词可以命中首个采集批次之外的对象", () => {
+    const result = spawnSync("python3", ["-c", stablePaginationHarness, helper], { encoding: "utf8" });
+    expect(result.status, result.stderr).toBe(0);
+    const output = JSON.parse(result.stdout) as {
+      pages: number[][]; filtered: number[]; filteredCursor: string | null; filteredGaps: unknown[];
+      accountFirst: number[]; accountCursor: string | null; accountFirstGaps: Array<{ code: string; resumable: boolean }>;
+      accountFirstScan: { scannedCount: number; complete: boolean }; accountAll: number[];
+      accountEndGaps: unknown[]; accountScans: Array<{ scannedCount: number; complete: boolean }>;
+    };
+    const all = output.pages.flat();
+    expect(all).toHaveLength(5);
+    expect(new Set(all)).toEqual(new Set([1, 2, 3, 10, 11]));
+    expect(output.filtered).toEqual([11]);
+    expect(output.filteredCursor).toBeNull();
+    expect(output.filteredGaps).toEqual([]);
+    expect(output.accountFirst).toEqual([]);
+    expect(output.accountCursor).toBeNull();
+    expect(output.accountFirstGaps).toEqual(expect.arrayContaining([expect.objectContaining({ code: "NODE_LIMIT", resumable: true })]));
+    expect(output.accountFirstScan).toEqual(expect.objectContaining({ scannedCount: 5000, complete: false }));
+    expect(output.accountAll).toEqual([6000]);
+    expect(output.accountEndGaps).toEqual([]);
+    expect(output.accountScans.reduce((sum, scan) => sum + scan.scannedCount, 0)).toBe(6001);
+    expect(output.accountScans.at(-1)).toEqual(expect.objectContaining({ complete: true }));
+  });
+
+  it("大目录扫描在空匹配页后仍返回持久游标并最终命中后段对象", async () => {
+    const directory = await mkdtemp(resolve(await realpath(tmpdir()), "huntwarden-v2-resume-scan-"));
+    try {
+      for (const name of ["a", "b", "c", "d", "e", "f", "z-target.txt"]) await writeFile(resolve(directory, name), name);
+      const result = spawnSync("python3", ["-c", resumableFileScanHarness, helper, directory], { encoding: "utf8" });
+      expect(result.status, result.stderr).toBe(0);
+      const pages = JSON.parse(result.stdout) as Array<{ paths: string[]; cursor?: string; gaps: Array<{ code: string; resumable: boolean }>; scan: { scannedCount: number; complete: boolean } }>;
+      expect(pages.length).toBeGreaterThanOrEqual(3);
+      expect(pages[0]).toMatchObject({ paths: [], cursor: expect.any(String), gaps: [expect.objectContaining({ code: "NODE_LIMIT", resumable: true })], scan: { scannedCount: 3, complete: false } });
+      expect(pages.flatMap((page) => page.paths).map((path) => path.split("/").pop())).toEqual(["z-target.txt"]);
+      expect(pages.at(-1)?.cursor).toBeNull();
+      expect(pages.at(-1)?.scan.complete).toBe(true);
+    } finally { await rm(directory, { recursive: true, force: true }); }
+  });
+
+  it("短生命周期 PID 消失不降级完整进程扫描，其他采集错误仍保持 PARTIAL", () => {
+    const result = spawnSync("python3", ["-c", volatileProcessExitHarness, helper], { encoding: "utf8" });
+    expect(result.status, result.stderr).toBe(0);
+    const output = JSON.parse(result.stdout) as {
+      pids: number[]; warnings: string[]; partial: boolean;
+      scan: { scannedCount: number; matchedCount: number; complete: boolean };
+      hardWarnings: string[]; hardPartial: boolean;
+    };
+    expect(output).toMatchObject({ pids: [10, 13], warnings: [], partial: false, scan: { scannedCount: 4, matchedCount: 2, complete: true }, hardPartial: true });
+    expect(output.hardWarnings).toEqual(expect.arrayContaining([expect.stringContaining("permission denied")]));
+  });
+
+  it("Probe 参数不能改写对象绑定，部分输出显式降级且 ClassLoader 身份贯通", () => {
+    const result = spawnSync("python3", ["-c", probeContractHarness, helper], { encoding: "utf8" });
+    expect(result.status, result.stderr).toBe(0);
+    const output = JSON.parse(result.stdout) as {
+      invalid: { status: string; error: { code: string } };
+      invalidLoader: { status: string; error: { code: string } };
+      invalidClassPrefix: { status: string; error: { code: string } };
+      partial: { status: string; gaps: Array<{ code: string }> };
+      captured: { pid: number; command: string; className: string; classLoaderId: string };
+      dumpCaptured: { pid: number; command: string; className: string; classLoaderId: string };
+      success: { status: string; objects: Array<{ namespace: string; fields: { loaderId: string } }> };
+      dumped: { status: string; objects: Array<{ namespace: string; fields: { loaderId: string; bytecodeSha256: string } }>; artifact: { token: string; sha256: string; size: number; complete: boolean } };
+    };
+    expect(output.invalid).toMatchObject({ status: "ERROR", error: { code: "INVALID_ARGUMENT" } });
+    expect(output.invalidLoader).toMatchObject({ status: "ERROR", error: { code: "INVALID_ARGUMENT" } });
+    expect(output.invalidClassPrefix).toMatchObject({ status: "ERROR", error: { code: "INVALID_ARGUMENT" } });
+    expect(output.partial).toMatchObject({ status: "PARTIAL", gaps: [expect.objectContaining({ code: "COLLECTOR_ERROR" })] });
+    expect(output.captured).toEqual({ pid: 100, command: "inspect_class", className: "example.Filter", classLoaderId: "loader-A" });
+    expect(output.success).toMatchObject({ status: "SUCCESS", objects: [{ namespace: "class", fields: { loaderId: "loader-A" } }] });
+    expect(output.dumpCaptured).toEqual({ pid: 100, command: "dump_class", className: "example.Filter", classLoaderId: "loader-A" });
+    expect(output.dumped).toMatchObject({ status: "SUCCESS", objects: [{ namespace: "class", fields: { loaderId: "loader-A", bytecodeSha256: "c".repeat(64) } }], artifact: { token: `ART-${"a".repeat(32)}`, sha256: "c".repeat(64), size: 321, complete: true } });
+  });
+
   it("分页 Cursor 是绑定请求与源代次的不透明令牌，源变化后拒绝续页", async () => {
     const directory = await mkdtemp(resolve(tmpdir(), "huntwarden-v2-cursor-"));
     try {
@@ -403,6 +696,16 @@ describe("目标辅助程序边界", () => {
     } finally { await rm(directory, { recursive: true, force: true }); }
   });
 
+  it("log_event 通过源代次 Cursor 跨页耗尽完整历史而不先截断结果集", async () => {
+    const directory = await mkdtemp(resolve(await realpath(tmpdir()), "huntwarden-v2-log-history-"));
+    try {
+      const result = spawnSync("python3", ["-c", logHistoryPaginationHarness, helper, resolve(directory, "syslog")], { encoding: "utf8" });
+      expect(result.status, result.stderr).toBe(0);
+      const report = JSON.parse(result.stdout) as { returned: number; unique: number; pages: number; scanned: number; gapCodes: string[] };
+      expect(report).toEqual({ returned: 1200, unique: 1200, pages: 3, scanned: 1200, gapCodes: ["NODE_LIMIT"] });
+    } finally { await rm(directory, { recursive: true, force: true }); }
+  });
+
   it("journald 在 sudo 调用间推进 generation 时 contains 仍可达并显式报告 SOURCE_CHANGED", () => {
     const result = spawnSync("python3", ["-c", advancingJournalRelationHarness, helper], { encoding: "utf8" });
     expect(result.status, result.stderr).toBe(0);
@@ -416,6 +719,25 @@ describe("目标辅助程序边界", () => {
     expect(report.enumNextGaps).toEqual(expect.arrayContaining([expect.objectContaining({ code: "SOURCE_CHANGED" })]));
   });
 
+  it("wtmp/btmp 生成稳定认证事件，Web 关系仅接受精确运行态配置绑定", async () => {
+    const directory = await mkdtemp(resolve(await realpath(tmpdir()), "huntwarden-v2-account-sources-"));
+    try {
+      await writeFile(resolve(directory, "wtmp"), "");
+      await writeFile(resolve(directory, "btmp"), "");
+      const result = spawnSync("python3", ["-c", accountSourceHarness, helper, directory], { encoding: "utf8" });
+      expect(result.status, result.stderr).toBe(0);
+      const report = JSON.parse(result.stdout) as { events: Array<Record<string, unknown>>; warnings: string[]; sources: string[]; exact: boolean; customRejected: boolean; staticRejected: boolean };
+      expect(report.events).toEqual(expect.arrayContaining([
+        expect.objectContaining({ eventType: "session_login", username: "labroot", sourceAddress: "192.0.2.44", success: true }),
+        expect.objectContaining({ eventType: "authentication_failure", username: "baduser", sourceAddress: "198.51.100.9", success: false }),
+      ]));
+      expect(report.events.every((event) => /^[a-f0-9]{64}$/.test(String(event.cursor)) && /^[a-f0-9]{64}$/.test(String(event.sourceId)))).toBe(true);
+      expect(report.warnings).toEqual([]);
+      expect(report.sources).toHaveLength(2);
+      expect(report).toMatchObject({ exact: true, customRejected: false, staticRejected: false });
+    } finally { await rm(directory, { recursive: true, force: true }); }
+  });
+
   it("enumerate 分页按稳定身份排序，不重不漏；页内源变化降级为 PARTIAL 而不是丢弃整页", async () => {
     const directory = await mkdtemp(resolve(await realpath(tmpdir()), "huntwarden-v2-page-"));
     try {
@@ -424,8 +746,12 @@ describe("目标辅助程序边界", () => {
       const params = { namespace: "file", scope: { namespace: "file", canonicalRoot: directory }, fields: ["path"], limit: 2 };
       const first = invoke("enumerate", { ...base, requestId: "REQ-PAGE-1", params });
       expect(first.envelope).toMatchObject({ status: "PARTIAL", cursor: expect.any(String) });
+      const firstScan = first.envelope.scan as { scannedCount: number };
+      expect(first.envelope.cost).toMatchObject({ nodes: firstScan.scannedCount });
       const second = invoke("enumerate", { ...base, requestId: "REQ-PAGE-2", params: { ...params, cursor: first.envelope.cursor } });
       expect(second.envelope.cursor).toBeUndefined();
+      const secondScan = second.envelope.scan as { scannedCount: number };
+      expect(second.envelope.cost).toMatchObject({ nodes: secondScan.scannedCount });
       const paths = [...first.envelope.objects as Array<{ fields: { path: string } }>, ...second.envelope.objects as Array<{ fields: { path: string } }>]
         .map((object) => object.fields.path);
       expect(new Set(paths).size).toBe(3);
@@ -441,6 +767,13 @@ describe("目标辅助程序边界", () => {
       expect(report.cursor).toEqual(expect.any(String));
       expect(report.gaps).toEqual(expect.arrayContaining([expect.objectContaining({ code: "SOURCE_CHANGED", resumable: true })]));
       expect(report.consistency).toEqual(["CURSOR_BEST_EFFORT"]);
+
+      const complete = spawnSync("python3", ["-c", sourceDriftHarness, helper], {
+        input: JSON.stringify({ ...base, requestId: "REQ-COMPLETE-DRIFT", params: { ...params, limit: 500 } }), encoding: "utf8",
+      });
+      expect(complete.status, complete.stderr).toBe(0);
+      const completeReport = JSON.parse(complete.stdout) as { objects: number; cursor: string | null; gaps: Array<{ code: string }> };
+      expect(completeReport).toMatchObject({ objects: 3, cursor: null, gaps: [] });
     } finally { await rm(directory, { recursive: true, force: true }); }
   });
 
@@ -468,16 +801,13 @@ describe("目标辅助程序边界", () => {
     expect(identity.envelope).toMatchObject({ status: "ERROR", error: { code: "INVALID_ARGUMENT" } });
   });
 
-  it("INV-09：process namespace 结构上不暴露环境变量，请求该字段直接被拒", () => {
+  it("INV-09：process environment 只暴露变量名存在性元数据，不提供变量值", () => {
     const base = { protocolVersion: 2, epochId: "EPOCH-1", deadlineMs: 10_000, reservation: { reservationId: "BRES-ENV", estimate: { remoteCalls: 1, nodes: 1, bytes: 1_572_864, wallTimeMs: 10_000, probeCalls: 0 } } };
     const capabilities = invoke("capabilities", { ...base, requestId: "REQ-ENV-CAP", params: {} }).envelope.capabilities as HelperCapabilitiesV2;
-    // v1 曾把进程环境作为快照字段返回（只给变量名）；v2 Manifest 里根本没有该字段，
-    // 因此“不返回变量值”不再依赖实现自觉，而是结构上不可请求。
-    expect(capabilities.namespaces.process?.fields ?? []).not.toEqual(expect.arrayContaining(["environment", "env"]));
-    for (const field of ["environment", "env"]) {
-      const rejected = invoke("enumerate", { ...base, requestId: `REQ-ENV-${field}`, params: { namespace: "process", fields: [field], limit: 1 } });
-      expect(rejected.envelope).toMatchObject({ status: "ERROR", error: { code: "INVALID_ARGUMENT" } });
-    }
+    expect(capabilities.namespaces.process?.fields ?? []).toEqual(expect.arrayContaining(["environment"]));
+    expect(capabilities.namespaces.process?.fields ?? []).not.toContain("env");
+    const rejected = invoke("enumerate", { ...base, requestId: "REQ-ENV-RAW", params: { namespace: "process", fields: ["env"], limit: 1 } });
+    expect(rejected.envelope).toMatchObject({ status: "ERROR", error: { code: "INVALID_ARGUMENT" } });
   });
 
   it("包完整性核验拒绝目录穿越和非固定目录", () => {

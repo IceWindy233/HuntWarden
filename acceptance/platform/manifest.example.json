@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "suiteId": "ubuntu-24.04-x86_64-release",
+  "platformId": "ubuntu-24.04-x86_64",
+  "hostKeyOutOfBandVerified": true,
+  "officialImage": {
+    "official": true,
+    "source": "replace-with-official-catalog",
+    "imageId": "replace-with-exact-image-id",
+    "imageDigest": "replace-with-64-lowercase-hex",
+    "attestor": "replace-with-platform-owner",
+    "attestedAt": "2026-09-08T00:00:00.000Z"
+  },
+  "evidenceCandidates": [
+    "/etc/hostname",
+    "/usr/lib/os-release"
+  ],
+  "maxEvidenceBytes": 1048576
+}
+

@@ -1,7 +1,24 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <web-app xmlns="http://xmlns.jcp.org/xml/ns/javaee" version="4.0">
-  <display-name>HuntWarden harmless dynamic filter lab</display-name>
+  <display-name>HuntWarden harmless Tomcat runtime lab</display-name>
   <listener>
     <listener-class>lab.LabBootstrapListener</listener-class>
   </listener>
+  <servlet>
+    <servlet-name>huntwardenSpring</servlet-name>
+    <servlet-class>org.springframework.web.servlet.DispatcherServlet</servlet-class>
+    <init-param>
+      <param-name>contextClass</param-name>
+      <param-value>org.springframework.web.context.support.AnnotationConfigWebApplicationContext</param-value>
+    </init-param>
+    <init-param>
+      <param-name>contextConfigLocation</param-name>
+      <param-value>lab.LabSpringConfig</param-value>
+    </init-param>
+    <load-on-startup>1</load-on-startup>
+  </servlet>
+  <servlet-mapping>
+    <servlet-name>huntwardenSpring</servlet-name>
+    <url-pattern>/spring/*</url-pattern>
+  </servlet-mapping>
 </web-app>

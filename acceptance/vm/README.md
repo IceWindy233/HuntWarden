@@ -68,6 +68,16 @@ export HUNTWARDEN_VM_MULTIPASS_NAME=hw-vm
 npm run test:acceptance:vm:journald
 ```
 
+systemd 专项会通过 Multipass 带外通道启动一个仅执行 `/usr/bin/sleep 300` 的 transient service，经生产 SSH Helper 核对运行态 fragment、`transient`/`active`、有效 `ExecStart` 及 `executes` 文件关系，并在 `afterAll` 中停止 unit：
+
+```bash
+export HUNTWARDEN_VM_CONFIRM_SYSTEMD_FIXTURE=I_HAVE_AUTHORIZATION
+export HUNTWARDEN_VM_MULTIPASS_NAME=hw-vm
+npm run test:acceptance:vm:systemd
+```
+
+该命令只可用于已授权的临时 VM；机器可读结果写入 `result-ubuntu-24.04-aarch64-systemd.json`。
+
 Rocky Linux 9 x86_64 使用：
 
 ```bash

@@ -6,6 +6,7 @@ account_name="svc${scenario_id}"
 web_root="/srv/customer-portal/current/public"
 web_name=".asset-${scenario_id}.php"
 web_path="${web_root}/uploads/${web_name}"
+artifact_path="${web_root}/uploads/.artifact-${scenario_id}.bin"
 beacon_path="/var/tmp/.telemetry-${scenario_id}.py"
 deleted_path="/var/tmp/.kworker-${scenario_id}"
 cron_path="/etc/cron.d/system-health-${scenario_id}"
@@ -37,6 +38,10 @@ if (hash_equals('disabled', hash('sha256', $payload))) {
 ?>
 EOF
 chmod 640 "${web_path}"
+# 恰好命中 Helper 的单 Artifact 上限；稀疏文件保证夹具不会占用 100 MiB 镜像层，
+# SFTP 仍需读取并传输完整逻辑长度，适合验证流式下载与摘要。
+truncate -s 104857600 "${artifact_path}"
+artifact_sha256=$(sha256sum "${artifact_path}" | awk '{print $1}')
 
 now=$(date '+%d/%b/%Y:%H:%M:%S %z')
 printf '198.51.100.42 - - [%s] "POST /uploads/%s?token=acceptance-secret HTTP/1.1" 201 128 "-" "curl/8"\n' "${now}" "${web_name}" > /var/log/nginx/access.log
@@ -66,11 +71,11 @@ auth_time=$(date '+%b %e %H:%M:%S')
 printf '%s real-world-target sshd[731]: Accepted publickey for %s from 198.51.100.42 port 48122 ssh2\n' "${auth_time}" "${account_name}" > /var/log/auth.log
 printf '%s real-world-target sudo: %s : TTY=pts/2 ; PWD=/var/tmp ; USER=root ; COMMAND=/usr/bin/id\n' "${auth_time}" "${account_name}" >> /var/log/auth.log
 
-python3 - "${scenario_id}" "${account_name}" "${web_root}" "${web_path}" "${beacon_path}" "${deleted_path}" "${cron_path}" "${deleted_pid}" <<'PY'
+python3 - "${scenario_id}" "${account_name}" "${web_root}" "${web_path}" "${artifact_path}" "${artifact_sha256}" "${beacon_path}" "${deleted_path}" "${cron_path}" "${deleted_pid}" <<'PY'
 import json
 import sys
 
-keys = ["scenarioId", "account", "webRoot", "webPath", "beaconPath", "deletedPath", "cronPath", "deletedPid"]
+keys = ["scenarioId", "account", "webRoot", "webPath", "artifactPath", "artifactSha256", "beaconPath", "deletedPath", "cronPath", "deletedPid"]
 values = sys.argv[1:]
 payload = dict(zip(keys, values, strict=True))
 payload["deletedPid"] = int(payload["deletedPid"])

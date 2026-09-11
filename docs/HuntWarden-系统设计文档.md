@@ -1,8 +1,8 @@
 # HuntWarden 系统设计文档
 
-> 状态：Accepted / v2.1 P1 验证基线（2026-09-01）
+> 状态：Accepted / Manifest 3.0 自主调查工程基线（2026-09-08）
 >
-> 当前实现：Tool Protocol v2，Manifest/Helper `2.1.0`。代码与门禁基线为 `331d395e8f00b020490a32ebecf39e297815e36b`；当前支持范围与验证证据统一收录于 [`支持与验收说明.md`](支持与验收说明.md)。
+> 当前实现：Tool Protocol v2，Manifest/Helper `3.0.0`，调查引擎 `1.0.0`。当前工作树已通过工程门禁，但尚未冻结成发布提交；支持范围与验证证据统一收录于 [`支持与验收说明.md`](支持与验收说明.md)。
 >
 > 决策：v2 直接替换 v1，不提供运行时双协议兼容；旧任务只保证可读，不保证恢复执行。
 >
@@ -131,7 +131,7 @@ effectiveCapability
 - **Model Fact Plane**：由 Private Fact 派生，经敏感度策略和脱敏后供 `query_facts` 使用。
 - **Evidence Plane**：原始文件、Class Dump 等字节对象；模型只看 Evidence 元数据引用。
 
-`tool_runs` 不是事实数据库，只保存调用状态、参数摘要、Fact/Edge/Evidence 引用、cursor/gap 和 cost。
+`tool_runs` 不是事实数据库，只保存 Task + Epoch 绑定的调用状态、控制端私有重放参数、Fact/Edge/Evidence 引用、cursor/gap 和 cost。模型消息与待处理输入同样绑定 Epoch；迁移前无 Epoch 的记录不会进入当前调查。
 
 原始 `read` 文本不写入 `tool_runs`；需要保留完整原始字节时只能进入 Evidence Plane。
 
@@ -241,7 +241,7 @@ Helper 不生成 `FACT-*` 或 ObjectRef，只返回 Wire Observation；控制端
 
 关系由 Manifest 定义，不允许模型创建自定义 relation。
 
-ToolRun 只记录运行语义和引用；完整敏感调用参数若需要重放，保存到仅控制端可读的私有调用表。
+ToolRun 只记录运行语义、控制端私有重放参数和引用；ToolCall ID 与 task、epoch、工具、风险、重放策略和参数固定绑定，绑定不一致或终态 ID 再执行都失败关闭。
 
 一个 Wire Response 规范化出的 Fact、Ref、Edge 与 ToolRun 终态必须作为一个 FactBatch 原子提交：
 
@@ -304,7 +304,7 @@ Manifest 版本化**结构协议**。Preset、确定性规则、literal/RE2 patt
 | Sensitive-read Grant | task + target + content class + scope | 否 |
 | Probe Grant | task + target + probe + subject scope | 否 |
 | Budget Extension | task | 否 |
-| Write Approval | task + target + tool + args digest + actionId | 是，仅一次 |
+| Write Approval | task + epoch + target + tool + args digest + actionId | 是，仅一次 |
 
 `GrantRequest`（等待审批）与 `TaskGrant`（已经生效）必须分表、分状态机；两者不得复用 Write Approval。
 
@@ -764,7 +764,7 @@ v1 历史任务只保留任务元数据、Evidence 与已生成的报告文件�
 - REMEDIATE 模式；
 - 工具位于写白名单；
 - 一次性 Write Approval；
-- task / target / tool / args digest / actionId 全绑定；
+- task / epoch / target / tool / args digest / actionId 全绑定；
 - 文件动作绑定完整 Evidence 并复核当前对象身份/哈希；
 - 写前持久化 STARTED Action Receipt；
 - 写后持久化终态；
@@ -822,9 +822,9 @@ Helper 应拆为 protocol / envelope / errors / budget / policy / identity / pre
 
 ### 14.3 配置与迁移
 
-v2 Profile 使用 `schemaVersion: 2`，预算和 data policy 显式分组。配置只能收紧 Manifest 安全上限。
+v2 Profile 使用 `schemaVersion: 2`，预算和 data policy 显式分组。配置只能收紧 Manifest 安全上限；所有对象层级拒绝未知字段，GUI 只暴露运行时真正消费的预算与策略。
 
-v1 → v2 必须使用显式、可测试的结构迁移，而不是简单补默认值；旧预算键在保存后删除。自定义 Helper 路径等无法安全推断的配置要求用户确认。
+v1 → v2 必须使用显式、可测试的结构迁移，而不是简单补默认值；旧预算键、问题型检测旋钮和本地资产路径在标准化后删除。自定义 Helper 路径等无法安全推断的配置要求用户确认。任务的 `timeWindowHours` 必须传递到所有带时间窗的 Preset 步骤，不得只出现在 Prompt 或 GUI。
 
 ---
 
@@ -846,7 +846,7 @@ v1 → v2 必须使用显式、可测试的结构迁移，而不是简单补默�
 | INV-10 | 所有远程动作先预算预留再执行 |
 | INV-11 | 截断必须可继续或结构化声明不可继续 |
 | INV-12 | Query cursor 不得因字节截断跳过事实 |
-| INV-13 | FactBatch 与 ToolRun 终态原子提交 |
+| INV-13 | FactBatch 只能与同 Task + Epoch 的 STARTED ToolRun 终态原子提交 |
 | INV-14 | PARTIAL/ERROR/NOT_RUN/UNKNOWN 不得展示为安全 |
 | INV-15 | 规则只消费当前 PresetRun Fact |
 | INV-16 | Active Grant 可恢复；Pending Request 中断过期；不得复用 Write Approval |
@@ -886,12 +886,12 @@ V2 实现已经满足以下完成条件：
 - 模型远程工具不再按检测问题枚举；
 - 五类现有检测都在 v2 Fact + Preset + RULE Assessment 上运行；
 - 模型可通过通用原语完成五套 Lab 的非 Preset 定位路径；
-- Fact/Query/Coverage/Assessment/Evidence 全部具备 task+epoch+provenance 追踪；
+- Fact/Query/Coverage/Assessment/Evidence、ToolRun、消息、输入、审批、动作回执和报告具备 task+epoch 追踪或当前 Epoch 投影；
 - Coverage 与 RULE/MODEL/HUMAN Assessment 在 GUI/报告中独立呈现；
 - INV-01 ~ INV-28 均有自动化或 release 层验证归属；
 - 仓库不存在运行时 Helper v1 协议分支。
 
-2026-09-01 的发布层状态为 `PASS_WITH_LIMITATIONS`：Ubuntu 24.04 ARM64 已完成真实 VM smoke、journald、模型评测和五类 × 三 Profile 验收，但 Provider 首跑空响应、非法引用与其他发行版尚未覆盖仍需保留为限制。后续工作只记录在 [`后续工作路线.md`](后续工作路线.md)，不再在设计正文保留已执行的迁移步骤。
+2026-09-08 的工程层状态为 `ENGINEERING_PASS / RELEASE_BLOCKED`：Manifest `3.0.0` 已完成控制端 4×4×4 回放、两种 OpenAI-compatible 协议的本机 HTTP/SSE 契约、Docker 五类 Lab、Debian 动态 SSH、Ubuntu 24.04 ARM64 smoke/journald/systemd transient、RE2、Java 和 GUI 验收；进程/文件规模分页、十万条轮转/gzip 日志完整分页、100 MiB Evidence 流式传输和隔离 Tomcat 持续 8 路 HTTP 流量下的 12 次连续 Attach 已有实测。新 Epoch 在起止阶段绑定干净控制端提交与 Helper SHA-256，正式资格生成器和发布构建身份已落地。真实厂商 Provider、100+100 独立盲测、真实业务 Attach 负载、扩展平台与干净提交发布资产仍未完成。逐项状态记录在 [`后续工作路线.md`](后续工作路线.md)。
 
 ---
 

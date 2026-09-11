@@ -7,16 +7,28 @@ import type { ReportGenerationMode, ReportRecord, TaskContext } from "../domain/
 import type { SecurityAgentRuntime } from "../runtime/security-agent-runtime.js";
 import type { RuntimeStore } from "../storage/runtime-store.js";
 import type { Assessment, CoverageRun, InvestigationGap } from "../protocol-v2/types.js";
+import type { CompletionSnapshot, DiscoveryCheckpoint, InvestigationAction, InvestigationHypothesis, InvestigationLead, InvestigationObligation, InvestigationSession } from "../investigation/types.js";
+import { projectEffectiveAssessments, type EffectiveAssessmentProjection } from "../assessments/projection.js";
 
 interface ReportProjectionV2 {
   task: { taskId: string; epochId: string; target: string; mode: string; checks: string[]; request: string };
   coverage: CoverageRun[];
   assessments: Assessment[];
+  effectiveAssessments: EffectiveAssessmentProjection[];
   investigationGaps: InvestigationGap[];
   evidence: Record<string, unknown>[];
   actions: Record<string, unknown>[];
   recovery: Record<string, unknown>[];
   modelState: Array<{ category: string; state: "CONCLUDED" | "NOT_CONCLUDED" }>;
+  investigation: {
+    session?: InvestigationSession;
+    completion?: CompletionSnapshot;
+    leads: InvestigationLead[];
+    hypotheses: InvestigationHypothesis[];
+    obligations: InvestigationObligation[];
+    actions: InvestigationAction[];
+    discovery: DiscoveryCheckpoint[];
+  };
 }
 
 export interface ReportValidation { valid: boolean; errors: string[] }
@@ -99,7 +111,7 @@ export class ReportService {
       await writeFile(path, markdown, { encoding: "utf8", mode: 0o600, flag: "wx" });
       await chmod(path, 0o600);
       const report: ReportRecord = {
-        reportId: createId("report"), taskId: current.taskId, version, path,
+        reportId: createId("report"), taskId: current.taskId, epochId: current.activeEpochId, version, path,
         sha256: createHash("sha256").update(markdown).digest("hex"), generationMode,
         validationErrors: [...new Set(validationErrors)], createdAt: new Date().toISOString(),
       };
@@ -107,7 +119,7 @@ export class ReportService {
       current.status = "COMPLETED";
       if (current.interruption) current.interruption.recoveryRequired = false;
       this.store.saveTask(current);
-      this.store.appendAudit({ taskId: current.taskId, event: "report_generated", level: "info", data: { reportId: report.reportId, version, path, generationMode } });
+      this.store.appendAudit({ taskId: current.taskId, event: "report_generated", level: "info", data: { reportId: report.reportId, epochId: report.epochId, version, path, generationMode } });
       return report;
     } catch (error) {
       current.status = "FAILED";
@@ -127,7 +139,13 @@ export class ReportService {
     await this.importLegacy(taskId);
     const report = reportId ? this.store.getReport(taskId, reportId) : this.store.latestReport(taskId);
     if (!report) return undefined;
-    return { report, markdown: await readFile(report.path, "utf8") };
+    const markdown = await readFile(report.path, "utf8");
+    const actualSha256 = createHash("sha256").update(markdown).digest("hex");
+    if (actualSha256 !== report.sha256) {
+      this.store.appendAudit({ taskId, event: "report_integrity_failed", level: "error", data: { reportId: report.reportId, version: report.version, expectedSha256: report.sha256, actualSha256 } });
+      throw new Error(`报告完整性校验失败: ${report.reportId}`);
+    }
+    return { report, markdown };
   }
 
   private async importLegacy(taskId: string): Promise<void> {
@@ -177,15 +195,35 @@ export class ReportService {
       state: assessments.some((assessment) => assessment.authorType === "MODEL" && assessment.category === category && assessment.scope === "OBSERVED_CATEGORY")
         ? "CONCLUDED" as const : "NOT_CONCLUDED" as const,
     }));
+    const session = this.store.getInvestigationSession(task.taskId, epochId);
+    const completion = session?.completionSnapshotRef
+      ? this.store.getCompletionSnapshot(task.taskId, epochId, session.completionSnapshotRef)
+      : undefined;
     return Object.freeze({
       task: { taskId: task.taskId, epochId, target: task.target.host, mode: task.mode, checks: task.checks, request: task.request },
-      coverage, assessments, investigationGaps: this.store.listInvestigationGaps(task.taskId, epochId),
-      evidence: this.store.listEvidence(task.taskId).map(({ storagePath: _private, ...item }) => item as unknown as Record<string, unknown>),
-      actions: [...this.store.listApprovals(task.taskId), ...this.store.listActionReceipts(task.taskId)] as unknown as Record<string, unknown>[],
+      coverage, assessments,
+      effectiveAssessments: projectEffectiveAssessments(assessments, this.store.listAssessmentRelations(task.taskId, epochId)),
+      investigationGaps: this.store.listInvestigationGaps(task.taskId, epochId),
+      evidence: this.store.listEvidence(task.taskId)
+        .filter((item) => item.metadata?.epochId === epochId)
+        .map(({ storagePath: _private, ...item }) => item as unknown as Record<string, unknown>),
+      actions: [
+        ...this.store.listApprovals(task.taskId).filter((item) => item.epochId === epochId),
+        ...this.store.listActionReceipts(task.taskId).filter((item) => item.epochId === epochId),
+      ] as unknown as Record<string, unknown>[],
       recovery: this.store.listAudit(task.taskId)
-        .filter((item) => item.event.includes("recover") || item.event.includes("interrupt"))
+        .filter((item) => item.data.epochId === epochId && (item.event.includes("recover") || item.event.includes("interrupt")))
         .map(({ eventId: _eventId, taskId: _taskId, ...item }) => item as unknown as Record<string, unknown>),
       modelState,
+      investigation: {
+        ...(session ? { session } : {}),
+        ...(completion ? { completion } : {}),
+        leads: this.store.listInvestigationLeads(task.taskId, epochId),
+        hypotheses: this.store.listInvestigationHypotheses(task.taskId, epochId),
+        obligations: this.store.listInvestigationObligations(task.taskId, epochId),
+        actions: this.store.listInvestigationActions(task.taskId, epochId),
+        discovery: this.store.listDiscoveryCheckpoints(task.taskId, epochId),
+      },
     });
   }
 
@@ -216,21 +254,31 @@ export class ReportService {
       if (!markdown.includes(assessment.assessmentId)) errors.push(`报告未展示 Assessment: ${assessment.assessmentId}`);
       if (!markdown.includes(assessment.verdict)) errors.push(`报告未展示 Assessment verdict: ${assessment.assessmentId}/${assessment.verdict}`);
     }
+    for (const effective of projection.effectiveAssessments) {
+      if (!markdown.includes(effective.projectionKey) || !markdown.includes(effective.conclusion)) errors.push(`报告未展示有效结论: ${effective.projectionKey}/${effective.conclusion}`);
+      if (effective.conclusion === "CONFLICT" && !markdown.includes("UNRESOLVED")) errors.push(`冲突结论必须显示 UNRESOLVED: ${effective.projectionKey}`);
+    }
     for (const gap of projection.investigationGaps) if (!markdown.includes(gap.gapId) || !markdown.includes(gap.code)) errors.push(`报告未展示 InvestigationGap: ${gap.gapId}/${gap.code}`);
     for (const action of projection.actions) {
       const id = String(action.actionId ?? ""); const status = String(action.status ?? "");
       if (id && (!markdown.includes(id) || !markdown.includes(status))) errors.push(`报告未展示动作: ${id}/${status}`);
     }
+    const completion = projection.investigation.completion;
+    if (completion && (!markdown.includes(completion.snapshotRef) || !markdown.includes(completion.investigationStatus))) errors.push(`报告未展示调查完成快照: ${completion.snapshotRef}/${completion.investigationStatus}`);
+    if (!completion && !markdown.includes("INVESTIGATION: OPEN / INCOMPLETE")) errors.push("未冻结调查必须显示 INVESTIGATION: OPEN / INCOMPLETE");
+    for (const obligation of projection.investigation.obligations) if (!markdown.includes(obligation.obligationId) || !markdown.includes(obligation.status)) errors.push(`报告未展示调查义务: ${obligation.obligationId}/${obligation.status}`);
+    for (const action of projection.investigation.actions) if (!markdown.includes(action.actionId) || !markdown.includes(action.status)) errors.push(`报告未展示调查动作: ${action.actionId}/${action.status}`);
+    for (const checkpoint of projection.investigation.discovery) if (!markdown.includes(checkpoint.checkpointId) || !markdown.includes(checkpoint.status)) errors.push(`报告未展示发现检查点: ${checkpoint.checkpointId}/${checkpoint.status}`);
     if (projection.coverage.some((run) => run.status !== "COMPLETE" || run.applicability === "UNKNOWN") && !markdown.includes("INCOMPLETE")) errors.push("不完整 Coverage 必须显示 INCOMPLETE");
     return { valid: errors.length === 0, errors: [...new Set(errors)] };
   }
 
   private reportContextV2(projection: ReportProjectionV2): { text: string; incomplete: boolean; truncated: boolean } {
-    const required = { task: projection.task, coverage: projection.coverage, assessments: projection.assessments, investigationGaps: projection.investigationGaps, actions: projection.actions, modelState: projection.modelState };
+    const required = { task: projection.task, coverage: projection.coverage, assessments: projection.assessments, effectiveAssessments: projection.effectiveAssessments, investigationGaps: projection.investigationGaps, actions: projection.actions, modelState: projection.modelState, investigation: projection.investigation };
     const full = encodeWithinBudget(projection.evidence.length, (keep) => ({
       ...required, evidence: projection.evidence.slice(0, keep), ...(keep < projection.evidence.length ? { evidenceOmitted: projection.evidence.length - keep } : {}),
       recovery: projection.recovery,
-      instruction: "Coverage、RULE、MODEL、HUMAN 必须并列；UNKNOWN/PARTIAL/ERROR/NOT_RUN 固定写 INCOMPLETE；MODEL 状态按给定值逐类原样写为 MODEL: CONCLUDED 或 MODEL: NOT_CONCLUDED。",
+      instruction: "Coverage、RULE、MODEL、HUMAN 必须并列；effectiveAssessments 必须逐项原样展示 projectionKey 与 conclusion，CONFLICT 固定写 UNRESOLVED；UNKNOWN/PARTIAL/ERROR/NOT_RUN 固定写 INCOMPLETE；MODEL 状态按给定值逐类原样写为 MODEL: CONCLUDED 或 MODEL: NOT_CONCLUDED。",
     }), this.maxLlmBytes);
     return { text: full.text, incomplete: full.overBudget, truncated: full.truncated };
   }
@@ -248,9 +296,21 @@ export class ReportService {
       const unsafe = run.status !== "COMPLETE" || run.applicability === "UNKNOWN" ? " / INCOMPLETE" : "";
       lines.push(`- ${category}: ${run.coverageId} / ${run.status} / ${run.applicability}${unsafe}；MODEL: ${model.state}`);
     }
+    lines.push("", "## 调查闭合与调度状态", "");
+    const completion = projection.investigation.completion;
+    lines.push(completion
+      ? `- ${completion.snapshotRef}: ${completion.investigationStatus} / eventSeq ${completion.maxEventSeq}`
+      : "- INVESTIGATION: OPEN / INCOMPLETE");
+    for (const checkpoint of projection.investigation.discovery) lines.push(`- ${checkpoint.checkpointId}: DISCOVERY ${checkpoint.namespace} / ${checkpoint.status} / scanned ${checkpoint.scannedCount} / matched ${checkpoint.matchedCount} / returned ${checkpoint.returnedCount}${checkpoint.remainingDescription ? ` / ${checkpoint.remainingDescription}` : ""}`);
+    for (const hypothesis of projection.investigation.hypotheses) lines.push(`- ${hypothesis.hypothesisId}: ${hypothesis.status} / subject ${hypothesis.subjectRef} / ${hypothesis.claim}`);
+    for (const obligation of projection.investigation.obligations) lines.push(`- ${obligation.obligationId}: OBLIGATION ${obligation.obligationKind} / ${obligation.status} / required ${obligation.required}${obligation.gapRefs.length ? ` / gaps ${obligation.gapRefs.join(", ")}` : ""}`);
+    for (const action of projection.investigation.actions) lines.push(`- ${action.actionId}: ACTION ${action.operationRef} / ${action.status}${action.error ? ` / ${action.error}` : ""}`);
     lines.push("", "## Assessment Ledger", "");
     if (projection.assessments.length === 0) lines.push("- 尚无 RULE / MODEL / HUMAN Assessment；不得推断为无风险。");
     for (const item of projection.assessments) lines.push(`- ${item.assessmentId}: ${item.authorType} / ${item.category} / ${item.verdict} / ${item.severity} / subject ${item.subjectRef ?? "OBSERVED_CATEGORY"} / Facts ${item.factRefs.join(", ") || "无"} / Evidence ${item.evidenceRefs.join(", ") || "无"}\n  ${item.rationale}`);
+    lines.push("", "## Effective Assessment Projection", "");
+    if (projection.effectiveAssessments.length === 0) lines.push("- 尚无有效结论投影；不得推断为无风险。");
+    for (const item of projection.effectiveAssessments) lines.push(`- ${item.projectionKey}: ${item.conclusion}${item.conclusion === "CONFLICT" ? " / UNRESOLVED" : ""} / effective ${item.effectiveAssessmentIds.join(", ") || "无"} / superseded ${item.supersededAssessmentIds.join(", ") || "无"}${item.ignoredRelationIds.length ? ` / ignored relations ${item.ignoredRelationIds.join(", ")}` : ""}`);
     lines.push("", "## Investigation Gaps", "");
     if (projection.investigationGaps.length === 0) lines.push("- 无模型调查限制记录。");
     for (const gap of projection.investigationGaps) lines.push(`- ${gap.gapId}: ${gap.code} / ${gap.reasonCode} / ${gap.category ?? "task"}`);

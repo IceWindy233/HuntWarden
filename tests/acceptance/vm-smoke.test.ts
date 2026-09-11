@@ -48,11 +48,12 @@ describe.skipIf(!enabled)("授权真实 VM v2 只读兼容性冒烟", () => {
   afterAll(async () => await remote?.close());
 
   it("绑定 Manifest v2、架构和受支持 namespace", async () => {
-    expect(capabilities).toMatchObject({ protocolVersion: 2, manifestVersion: "2.1.0", helper: { name: "huntwarden-helper-v2", version: expect.any(String) } });
+    expect(capabilities).toMatchObject({ protocolVersion: 2, manifestVersion: "3.0.0", helper: { name: "huntwarden-helper-v2", version: expect.any(String) } });
     expect(capabilities.verbs).toEqual(expect.arrayContaining(["enumerate", "project", "read", "match", "relate", "verify", "collect", "probe"]));
     expect(Object.keys(capabilities.namespaces)).toEqual(expect.arrayContaining(["host", "process", "socket", "file", "account", "delegation_rule", "ssh_trust_config", "web_root", "jvm", "cron_entry", "unit", "persistence", "package"]));
-    const host = await invoke("enumerate", { namespace: "host", fields: ["bootId", "hostname", "os", "release", "architecture"], limit: 1 });
-    expect(host.objects[0]?.fields).toMatchObject({ hostname: expect.any(String), architecture: expectedArchitecture });
+    const host = await invoke("enumerate", { namespace: "host", fields: ["bootId", "hostname", "os", "distribution", "distributionVersion", "release", "architecture", "timezone", "initSystem", "selinuxMode"], limit: 1 });
+    expect(host.objects[0]?.fields).toMatchObject({ hostname: expect.any(String), distribution: expectedDistribution, distributionVersion: expect.stringMatching(new RegExp(`^${expectedVersion.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`)), architecture: expectedArchitecture, initSystem: "systemd", timezone: expect.any(String), selinuxMode: expect.any(String) });
+    if (["rocky", "almalinux"].includes(expectedDistribution)) expect(host.objects[0]?.fields.selinuxMode).toBe("Enforcing");
   }, 120_000);
 
   it("通过 file Object 身份读取 os-release，核对发行版而不走任意路径工具", async () => {

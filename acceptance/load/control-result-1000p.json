@@ -1,0 +1,475 @@
+{
+  "status": "PASS",
+  "environment": {
+    "target": "ubuntu:22.04 Docker over SSH",
+    "architecture": "arm64",
+    "processFixtureCount": 1000
+  },
+  "latencyMs": {
+    "firstLead": 390,
+    "firstEvidence": 593,
+    "observationCommitToEvidence": 216,
+    "bootstrapComplete": 4078
+  },
+  "counts": {
+    "processFacts": 1007,
+    "uniqueFixtureProcesses": 1001,
+    "leads": 1,
+    "evidence": 2,
+    "actions": 20,
+    "attempts": 20
+  },
+  "ordering": {
+    "firstCollectEventSeq": 8,
+    "lastProcessPageEventSeq": 110
+  },
+  "controllerResources": {
+    "sampleCount": 68,
+    "maxSampledRssBytes": 204881920,
+    "maxSampledHeapUsedBytes": 76546008,
+    "cpuUserMicros": 1397843,
+    "cpuSystemMicros": 208360,
+    "samples": [
+      {
+        "elapsedMs": 0,
+        "rssBytes": 113000448,
+        "heapUsedBytes": 29904136
+      },
+      {
+        "elapsedMs": 51,
+        "rssBytes": 113737728,
+        "heapUsedBytes": 30484352
+      },
+      {
+        "elapsedMs": 101,
+        "rssBytes": 114376704,
+        "heapUsedBytes": 30772104
+      },
+      {
+        "elapsedMs": 179,
+        "rssBytes": 115097600,
+        "heapUsedBytes": 33438296
+      },
+      {
+        "elapsedMs": 230,
+        "rssBytes": 115113984,
+        "heapUsedBytes": 33482024
+      },
+      {
+        "elapsedMs": 281,
+        "rssBytes": 115113984,
+        "heapUsedBytes": 33486280
+      },
+      {
+        "elapsedMs": 390,
+        "rssBytes": 147357696,
+        "heapUsedBytes": 46383864
+      },
+      {
+        "elapsedMs": 440,
+        "rssBytes": 146964480,
+        "heapUsedBytes": 24777056
+      },
+      {
+        "elapsedMs": 491,
+        "rssBytes": 146980864,
+        "heapUsedBytes": 28582760
+      },
+      {
+        "elapsedMs": 542,
+        "rssBytes": 147128320,
+        "heapUsedBytes": 32292912
+      },
+      {
+        "elapsedMs": 593,
+        "rssBytes": 147177472,
+        "heapUsedBytes": 36101944
+      },
+      {
+        "elapsedMs": 644,
+        "rssBytes": 147226624,
+        "heapUsedBytes": 39874528
+      },
+      {
+        "elapsedMs": 695,
+        "rssBytes": 148832256,
+        "heapUsedBytes": 43540104
+      },
+      {
+        "elapsedMs": 746,
+        "rssBytes": 152846336,
+        "heapUsedBytes": 47443920
+      },
+      {
+        "elapsedMs": 796,
+        "rssBytes": 156663808,
+        "heapUsedBytes": 51122264
+      },
+      {
+        "elapsedMs": 847,
+        "rssBytes": 156663808,
+        "heapUsedBytes": 51125992
+      },
+      {
+        "elapsedMs": 898,
+        "rssBytes": 160481280,
+        "heapUsedBytes": 25734832
+      },
+      {
+        "elapsedMs": 988,
+        "rssBytes": 177881088,
+        "heapUsedBytes": 34006304
+      },
+      {
+        "elapsedMs": 1040,
+        "rssBytes": 177881088,
+        "heapUsedBytes": 37494040
+      },
+      {
+        "elapsedMs": 1092,
+        "rssBytes": 177881088,
+        "heapUsedBytes": 37686656
+      },
+      {
+        "elapsedMs": 1142,
+        "rssBytes": 177881088,
+        "heapUsedBytes": 41426856
+      },
+      {
+        "elapsedMs": 1193,
+        "rssBytes": 177881088,
+        "heapUsedBytes": 45204304
+      },
+      {
+        "elapsedMs": 1243,
+        "rssBytes": 177881088,
+        "heapUsedBytes": 48934200
+      },
+      {
+        "elapsedMs": 1316,
+        "rssBytes": 180060160,
+        "heapUsedBytes": 58046904
+      },
+      {
+        "elapsedMs": 1368,
+        "rssBytes": 180060160,
+        "heapUsedBytes": 27118768
+      },
+      {
+        "elapsedMs": 1420,
+        "rssBytes": 180060160,
+        "heapUsedBytes": 27122496
+      },
+      {
+        "elapsedMs": 1471,
+        "rssBytes": 180060160,
+        "heapUsedBytes": 27126224
+      },
+      {
+        "elapsedMs": 1547,
+        "rssBytes": 180224000,
+        "heapUsedBytes": 55139696
+      },
+      {
+        "elapsedMs": 1598,
+        "rssBytes": 180224000,
+        "heapUsedBytes": 27509624
+      },
+      {
+        "elapsedMs": 1649,
+        "rssBytes": 180224000,
+        "heapUsedBytes": 27513352
+      },
+      {
+        "elapsedMs": 1797,
+        "rssBytes": 189087744,
+        "heapUsedBytes": 42962024
+      },
+      {
+        "elapsedMs": 1848,
+        "rssBytes": 189087744,
+        "heapUsedBytes": 42984936
+      },
+      {
+        "elapsedMs": 1928,
+        "rssBytes": 189759488,
+        "heapUsedBytes": 53848104
+      },
+      {
+        "elapsedMs": 2020,
+        "rssBytes": 190414848,
+        "heapUsedBytes": 38896208
+      },
+      {
+        "elapsedMs": 2071,
+        "rssBytes": 190414848,
+        "heapUsedBytes": 38919312
+      },
+      {
+        "elapsedMs": 2123,
+        "rssBytes": 190414848,
+        "heapUsedBytes": 38923040
+      },
+      {
+        "elapsedMs": 2174,
+        "rssBytes": 190414848,
+        "heapUsedBytes": 38926768
+      },
+      {
+        "elapsedMs": 2288,
+        "rssBytes": 191217664,
+        "heapUsedBytes": 64192224
+      },
+      {
+        "elapsedMs": 2339,
+        "rssBytes": 191217664,
+        "heapUsedBytes": 33070416
+      },
+      {
+        "elapsedMs": 2390,
+        "rssBytes": 191725568,
+        "heapUsedBytes": 42221888
+      },
+      {
+        "elapsedMs": 2458,
+        "rssBytes": 192069632,
+        "heapUsedBytes": 48300848
+      },
+      {
+        "elapsedMs": 2535,
+        "rssBytes": 192577536,
+        "heapUsedBytes": 52378264
+      },
+      {
+        "elapsedMs": 2585,
+        "rssBytes": 192577536,
+        "heapUsedBytes": 52415320
+      },
+      {
+        "elapsedMs": 2645,
+        "rssBytes": 193511424,
+        "heapUsedBytes": 44316696
+      },
+      {
+        "elapsedMs": 2696,
+        "rssBytes": 193511424,
+        "heapUsedBytes": 44416304
+      },
+      {
+        "elapsedMs": 2746,
+        "rssBytes": 193511424,
+        "heapUsedBytes": 44594752
+      },
+      {
+        "elapsedMs": 2797,
+        "rssBytes": 193511424,
+        "heapUsedBytes": 44680480
+      },
+      {
+        "elapsedMs": 2898,
+        "rssBytes": 194248704,
+        "heapUsedBytes": 47209640
+      },
+      {
+        "elapsedMs": 2948,
+        "rssBytes": 194248704,
+        "heapUsedBytes": 47240448
+      },
+      {
+        "elapsedMs": 3022,
+        "rssBytes": 199147520,
+        "heapUsedBytes": 56674248
+      },
+      {
+        "elapsedMs": 3073,
+        "rssBytes": 199147520,
+        "heapUsedBytes": 56704568
+      },
+      {
+        "elapsedMs": 3139,
+        "rssBytes": 200015872,
+        "heapUsedBytes": 57732992
+      },
+      {
+        "elapsedMs": 3190,
+        "rssBytes": 200015872,
+        "heapUsedBytes": 57756112
+      },
+      {
+        "elapsedMs": 3255,
+        "rssBytes": 200851456,
+        "heapUsedBytes": 58682816
+      },
+      {
+        "elapsedMs": 3305,
+        "rssBytes": 200851456,
+        "heapUsedBytes": 58711232
+      },
+      {
+        "elapsedMs": 3366,
+        "rssBytes": 201687040,
+        "heapUsedBytes": 59648312
+      },
+      {
+        "elapsedMs": 3418,
+        "rssBytes": 201719808,
+        "heapUsedBytes": 59683344
+      },
+      {
+        "elapsedMs": 3481,
+        "rssBytes": 202637312,
+        "heapUsedBytes": 65597664
+      },
+      {
+        "elapsedMs": 3533,
+        "rssBytes": 202637312,
+        "heapUsedBytes": 65621200
+      },
+      {
+        "elapsedMs": 3599,
+        "rssBytes": 203423744,
+        "heapUsedBytes": 72827112
+      },
+      {
+        "elapsedMs": 3650,
+        "rssBytes": 203423744,
+        "heapUsedBytes": 44815144
+      },
+      {
+        "elapsedMs": 3701,
+        "rssBytes": 203505664,
+        "heapUsedBytes": 52761984
+      },
+      {
+        "elapsedMs": 3751,
+        "rssBytes": 203587584,
+        "heapUsedBytes": 60690632
+      },
+      {
+        "elapsedMs": 3802,
+        "rssBytes": 203587584,
+        "heapUsedBytes": 60694280
+      },
+      {
+        "elapsedMs": 3853,
+        "rssBytes": 203685888,
+        "heapUsedBytes": 68625984
+      },
+      {
+        "elapsedMs": 3917,
+        "rssBytes": 203784192,
+        "heapUsedBytes": 76546008
+      },
+      {
+        "elapsedMs": 3968,
+        "rssBytes": 203866112,
+        "heapUsedBytes": 45264312
+      },
+      {
+        "elapsedMs": 4078,
+        "rssBytes": 204881920,
+        "heapUsedBytes": 66218232
+      }
+    ]
+  },
+  "budgets": [
+    {
+      "owner": "PRESET",
+      "limits": {
+        "remoteCalls": 1000,
+        "nodes": 500000,
+        "bytes": 805306368,
+        "wallTimeMs": 7200000,
+        "probeCalls": 0
+      },
+      "used": {
+        "remoteCalls": 23,
+        "nodes": 1386,
+        "bytes": 2760797,
+        "wallTimeMs": 80335,
+        "probeCalls": 0
+      },
+      "reserved": {
+        "remoteCalls": 0,
+        "nodes": 0,
+        "bytes": 0,
+        "wallTimeMs": 0,
+        "probeCalls": 0
+      },
+      "remaining": {
+        "remoteCalls": 977,
+        "nodes": 498614,
+        "bytes": 802545571,
+        "wallTimeMs": 7119665,
+        "probeCalls": 0
+      }
+    },
+    {
+      "owner": "DISCOVERY",
+      "limits": {
+        "remoteCalls": 1000,
+        "nodes": 500000,
+        "bytes": 805306368,
+        "wallTimeMs": 7200000,
+        "probeCalls": 0
+      },
+      "used": {
+        "remoteCalls": 14,
+        "nodes": 8,
+        "bytes": 6687,
+        "wallTimeMs": 330,
+        "probeCalls": 0
+      },
+      "reserved": {
+        "remoteCalls": 0,
+        "nodes": 0,
+        "bytes": 0,
+        "wallTimeMs": 0,
+        "probeCalls": 0
+      },
+      "remaining": {
+        "remoteCalls": 986,
+        "nodes": 499992,
+        "bytes": 805299681,
+        "wallTimeMs": 7199670,
+        "probeCalls": 0
+      }
+    },
+    {
+      "owner": "MODEL",
+      "limits": {
+        "remoteCalls": 1000,
+        "nodes": 500000,
+        "bytes": 805306368,
+        "wallTimeMs": 7200000,
+        "probeCalls": 0
+      },
+      "used": {
+        "remoteCalls": 0,
+        "nodes": 0,
+        "bytes": 0,
+        "wallTimeMs": 0,
+        "probeCalls": 0
+      },
+      "reserved": {
+        "remoteCalls": 0,
+        "nodes": 0,
+        "bytes": 0,
+        "wallTimeMs": 0,
+        "probeCalls": 0
+      },
+      "remaining": {
+        "remoteCalls": 1000,
+        "nodes": 500000,
+        "bytes": 805306368,
+        "wallTimeMs": 7200000,
+        "probeCalls": 0
+      }
+    }
+  ],
+  "completion": {
+    "canClose": true,
+    "investigationStatus": "LIMITED",
+    "reasons": []
+  }
+}

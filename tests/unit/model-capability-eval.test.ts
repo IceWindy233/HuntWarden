@@ -21,7 +21,7 @@ async function observedCase(store: RuntimeStore, input: { suffix: string; userna
   store.createTask(task);
   const epoch: ScanEpoch = {
     epochId: `EPOCH-00000000-0000-4000-8000-0000000000${input.suffix}`, taskId: task.taskId,
-    targetFingerprint: task.target.hostFingerprint, protocolVersion: 2, manifestVersion: "2.1.0", helperVersion: "2.1.0",
+    targetFingerprint: task.target.hostFingerprint, protocolVersion: 2, manifestVersion: "3.0.0", helperVersion: "3.0.0",
     reason: "INITIAL", status: "RUNNING", startedAt: new Date(Date.now() - 1000).toISOString(),
   };
   store.createScanEpoch(epoch);
@@ -35,14 +35,17 @@ async function observedCase(store: RuntimeStore, input: { suffix: string; userna
   store.putCoverageRun({ coverageId: `COV-${input.suffix}`, taskId: task.taskId, epochId: epoch.epochId, category: "backdoor_account", presetId: "account-baseline", presetVersion: "2.0.0", status: "COMPLETE", applicability: "APPLICABLE", completedCriteria: ["account-db"], missingCriteria: [], createdAt: new Date().toISOString() });
   if (input.verdict !== "BENIGN") store.putAssessment({ assessmentId: `ASM-SUBJECT-${input.suffix}`, taskId: task.taskId, epochId: epoch.epochId, authorType: "MODEL", category: "backdoor_account", subjectRef: batch.facts[0]!.subjectRef, scope: "SUBJECT", verdict: input.verdict, severity: "HIGH", confidence: 0.9, rationale: "评测风险结论", evidenceRefs: [], factRefs: [batch.facts[0]!.factId], queryRefs: [query.queryRef], createdAt: new Date().toISOString() });
   store.putAssessment({ assessmentId: `ASM-CATEGORY-${input.suffix}`, taskId: task.taskId, epochId: epoch.epochId, authorType: "MODEL", category: "backdoor_account", scope: "OBSERVED_CATEGORY", verdict: input.verdict === "BENIGN" ? "NO_OBSERVED_FINDING" : "INCONCLUSIVE", severity: "INFO", confidence: 0.9, rationale: "评测类别结论", evidenceRefs: [], factRefs: [batch.facts[0]!.factId], queryRefs: [query.queryRef], createdAt: new Date().toISOString() });
-  store.startToolRun({ toolCallId: `MODEL-TOOL-${input.suffix}`, taskId: task.taskId, toolName: "enumerate", risk: "READ", replayPolicy: "SAFE_REOBSERVE", args: {} });
+  store.startToolRun({ toolCallId: `MODEL-TOOL-${input.suffix}`, taskId: task.taskId, epochId: epoch.epochId, toolName: "enumerate", risk: "READ", replayPolicy: "SAFE_REOBSERVE", args: {} });
   store.finishToolRun(`MODEL-TOOL-${input.suffix}`, "SUCCEEDED", { details: { status: "success", gaps: [], cost: { remoteCalls: 1, nodes: 1, bytes: 128, wallTimeMs: 10, probeCalls: 0 } } });
   const message: AgentMessage = {
     role: "assistant", content: [{ type: "text", text: "done" }], api: "openai-responses", provider: "openai", model: "gpt-eval",
     usage: { input: 100, output: 20, cacheRead: 5, cacheWrite: 0, totalTokens: 125, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
     stopReason: "stop", timestamp: Date.now(),
   };
-  store.appendMessage(task.taskId, message);
+  store.appendMessage(task.taskId, message, epoch.epochId);
+  store.startToolRun({ toolCallId: `STALE-TOOL-${input.suffix}`, taskId: task.taskId, epochId: `EPOCH-STALE-${input.suffix}`, toolName: "enumerate", risk: "READ", replayPolicy: "SAFE_REOBSERVE", args: {} });
+  store.finishToolRun(`STALE-TOOL-${input.suffix}`, "FAILED", undefined, "旧 Epoch 调用不应计入当前评测");
+  store.appendMessage(task.taskId, { ...message, timestamp: message.timestamp + 1, usage: { ...message.usage, input: 10, output: 10, totalTokens: 20 } }, `EPOCH-STALE-${input.suffix}`);
   store.finishScanEpoch(task.taskId, epoch.epochId, "COMPLETED");
   const completed = store.getTask(task.taskId)!; completed.status = "COMPLETED"; store.saveTask(completed);
   return { taskId: task.taskId, epochId: epoch.epochId };

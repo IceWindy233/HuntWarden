@@ -10,13 +10,15 @@ export class ApprovalService extends EventEmitter {
   getArgsDigest(args: unknown): string { return digestObject(args); }
 
   request(task: TaskContext, tool: string, args: unknown, context?: string): ApprovalTicket {
+    if (task.protocolVersion !== 2 || !task.activeEpochId) throw new Error("写操作审批必须绑定活动的 v2 Epoch");
     const digest = this.getArgsDigest(args);
     const pending = this.store.listPendingApprovals(task.taskId)
-      .find((item) => item.tool === tool && item.argsDigest === digest && item.targetFingerprint === task.target.hostFingerprint);
+      .find((item) => item.epochId === task.activeEpochId && item.tool === tool && item.argsDigest === digest && item.targetFingerprint === task.target.hostFingerprint);
     if (pending) return pending;
     const ticket: ApprovalTicket = {
       approvalId: createId("approval"),
       taskId: task.taskId,
+      epochId: task.activeEpochId,
       targetFingerprint: task.target.hostFingerprint,
       tool,
       argsDigest: digest,
@@ -74,8 +76,9 @@ export class ApprovalService extends EventEmitter {
   }
 
   consume(task: TaskContext, tool: string, args: unknown): ApprovalTicket | undefined {
-    const ticket = this.store.findApproval(task.taskId, tool, this.getArgsDigest(args));
-    if (!ticket || ticket.targetFingerprint !== task.target.hostFingerprint) return undefined;
+    if (task.protocolVersion !== 2 || !task.activeEpochId) return undefined;
+    const ticket = this.store.findApproval(task.taskId, tool, this.getArgsDigest(args), task.activeEpochId);
+    if (!ticket || ticket.targetFingerprint !== task.target.hostFingerprint || ticket.epochId !== task.activeEpochId) return undefined;
     const consumed = this.store.updateApproval(ticket.approvalId, "CONSUMED");
     return consumed;
   }

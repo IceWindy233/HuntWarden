@@ -31,6 +31,8 @@ const api: HuntWardenDesktopApi = {
   getTaskSnapshot: async (taskId) => await ipcRenderer.invoke(IPC.taskSnapshot, taskId),
   createTask: async (input) => await ipcRenderer.invoke(IPC.taskCreate, input),
   startTask: async (taskId) => await ipcRenderer.invoke(IPC.taskStart, taskId),
+  pauseTask: async (taskId) => await ipcRenderer.invoke(IPC.taskPause, taskId),
+  resumeTask: async (taskId) => await ipcRenderer.invoke(IPC.taskResume, taskId),
   abortTask: async (taskId) => await ipcRenderer.invoke(IPC.taskAbort, taskId),
   archiveTask: async (taskId) => await ipcRenderer.invoke(IPC.taskArchive, taskId),
   restoreTask: async (taskId) => await ipcRenderer.invoke(IPC.taskRestore, taskId),
@@ -44,6 +46,7 @@ const api: HuntWardenDesktopApi = {
   listReports: async (taskId) => await ipcRenderer.invoke(IPC.reportList, taskId),
   readReport: async (input) => await ipcRenderer.invoke(IPC.reportRead, input),
   revealEvidence: async (evidenceId) => await ipcRenderer.invoke(IPC.evidenceReveal, evidenceId),
+  exportEvidence: async (taskId) => await ipcRenderer.invoke(IPC.evidenceExport, taskId),
   revealReport: async (input) => await ipcRenderer.invoke(IPC.reportReveal, input),
   subscribe: (listener) => {
     const wrapped = (_event: Electron.IpcRendererEvent, value: DesktopEvent) => listener(value);

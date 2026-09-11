@@ -1,0 +1,27 @@
+{
+  "containerStats": {
+    "BlockIO": "15.6MB / 0B",
+    "CPUPerc": "1.76%",
+    "Container": "huntwarden-load-target",
+    "ID": "a62df74e3db0",
+    "MemPerc": "4.56%",
+    "MemUsage": "365.1MiB / 7.817GiB",
+    "Name": "huntwarden-load-target",
+    "NetIO": "2.67kB / 1.12kB",
+    "PIDs": "10001"
+  },
+  "elapsedMs": 24629,
+  "files": {
+    "expected": 100001,
+    "pages": 201,
+    "returned": 100001,
+    "scanned": 100001
+  },
+  "processes": {
+    "expected": 10001,
+    "pages": 21,
+    "returned": 10001,
+    "scanned": 10001
+  },
+  "status": "PASS"
+}

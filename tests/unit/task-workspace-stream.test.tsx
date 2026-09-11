@@ -46,7 +46,7 @@ describe("TaskWorkspace Agent 流式预览", () => {
       protocolV2: {
         epoch: {
           epochId: "EPOCH-INV14", taskId: task.taskId, targetFingerprint: task.target.hostFingerprint,
-          protocolVersion: 2, manifestVersion: "2.1.0", helperVersion: "2.1.0",
+          protocolVersion: 2, manifestVersion: "3.0.0", helperVersion: "3.0.0",
           reason: "INITIAL", status: "PARTIAL", startedAt: createdAt,
         },
         coverage: [{
@@ -54,7 +54,7 @@ describe("TaskWorkspace Agent 流式预览", () => {
           presetId: "webshell-baseline", presetVersion: "2.1.0", status: "PARTIAL", applicability: "UNKNOWN",
           completedCriteria: [], missingCriteria: [{ criterion: "candidate-files", reasonCode: "PARTIAL_SOURCE" }], createdAt,
         }],
-        assessments: [], investigationGaps: [], modelState: [{ category: "webshell", state: "NOT_CONCLUDED" }],
+        assessments: [], effectiveAssessments: [], investigationGaps: [], modelState: [{ category: "webshell", state: "NOT_CONCLUDED" }],
       },
     };
 
@@ -110,6 +110,22 @@ describe("TaskWorkspace Agent 流式预览", () => {
     fireEvent.click(screen.getByRole("button", { name: "恢复归档" }));
     await waitFor(() => expect(restoreTask).toHaveBeenCalledWith(task.taskId));
     confirm.mockRestore();
+  });
+
+  it("暂停状态只提供继续与终止入口，并明确保留同一调查上下文", async () => {
+    const resumeTask = vi.fn(async () => undefined);
+    const abortTask = vi.fn(async () => undefined);
+    Object.defineProperty(window, "huntwarden", { configurable: true, value: { resumeTask, abortTask } });
+    const task = { ...testTask(), status: "PAUSED" as const };
+    const snapshot: TaskSnapshot = { task, evidence: [], approvals: [], grantRequests: [], grants: [], actionReceipts: [], reports: [], audit: [], conversation: [], toolRuns: [] };
+    render(<TaskWorkspace snapshot={snapshot} refresh={vi.fn(async () => undefined)} notify={vi.fn()} />);
+    expect(screen.getByText("调查已暂停")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /生成报告/ })).toBeNull();
+    expect(screen.queryByRole("button", { name: "归档" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "继续调查" }));
+    await waitFor(() => expect(resumeTask).toHaveBeenCalledWith(task.taskId));
+    fireEvent.click(screen.getByRole("button", { name: "终止" }));
+    await waitFor(() => expect(abortTask).toHaveBeenCalledWith(task.taskId));
   });
 
   it("调查完成后必须由分析师确认才生成首版报告", async () => {

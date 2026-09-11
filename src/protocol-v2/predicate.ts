@@ -4,29 +4,42 @@ import type { NamespaceName, Predicate, PredicateOperator } from "./types.js";
 
 const comparison = new Set<PredicateOperator>(["lt", "lte", "gt", "gte"]);
 const stringOnly = new Set<PredicateOperator>(["contains", "starts_with"]);
+const leafOperators = new Set<PredicateOperator>(["eq", "neq", "lt", "lte", "gt", "gte", "in", "contains", "starts_with", "exists"]);
 
-export function validatePredicate(namespace: NamespaceName, predicate: Predicate | undefined, limits?: { depth: number; nodes: number }): void {
-  if (!predicate) return;
+export function validatePredicate(namespace: NamespaceName, predicate: unknown, limits?: { depth: number; nodes: number }): asserts predicate is Predicate | undefined {
+  if (predicate === undefined) return;
   const maximumDepth = limits?.depth ?? PROTOCOL_MANIFEST.hardLimits.predicateDepth!;
   const maximumNodes = limits?.nodes ?? PROTOCOL_MANIFEST.hardLimits.predicateNodes!;
   let nodes = 0;
-  const visit = (node: Predicate, depth: number): void => {
+  const visit = (node: unknown, depth: number): void => {
     nodes += 1;
     if (nodes > maximumNodes) throw new InvalidArgumentError("Predicate 节点超过上限");
     if (depth > maximumDepth) throw new InvalidArgumentError("Predicate 深度超过上限");
-    if ("args" in node) {
+    if (!isRecord(node) || typeof node.op !== "string") throw new InvalidArgumentError("Predicate 节点必须是带 op 的对象");
+    if (node.op === "and" || node.op === "or") {
+      if (!Array.isArray(node.args)) throw new InvalidArgumentError(`${node.op}.args 必须是数组`);
       if (node.args.length < 1 || node.args.length > 32) throw new InvalidArgumentError(`${node.op} 参数数量无效`);
       for (const child of node.args) visit(child, depth + 1);
       return;
     }
-    if ("arg" in node) { visit(node.arg, depth + 1); return; }
+    if (node.op === "not") {
+      if (!("arg" in node)) throw new InvalidArgumentError("not 缺少 arg");
+      visit(node.arg, depth + 1);
+      return;
+    }
+    if (!leafOperators.has(node.op as PredicateOperator)) throw new InvalidArgumentError(`未知 Predicate 操作符: ${node.op}`);
+    if (typeof node.field !== "string" || node.field.length === 0) throw new InvalidArgumentError(`${node.op} 缺少 field`);
     const field = assertManifestField(namespace, node.field, "filterable");
-    validateValue(node.op, field.type, node.value);
+    validateValue(node.op as PredicateOperator, field.type, node.value);
   };
   visit(predicate, 1);
 }
 
-function validateValue(op: PredicateOperator, type: FieldType, value: Predicate extends infer _ ? unknown : never): void {
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function validateValue(op: PredicateOperator, type: FieldType, value: unknown): void {
   if (op === "exists") {
     if (value !== undefined && typeof value !== "boolean") throw new InvalidArgumentError("exists.value 必须省略或为 boolean");
     return;

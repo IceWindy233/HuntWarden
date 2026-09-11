@@ -117,9 +117,9 @@ npm run test:docker
 
 诚实优于好看，以下均为当前真实状态：
 
-- **真实模型发布结果仍只覆盖安全自造语料。** Manifest `2.1.0` 的冻结 novel malicious + benign 评测七项门槛全部通过，但不能外推为真实站点召回率或误报率。报告里的 `NO_OBSERVED_FINDING` 不应被当作「已排查干净」。
-- **真实发行版 VM 矩阵尚未完整。** Ubuntu 24.04 ARM64 已通过真实 GUI/Provider/SSH/root Helper、五类 × QUICK/STANDARD/DEEP、smoke 4/4、journald 1/1 与模型评测，结果为 `PASS_WITH_LIMITATIONS`；高推理 Provider 首跑仍出现过空响应和非法引用。Ubuntu 22.04 仅经 Docker 验证，Debian 12 仅经动态容器场景验证，其余平台仍待实机验收。各平台状态见 [`docs/支持与验收说明.md`](docs/支持与验收说明.md)。
-- **Java 检测只在 Tomcat 9 / JDK 17 上验证过。**
+- **Manifest `3.0.0` 的正式模型与盲测发布证据尚缺。** OpenAI Chat Completions 与 Responses 的本机 HTTP/SSE 契约已验证请求、工具 Schema、流式 Tool Call 分片重组和 usage；故障矩阵验证了 429→200 重试、105 ms SSE 停滞中止和空响应拒绝，但它不代表真实厂商服务。schema v2 正式生成器会核对在线冒烟前后的公网 DNS、Epoch 起止控制端提交和目标 Helper 源码摘要。当前 4 恶意 + 4 良性 + 4 受限矩阵验证控制端状态机；`2.1.0` 的小样本 Provider 结果只保留为历史证据，不能外推真实站点召回率或误报率。报告里的 `NO_OBSERVED_FINDING` 不表示主机已排查干净。
+- **真实发行版与负载矩阵尚未完整。** 当前版本在 Ubuntu 24.04 ARM64 完成只读 SSH smoke 4/4、journald 1/1、systemd transient unit 1/1，并从 Canonical 官方 Multipass 镜像通过 schema v2 正式平台资格；在 Ubuntu 22.04 ARM64 Docker 完成 14/14。Tomcat 9/JDK 17 + Spring MVC 5.3.39 实际发现 Controller、Interceptor 和 `/ws/{id}` WebSocket endpoint，并在静态页/Spring Controller 混合的持续 8 路 HTTP 流量下完成 12 次连续受控 Attach，1,758 次负载请求零失败、P95 2 ms、Attach 最慢 82 ms。进程/文件/日志及控制端负载覆盖 1001/10001 个真实进程、100001 个文件和 100000 条轮转/gzip 日志；Debian 12 动态容器场景 6/6，并完成 100 MiB Evidence 流式传输的字节数与 SHA-256 核对。Ubuntu x86_64、完整 Debian systemd VM、Rocky/Alma SELinux Enforcing、Amazon Linux 2023及真实业务 Attach 负载尚待实测。仓库已提供 `qualify:business-jvm` 和 `qualify:platform`，平台关键值由 Helper 直接观测，实际环境仍需逐项运行。各平台状态见 [`docs/支持与验收说明.md`](docs/支持与验收说明.md)。
+- **Java 检测只在 Tomcat 9 / JDK 17 上验证过。** 精确 context/ClassLoader 和类字节 Evidence 已通过真实探针，反射来源不可用时调查会保持 LIMITED；当前版本仍缺真实 Provider 联合验收。
 - **事实可达不等于未采集数据可见。** `query_facts` 能到达当前任务已采集的 Model Fact，但每个原语仍受 scope、Capability、cursor 和持久化 Budget 约束；上限、权限或依赖造成的缺口会显式写入 Coverage。
 - **YARA 与哈希基线都只开放版本化引用。** Helper 在 YARA 依赖和内置规则文件均可用时声明 `yara`，模型只能选择静态注册的 `RuleSetRef`，不能提交源码或路径；RE2 同样只在依赖实际存在时声明。`known_hash_set` 由分析师在控制端导入，名称与版本不可变；模型只见 `DATASET-*` 引用，集合内容不发送目标机。`package_db` 基线校验也已可用。
 - **处置不可逆。** 没有 `restore_quarantined_file` / `restore_account_state`；`disable_account` 只锁定密码认证，不终止活动会话、不处理 `authorized_keys`/SSH CA，因此默认配置不开放该动作。文件隔离也应只在可恢复目标上使用。
@@ -138,7 +138,7 @@ npm run test:docker
 | [`docs/后续工作路线.md`](docs/后续工作路线.md) | 当前限制、优先级与完成口径 |
 | [`docs/版本发布说明.md`](docs/版本发布说明.md) | 合并后的版本摘要、验证范围与安装校验 |
 
-面向具体执行器的说明保留在相应目录：[`host-helper/README.md`](host-helper/README.md)、[`acceptance/vm/README.md`](acceptance/vm/README.md) 和 [`acceptance/model-eval/README.md`](acceptance/model-eval/README.md)。逐项版本变化见 [`CHANGELOG.md`](CHANGELOG.md)。
+面向具体执行器的说明保留在相应目录：[`host-helper/README.md`](host-helper/README.md)、[`acceptance/vm/README.md`](acceptance/vm/README.md)、[`acceptance/platform/README.md`](acceptance/platform/README.md)、[`acceptance/business-jvm/README.md`](acceptance/business-jvm/README.md) 和 [`acceptance/model-eval/README.md`](acceptance/model-eval/README.md)。逐项版本变化见 [`CHANGELOG.md`](CHANGELOG.md)。
 
 ## 目录
 

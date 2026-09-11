@@ -2,8 +2,8 @@ schemaVersion: 2
 
 protocolV2:
   remoteBudget:
-    preset: { remoteCalls: 80, nodes: 20000, bytes: 67108864, wallTimeMs: 900000, probeCalls: 10 }
-    model: { remoteCalls: 80, nodes: 20000, bytes: 67108864, wallTimeMs: 900000, probeCalls: 10 }
+    preset: { remoteCalls: 80, nodes: 20000, bytes: 67108864, wallTimeMs: 900000, probeCalls: 64 }
+    model: { remoteCalls: 80, nodes: 20000, bytes: 67108864, wallTimeMs: 900000, probeCalls: 64 }
   localQueryBudget: { calls: 200, rows: 50000, wallTimeMs: 300000 }
   externalIntelBudget: { calls: 100, iocs: 1000, wallTimeMs: 300000 }
   dataPolicy: { modelContentBytes: 4194304, evidenceBytes: 268435456, defaultTextClass: SENSITIVE_TEXT }
@@ -39,34 +39,6 @@ llmData:
 
 webshell:
   modifiedWithinHours: 168
-  maxCandidateFiles: 500
-  maxFileSizeBytes: 10485760
-  maxScriptExcerptBytes: 65536
-  maxAccessLogLines: 500
-  yaraRuleDir: ./rules/yara
-
-java:
-  supportedContainers: [tomcat]
-  allowClassDump: true
-  allowRuntimeModification: false
-  probeJar: ./java/tomcat-probe/build/libs/huntwarden-tomcat-probe.jar
-
-account:
-  checkAuthorizedKeys: true
-  checkLoginHistory: true
-  maxLoginHistoryEntries: 100
-
-persistence:
-  maxItemsPerSource: 500
-  includeUserScope: true
-
-triage:
-  maxProcesses: 2000
-  maxConnections: 5000
-  maxFiles: 5000
-  maxTimelineEvents: 5000
-  maxArtifactBytes: 10485760
-  maxProcessTreeDepth: 12
 
 threatIntel:
   enabled: false
@@ -76,8 +48,6 @@ threatIntel:
   timeoutSeconds: 15
   maxBatchSize: 100
   cacheTtlSeconds: 3600
-  autoEnrichConnections: true
-  includePrivateAddresses: false
 
 remediation:
   requireApproval: true

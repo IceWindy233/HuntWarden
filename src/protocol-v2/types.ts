@@ -2,7 +2,7 @@ import type { CheckCategory, Severity } from "../domain/types.js";
 import type { ProtocolV2ErrorCode } from "../common/errors.js";
 
 export const PROTOCOL_VERSION = 2 as const;
-export const MANIFEST_VERSION = "2.1.0";
+export const MANIFEST_VERSION = "3.0.0";
 
 export const NAMESPACE_NAMES = [
   "host", "process", "socket", "file", "account", "ssh_key", "delegation_rule", "ssh_trust_config", "cron_entry", "unit",
@@ -35,7 +35,7 @@ export interface CoverageGap {
   resumable: boolean;
 }
 
-export const INVESTIGATION_GAP_CODES = ["GRANT_DENIED", "GRANT_EXPIRED", "BUDGET_DENIED", "MODEL_DID_NOT_INVESTIGATE"] as const;
+export const INVESTIGATION_GAP_CODES = ["GRANT_DENIED", "GRANT_EXPIRED", "BUDGET_DENIED", "MODEL_DID_NOT_INVESTIGATE", "QUEUE_CAPACITY"] as const;
 export type InvestigationGapCode = typeof INVESTIGATION_GAP_CODES[number];
 export interface InvestigationGap {
   gapId: string;
@@ -54,6 +54,15 @@ export interface ScanEpoch {
   protocolVersion: 2;
   manifestVersion: string;
   helperVersion: string;
+  /** 新 Epoch 记录实际执行它的控制端提交；旧数据库记录可缺省。 */
+  controllerCommit?: string;
+  /** 源码运行时记录 Epoch 创建时工作树是否干净；发布包身份恒为 true。 */
+  controllerTreeClean?: boolean;
+  /** Epoch 结束时再次核对的控制端提交与工作树状态。 */
+  controllerCommitAtFinish?: string;
+  controllerTreeCleanAtFinish?: boolean;
+  /** 目标端 capabilities 返回的 Helper 源文件 SHA-256；旧 Helper 可缺省。 */
+  helperSha256?: string;
   reason: "INITIAL" | "RESCAN" | "RECOVERY_REOBSERVE";
   status: "RUNNING" | "COMPLETED" | "PARTIAL" | "ABORTED";
   startedAt: string;
@@ -62,6 +71,7 @@ export interface ScanEpoch {
 
 export interface FactSource {
   kind: FactSourceKind;
+  evidenceOrigin?: "TARGET_OBSERVATION" | "CONTROL_PLANE_INPUT" | "EXTERNAL_INTELLIGENCE";
   presetRunId?: string;
   presetId?: string;
   presetVersion?: string;
@@ -157,6 +167,7 @@ export interface WireSuccess {
   objects: WireObservation[];
   edges: WireEdge[];
   cursor?: string;
+  scan?: { sourceGeneration: string; scannedCount: number; matchedCount: number; returnedCount: number; nextOffset: number; upperBound?: number; complete: boolean };
   artifact?: { token: string; sha256: string; size: number; complete: boolean; expiresAt: string };
   cost: WireCost;
   gaps: CoverageGap[];
@@ -174,10 +185,10 @@ export type WireResponse = WireSuccess | WireFailure;
 export interface HelperCapabilitiesV2 {
   protocolVersion: 2;
   manifestVersion: string;
-  helper: { name: string; version: string };
+  helper: { name: string; version: string; sha256?: string };
   namespaces: Partial<Record<NamespaceName, { fields: string[]; relations: string[]; verbs?: Array<"enumerate" | "project" | "read" | "match" | "relate" | "verify" | "collect" | "probe"> }>>;
   matchers: Array<"literal" | "re2" | "yara">;
-  probes: Array<"jvm.tomcat.inventory" | "jvm.class.inspect">;
+  probes: Array<"jvm.tomcat.inventory" | "jvm.class.inspect" | "jvm.class.dump">;
   verbs: Array<"enumerate" | "project" | "read" | "match" | "relate" | "verify" | "collect" | "probe">;
   limits: { maxObjects: number; maxOutputBytes: number; maxReadBytes: number; maxCollectBytes: number };
 }

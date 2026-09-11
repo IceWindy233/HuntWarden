@@ -8,6 +8,7 @@ import java.lang.instrument.IllegalClassFormatException;
 import java.lang.instrument.Instrumentation;
 import java.lang.module.ModuleDescriptor;
 import java.lang.reflect.Method;
+import java.lang.reflect.Field;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -121,7 +122,8 @@ public final class ProbeAgent {
         for (ClassLoader loader : loaders) {
             Object context;
             try {
-                Object resources = invoke(loader, "getResources");
+                Object resources = optionalInvoke(loader, "getResources");
+                if (resources == null) resources = fieldValue(loader, "resources");
                 context = invoke(resources, "getContext");
             } catch (Throwable error) {
                 diagnostics.partial("tomcat_context_reflection", loaderId(loader), List.of(describe(error)));
@@ -298,6 +300,7 @@ public final class ProbeAgent {
             component.put("type", type);
             component.put("name", first(name, "name", "filterName", "servletName", "listenerName"));
             component.put("objectName", name.getCanonicalName());
+            component.put("context", jmxContext(name));
             String className = attribute(server, name, "filterClass", "servletClass", "className", "managedResourceClass");
             if (className == null || className.isBlank()) className = attributeFromResource(server, name);
             component.put("className", className == null ? "unknown" : className);
@@ -371,6 +374,40 @@ public final class ProbeAgent {
         } catch (Exception ignored) {
             return null;
         }
+    }
+
+    private static Object fieldValue(Object target, String fieldName) throws Exception {
+        if (target == null) throw new IllegalStateException(fieldName + " target is null");
+        Class<?> type = target.getClass();
+        while (type != null) {
+            try {
+                Field field = type.getDeclaredField(fieldName);
+                field.setAccessible(true);
+                return field.get(target);
+            } catch (NoSuchFieldException ignored) {
+                type = type.getSuperclass();
+            }
+        }
+        throw new NoSuchFieldException(fieldName);
+    }
+
+    private static String jmxContext(ObjectName name) {
+        String context = null;
+        for (String key : List.of("context", "path", "WebModule", "webModule")) {
+            String value = name.getKeyProperty(key);
+            if (value != null && !value.isBlank()) {
+                context = value;
+                break;
+            }
+        }
+        if (context != null && context.startsWith("//")) {
+            int slash = context.indexOf('/', 2);
+            context = slash < 0 ? "/" : context.substring(slash);
+        }
+        if (context != null && !context.isBlank()) return context;
+        String host = name.getKeyProperty("host");
+        if (host != null && !host.isBlank()) return "host:" + host;
+        return "global:" + name.getDomain();
     }
 
     private static List<Object> array(Object value) {

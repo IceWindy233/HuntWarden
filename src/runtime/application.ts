@@ -15,8 +15,11 @@ import type { RuntimeStore } from "../storage/runtime-store.js";
 import type { ThreatIntelClient } from "../threat-intel/types.js";
 import { SecurityAgentRuntime } from "./security-agent-runtime.js";
 import { bootstrapProtocolV2, restoreProtocolV2 } from "./v2-bootstrap.js";
+import { buildAuthorizationEnvelope, computeAuthorizationVersion } from "../investigation/version.js";
+import { InvestigationCompletionValidator } from "../investigation/completion-validator.js";
 import type { Assessment, AssessmentVerdict, TaskGrant, WireRequest } from "../protocol-v2/types.js";
 import { createKnownHashDataSet, parseKnownHashSetImport, summarizeKnownHashDataSet, type KnownHashDataSetSummary } from "../datasets/known-hash-registry.js";
+import { resolveControllerBuildIdentity } from "./build-identity.js";
 
 export class Application extends EventEmitter {
   readonly approvals: ApprovalService;
@@ -56,6 +59,12 @@ export class Application extends EventEmitter {
       ...(input.profile ? { profile: input.profile } : {}),
       ...(input.timeWindowHours !== undefined ? { timeWindowHours: input.timeWindowHours } : {}),
       ...(input.iocs && Object.keys(input.iocs).length > 0 ? { iocs: structuredClone(input.iocs) } : {}),
+      focus: {
+        categories: input.checks ?? ["webshell", "java_memory_shell", "backdoor_account", "linux_persistence", "linux_intrusion_triage"],
+        entryMode: Object.values(input.iocs ?? {}).flat().length === 0 ? "ZERO_IOC" : Object.values(input.iocs ?? {}).flat().length === 1 ? "SINGLE_LEAD" : "MULTI_LEAD",
+        iocKinds: Object.entries(input.iocs ?? {}).filter(([, values]) => values.length > 0).map(([kind]) => kind as keyof InvestigationIocs),
+        priority: "VOLATILE_FIRST",
+      },
       createdAt: now, updatedAt: now, turnCount: 0, toolCallCount: 0, protocolVersion: 2,
     };
     this.store.createTask(task);
@@ -100,6 +109,10 @@ export class Application extends EventEmitter {
     }
     this.executor = new SSHExecutor(task.target, this.config.executor.helperPath, this.config.executor.timeoutSeconds * 1000);
     const evidence = new EvidenceStore(this.config.storage.baseDir, this.store, this.checkpoint);
+    const reconciliation = await evidence.reconcileTask(task.taskId);
+    if (reconciliation.failed.length > 0 || reconciliation.orphanPaths.length > 0 || reconciliation.temporaryPaths.length > 0) {
+      this.store.appendAudit({ taskId: task.taskId, event: "evidence_recovery_reconciled", level: "warn", data: reconciliation });
+    }
     if (task.protocolVersion !== 2) throw new InvalidArgumentError("v1 历史任务只读，不允许恢复执行或重新调查");
     const session = restore
       ? await restoreProtocolV2({ task, config: this.config, store: this.store, executor: this.executor, evidence, approvals: this.approvals, ...(this.checkpoint ? { checkpoint: this.checkpoint } : {}), ...(this.threatIntel ? { threatIntel: this.threatIntel } : {}) })
@@ -131,7 +144,24 @@ export class Application extends EventEmitter {
     this.assertNotArchived(task);
     const runtime = await this.ensureRuntimeFor(task);
     await runtime.prompt(`${task.request}\n\n<preset-v2>\n${this.presetContext}\n</preset-v2>`);
-    this.finishActiveEpoch(task.taskId);
+    if (this.requireTask(task.taskId).status !== "PAUSED") this.finishActiveEpoch(task.taskId);
+    this.emit("changed", taskId);
+  }
+
+  pauseTask(taskId: string): void {
+    const task = this.requireTask(taskId);
+    this.assertNotArchived(task);
+    if (this.runtimeTaskId !== taskId || !this.runtime) throw new InvalidArgumentError("任务当前没有可暂停的运行时");
+    this.runtime.pause();
+    this.emit("changed", taskId);
+  }
+
+  async resumeTask(taskId: string): Promise<void> {
+    const task = this.requireTask(taskId);
+    this.assertNotArchived(task);
+    if (task.status !== "PAUSED") throw new InvalidArgumentError("任务未暂停");
+    await (await this.ensureRuntimeFor(task, true)).resume();
+    if (this.requireTask(taskId).status !== "PAUSED") this.finishActiveEpoch(taskId);
     this.emit("changed", taskId);
   }
 
@@ -157,10 +187,23 @@ export class Application extends EventEmitter {
 
   abortTask(taskId: string): void {
     const task = this.requireTask(taskId);
+    const wasPaused = task.status === "PAUSED";
     this.assertNotArchived(task);
-    if (this.runtimeTaskId === taskId) this.runtime?.abort();
+    if (task.protocolVersion === 2 && task.activeEpochId) {
+      const session = this.store.getInvestigationSession(task.taskId, task.activeEpochId);
+      if (session && session.executionStatus !== "STOPPED" && session.executionStatus !== "CANCELLING") {
+        this.store.updateInvestigationSession({ ...session, executionStatus: "CANCELLING", revision: session.revision + 1, updatedAt: new Date().toISOString() }, session.revision);
+      }
+    }
+    if (wasPaused && task.protocolVersion === 2 && task.activeEpochId && this.store.getInvestigationSession(task.taskId, task.activeEpochId)) {
+      new InvestigationCompletionValidator(this.store).freezeCancelled(task.taskId, task.activeEpochId, "ANALYST_ABORT");
+      this.runtime?.abort();
+    } else if (this.runtimeTaskId === taskId) this.runtime?.abort();
+    else if (task.protocolVersion === 2 && task.activeEpochId && this.store.getInvestigationSession(task.taskId, task.activeEpochId)) {
+      new InvestigationCompletionValidator(this.store).freezeCancelled(task.taskId, task.activeEpochId, "ANALYST_ABORT");
+    }
     task.status = "ABORTED";
-    if (task.protocolVersion === 2 && task.activeEpochId) this.store.finishScanEpoch(task.taskId, task.activeEpochId, "ABORTED");
+    if (task.protocolVersion === 2 && task.activeEpochId) this.store.finishScanEpoch(task.taskId, task.activeEpochId, "ABORTED", resolveControllerBuildIdentity());
     this.store.saveTask(task);
     this.store.appendAudit({ taskId, event: "task_aborted_by_analyst", level: "warn", data: {} });
     this.emit("changed", taskId);
@@ -169,7 +212,7 @@ export class Application extends EventEmitter {
   archiveTask(taskId: string): TaskContext {
     const task = this.requireTask(taskId);
     if (task.archivedAt) return task;
-    if (["RUNNING", "WAITING_APPROVAL", "RECOVERING", "REPORTING"].includes(task.status)) {
+    if (["RUNNING", "PAUSED", "WAITING_APPROVAL", "RECOVERING", "REPORTING"].includes(task.status)) {
       throw new InvalidArgumentError("活动任务不能归档，请等待任务结束或先终止任务");
     }
     if (task.interruption?.recoveryRequired) throw new InvalidArgumentError("待恢复任务不能归档，请先完成恢复或明确终止恢复流程");
@@ -225,6 +268,7 @@ export class Application extends EventEmitter {
     };
     this.store.putTaskGrant(grant);
     this.store.updateGrantRequest(requestId, "APPROVED");
+    this.refreshInvestigationAuthorization(task);
     this.store.appendAudit({ taskId: task.taskId, event: "protocol_v2_grant_activated", level: "warn", data: { requestId, grantId: grant.grantId, kind: grant.kind, bindingDigest: request.bindingDigest } });
     this.emit("changed", task.taskId);
   }
@@ -253,6 +297,7 @@ export class Application extends EventEmitter {
     const grant = this.store.listTaskGrants(taskId).find((item) => item.grantId === grantId);
     if (!grant || grant.targetFingerprint !== task.target.hostFingerprint) throw new InvalidArgumentError("Task Grant 不存在或目标不匹配");
     const revoked = this.store.revokeTaskGrant(taskId, grantId, reason);
+    this.refreshInvestigationAuthorization(task);
     this.store.appendAudit({ taskId, event: "protocol_v2_grant_revoked", level: "warn", data: { grantId, kind: revoked.kind, reason: revoked.revocationReason } });
     this.emit("changed", taskId);
     return revoked;
@@ -261,7 +306,7 @@ export class Application extends EventEmitter {
   async generateReport(taskId: string): Promise<ReportRecord> {
     const task = this.requireTask(taskId);
     this.assertNotArchived(task);
-    if (["CREATED", "RUNNING", "WAITING_APPROVAL", "RECOVERING", "REPORTING"].includes(task.status)) {
+    if (["CREATED", "RUNNING", "PAUSED", "WAITING_APPROVAL", "RECOVERING", "REPORTING"].includes(task.status)) {
       throw new InvalidArgumentError("调查尚未结束，不能生成报告");
     }
     if (task.interruption?.recoveryRequired) throw new InvalidArgumentError("任务需要先完成恢复，才能生成报告");
@@ -291,6 +336,21 @@ export class Application extends EventEmitter {
     if (task.archivedAt) throw new InvalidArgumentError("已归档任务为只读，请先恢复归档");
   }
 
+  private refreshInvestigationAuthorization(task: TaskContext): void {
+    if (task.protocolVersion !== 2 || !task.activeEpochId) return;
+    const session = this.store.getInvestigationSession(task.taskId, task.activeEpochId);
+    if (!session || session.executionStatus === "STOPPED") return;
+    const authorizationVersion = computeAuthorizationVersion(task.target.hostFingerprint, this.store.listTaskGrants(task.taskId));
+    if (authorizationVersion === session.authorizationVersion) return;
+    for (const action of this.store.listInvestigationActions(task.taskId, task.activeEpochId)) {
+      if (action.status === "READY" && action.authorizationVersion !== authorizationVersion) {
+        this.store.blockReadyInvestigationAction(action.actionId, "AUTHORIZATION_VERSION_CHANGED");
+      }
+    }
+    const authorizationEnvelope = buildAuthorizationEnvelope(task.target.hostFingerprint, this.store.listTaskGrants(task.taskId), session.authorizationEnvelope?.budget ?? { remoteCalls: 0, nodes: 0, bytes: 0, wallTimeMs: 0, probeCalls: 0 });
+    this.store.updateInvestigationSession({ ...session, authorizationVersion, authorizationEnvelope, revision: session.revision + 1, updatedAt: new Date().toISOString() }, session.revision);
+  }
+
   private finishActiveEpoch(taskId: string): void {
     const task = this.requireTask(taskId);
     if (task.protocolVersion !== 2 || !task.activeEpochId) return;
@@ -298,7 +358,7 @@ export class Application extends EventEmitter {
     if (epoch?.status !== "RUNNING") return;
     const coverage = this.store.listCoverageRuns(taskId, task.activeEpochId);
     const partial = coverage.length !== task.checks.length || coverage.some((run) => run.status !== "COMPLETE" || run.applicability === "UNKNOWN");
-    this.store.finishScanEpoch(taskId, task.activeEpochId, partial ? "PARTIAL" : "COMPLETED");
+    this.store.finishScanEpoch(taskId, task.activeEpochId, partial ? "PARTIAL" : "COMPLETED", resolveControllerBuildIdentity());
   }
 }
 

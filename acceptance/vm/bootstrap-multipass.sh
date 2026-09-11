@@ -333,6 +333,8 @@ cat <<NEXT
      npm run start:gui
    验收要点与清理步骤见 acceptance/vm/README.md。
 
+   journald/systemd 专项的附加授权变量与命令也见 acceptance/vm/README.md。
+
 3. 回填：
      cp acceptance/vm/验收记录模板.md \\
         "acceptance/vm/验收记录-${distro}-${version}-${arch}-\$(date +%F).md"

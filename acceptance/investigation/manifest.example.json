@@ -1,0 +1,30 @@
+{
+  "schemaVersion": 2,
+  "suiteId": "m2-local-example",
+  "evaluationMode": "DEVELOPMENT",
+  "environment": {
+    "targetOs": "replace-with-os-and-version",
+    "architecture": "arm64",
+    "transport": "SSH",
+    "provider": "replace-with-provider-or-remove",
+    "applicationVersion": "0.3.0-beta.1",
+    "protocolVersion": 2,
+    "manifestVersion": "3.0.0",
+    "helperVersion": "3.0.0",
+    "investigationEngineVersion": "1.0.0",
+    "ruleRegistryVersion": "2.3.0",
+    "playbookRegistryVersion": "1.3.0",
+    "commit": "0000000000000000000000000000000000000000",
+    "budgetProfile": "STANDARD"
+  },
+  "cases": [{
+    "caseId": "replace-with-real-task",
+    "taskId": "TASK-REPLACE",
+    "disposition": "MALICIOUS",
+    "entryMode": "ZERO_IOC",
+    "runKind": "FIRST",
+    "expectedCategories": ["linux_intrusion_triage"],
+    "expectedFacts": [{ "namespace": "process", "field": "exe", "value": "/tmp/payload", "evidenceRequired": true }]
+  }],
+  "thresholds": { "minCollectionRecall": 0.95, "minDiscoveryRecall": 0.95, "minEvidencePreservation": 0.95, "minObligationClosure": 1, "maxBenignFalsePositive": 0.05, "minRelationshipRecall": 0.95, "minLimitedRecognition": 1, "minAutonomousCompletion": 0.95 }
+}

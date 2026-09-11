@@ -27,6 +27,8 @@ export const IPC = {
   taskSnapshot: "huntwarden:task:snapshot",
   taskCreate: "huntwarden:task:create",
   taskStart: "huntwarden:task:start",
+  taskPause: "huntwarden:task:pause",
+  taskResume: "huntwarden:task:resume",
   taskAbort: "huntwarden:task:abort",
   taskArchive: "huntwarden:task:archive",
   taskRestore: "huntwarden:task:restore",
@@ -40,6 +42,7 @@ export const IPC = {
   reportList: "huntwarden:report:list",
   reportRead: "huntwarden:report:read",
   evidenceReveal: "huntwarden:evidence:reveal",
+  evidenceExport: "huntwarden:evidence:export",
   reportReveal: "huntwarden:report:reveal",
   event: "huntwarden:event",
 } as const;

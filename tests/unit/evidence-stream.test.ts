@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdtemp, readFile, readdir, rm, stat } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -48,6 +48,25 @@ describe("Evidence 流式落盘", () => {
 
     expect(runtime.listEvidence(task.taskId)).toHaveLength(0);
     expect(await readdir(join(directory, "evidence", task.taskId))).toHaveLength(0);
+    runtime.close();
+  });
+
+  it("恢复核验会标记损坏 Evidence，并列出孤儿与未完成临时文件", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "huntwarden-evidence-reconcile-"));
+    directories.push(directory);
+    const runtime = await RuntimeStore.open(directory, "runtime.db");
+    const task = testTask(); runtime.createTask(task);
+    const store = new EvidenceStore(directory, runtime);
+    const evidence = await store.putBuffer({ taskId: task.taskId, host: task.target.host, type: "file", source: "captured.bin", tool: "collect", data: Buffer.from("original"), metadata: { complete: true } });
+    await writeFile(evidence.storagePath!, "tampered");
+    const taskDir = join(directory, "evidence", task.taskId);
+    const orphan = join(taskDir, "orphan.bin");
+    const temporary = join(taskDir, "staged.999.tmp");
+    await writeFile(orphan, "orphan"); await writeFile(temporary, "partial");
+
+    const result = await store.reconcileTask(task.taskId);
+    expect(result).toEqual({ verified: 0, failed: [evidence.evidenceId], orphanPaths: [orphan], temporaryPaths: [temporary] });
+    expect(runtime.getEvidence(task.taskId, evidence.evidenceId)?.metadata).toMatchObject({ complete: false, integrityStatus: "FAILED" });
     runtime.close();
   });
 });
