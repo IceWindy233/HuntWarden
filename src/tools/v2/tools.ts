@@ -580,14 +580,14 @@ export function estimateRemoteCost(verb: ForensicVerb, params: Record<string, un
       : verb === "probe" && params.probeKind === "jvm.tomcat.inventory"
         ? 500
         : 1;
-  // Helper 以 Observation JSON 的 UTF-8 字节数结算，而不是仅读取的原始字节数。
-  // 非法 UTF-8 可被替换为 U+FFFD，json.dumps(ensure_ascii=true) 最坏会膨胀到
-  // 每个输入字节 6 字节；另留固定空间给 identity、文件元数据和 Envelope。
+  // Helper 的 collect 响应不内联 Artifact，但 bytes 成本仍包含对象身份、路径、摘要等
+  // Observation JSON。小文件的 maxBytes 可能只有几十字节，不能拿它充当响应预算；
+  // 至少预留 Helper 输出上限，结算时再归还未使用部分。大 Artifact 仍按采集上限预留。
   const readLength = Number(params.length ?? 65_536);
   const bytes = verb === "read"
     ? Math.min(1_572_864, readLength * 6 + 16_384)
     : verb === "collect"
-      ? Number(params.maxBytes ?? 104_857_600)
+      ? Math.max(1_572_864, Number(params.maxBytes ?? 104_857_600))
       : 1_572_864;
   return { remoteCalls: 1, nodes, bytes, wallTimeMs: verb === "probe" ? 115_000 : 60_000, probeCalls: verb === "probe" ? 1 : 0 };
 }

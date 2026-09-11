@@ -37,10 +37,12 @@ async function v2Store() {
 }
 
 describe("Tool Protocol v2 invariants", () => {
-  it("read 预算覆盖 Observation JSON 与最坏字符转义开销", () => {
+  it("远程预算覆盖读取编码膨胀与小文件 collect 的对象元数据", () => {
     expect(estimateRemoteCost("read", { length: 467 }).bytes).toBe(19_186);
     expect(estimateRemoteCost("read", { length: 65_536 }).bytes).toBe(409_600);
-    expect(estimateRemoteCost("collect", { maxBytes: 12_345 }).bytes).toBe(12_345);
+    expect(estimateRemoteCost("collect", { maxBytes: 183 }).bytes).toBe(1_572_864);
+    expect(estimateRemoteCost("collect", { maxBytes: 12_345 }).bytes).toBe(1_572_864);
+    expect(estimateRemoteCost("collect", { maxBytes: 10_000_000 }).bytes).toBe(10_000_000);
     expect(estimateRemoteCost("enumerate", { namespace: "account", predicate: { op: "eq", field: "uid", value: 1 }, limit: 10 }).nodes).toBe(5_000);
     expect(estimateRemoteCost("enumerate", { namespace: "file", limit: 10 }).nodes).toBe(5_000);
   });
