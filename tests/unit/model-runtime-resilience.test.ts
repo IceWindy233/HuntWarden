@@ -239,6 +239,135 @@ describe("模型运行时故障降级", () => {
     ]));
   });
 
+  it("已有重复模型里程碑时仍协调每个残留 required obligation", async () => {
+    const { store, task, epoch, faux, runtime } = await fixture();
+    const now = new Date().toISOString();
+    const bootstrapObligation = store.listInvestigationObligations(task.taskId, epoch.epochId)[0]!;
+    store.updateInvestigationObligation({ ...bootstrapObligation, status: "SATISFIED", updatedAt: now }, "OPEN");
+    const fact = store.commitFactBatch({
+      taskId: task.taskId,
+      epochId: epoch.epochId,
+      sourceRunId: "MODEL-DUPLICATE-FACT",
+      source: { kind: "SYSTEM" },
+      targetFingerprint: task.target.hostFingerprint,
+      requestId: "MODEL-DUPLICATE-FACT",
+      collector: { name: "enumerate", version: "2.0.0" },
+      observations: [{
+        namespace: "process",
+        identity: { bootId: "boot", pid: 92, startTicks: "10", exeInode: "20", exeSha256: "e".repeat(64) },
+        fields: { bootId: "boot", pid: 92, startTicks: "10", exeInode: "20", exeSha256: "e".repeat(64) },
+        observedAt: now,
+        consistency: "OBJECT_STABLE",
+      }],
+      edges: [],
+      gaps: [],
+      wireDigest: "f".repeat(64),
+    }).facts[0]!;
+    const subjectRef = fact.subjectRef;
+    const hypothesisId = "HYP-00000000-0000-4000-8000-000000000092";
+    const openObligationId = "OBL-00000000-0000-4000-8000-000000000092";
+    store.putInvestigationHypothesis({
+      hypothesisId,
+      taskId: task.taskId,
+      epochId: epoch.epochId,
+      subjectRef,
+      claim: "重复假设仍有替代解释待验证",
+      proposedBy: "MODEL",
+      supportRefs: [fact.factId],
+      counterEvidenceRefs: [],
+      alternativeExplanations: ["正常业务组件"],
+      status: "OPEN",
+      revision: 0,
+      createdAt: now,
+      updatedAt: now,
+    });
+    store.putInvestigationObligation({
+      obligationId: openObligationId,
+      taskId: task.taskId,
+      epochId: epoch.epochId,
+      hypothesisId,
+      obligationKind: "TEST_ALTERNATIVE_EXPLANATIONS",
+      dedupeKey: `TEST_ALTERNATIVE_EXPLANATIONS:${hypothesisId}`,
+      subjectRefs: [subjectRef],
+      required: true,
+      status: "OPEN",
+      resultRefs: [],
+      gapRefs: [],
+      createdAt: now,
+      updatedAt: now,
+    });
+    const actionArgs = { ref: subjectRef };
+    store.putInvestigationAction({
+      actionId: "ACTION-MODEL-DUPLICATE",
+      taskId: task.taskId,
+      epochId: epoch.epochId,
+      kind: "LOCAL_QUERY",
+      requestedBy: "MODEL",
+      obligationIds: [bootstrapObligation.obligationId],
+      subjectRefs: [subjectRef],
+      entityVersionRefs: [],
+      operationRef: "query_facts",
+      replayPolicy: "SAFE_REOBSERVE",
+      args: actionArgs,
+      argsDigest: digestObject(actionArgs),
+      dependsOn: [],
+      authorizationVersion: "AUTH-1",
+      observationRound: "ROUND-1",
+      idempotencyKey: `${task.taskId}:${epoch.epochId}:duplicate-milestone`,
+      priority: 10,
+      status: "SUCCEEDED",
+      revision: 0,
+      createdAt: now,
+      updatedAt: now,
+    });
+    task.checks.forEach((category, index) => store.putAssessment({
+      assessmentId: `ASM-MODEL-DUPLICATE-${index}`,
+      taskId: task.taskId,
+      epochId: epoch.epochId,
+      authorType: "MODEL",
+      category,
+      scope: "OBSERVED_CATEGORY",
+      verdict: "INCONCLUSIVE",
+      severity: "INFO",
+      confidence: 0.5,
+      rationale: "已有类别裁定不能替代未完成的假设义务",
+      evidenceRefs: [],
+      factRefs: [],
+      queryRefs: [],
+      createdAt: now,
+    }));
+    let providerCalls = 0;
+    let reconciliationContext: Context | undefined;
+    faux.setResponses([
+      () => { providerCalls += 1; return fauxAssistantMessage("调查正文已完成。"); },
+      (context) => {
+        providerCalls += 1;
+        reconciliationContext = context;
+        return fauxAssistantMessage("已核对残留义务。");
+      },
+    ]);
+
+    await runtime.prompt("审查当前调查");
+
+    expect(providerCalls).toBe(2);
+    expect(JSON.stringify(reconciliationContext?.messages)).toContain(openObligationId);
+    expect(store.listAudit(task.taskId)).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        event: "model_milestone_reconciliation_started",
+        data: expect.objectContaining({
+          missing: expect.objectContaining({ openObligationIds: [openObligationId] }),
+        }),
+      }),
+      expect.objectContaining({
+        event: "model_milestone_reconciliation_finished",
+        level: "warn",
+        data: expect.objectContaining({
+          remaining: expect.objectContaining({ openObligationIds: [openObligationId] }),
+        }),
+      }),
+    ]));
+  });
+
   it("第 5 轮调查仍缺里程碑时只追加一次控制端提醒", async () => {
     const { store, task, faux, runtime } = await fixture();
     const current = store.getTask(task.taskId)!;

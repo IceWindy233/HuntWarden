@@ -868,8 +868,9 @@ export class SecurityAgentRuntime extends EventEmitter {
       hypothesis: modelHypothesisIds.size === 0,
       action: modelActions.length === 0,
       assessmentCategories: this.options.task.checks.filter((category) => !concluded.has(category)),
+      openObligationIds: openObligations.map((item) => item.obligationId),
     };
-    if (!missing.hypothesis && !missing.action && missing.assessmentCategories.length === 0) return;
+    if (!missing.hypothesis && !missing.action && missing.assessmentCategories.length === 0 && missing.openObligationIds.length === 0) return;
 
     this.options.store.appendAudit({
       taskId,
@@ -881,21 +882,24 @@ export class SecurityAgentRuntime extends EventEmitter {
 
 请只补齐缺失项，不重复已有记录，也不扩大枚举范围：
 1. 若缺少 hypothesis，从当前 Fact/Assessment 中选择一个真实 subjectRef，调用 propose_hypothesis；必须提供支持事实、反证和至少一种替代解释。
-2. 若缺少 action，使用已有或刚创建的 MODEL hypothesis/obligation，调用 propose_actions 提交至少一个白名单、非重复且能检验替代解释的动作，并检查调度结果。不能直接调用远程原语冒充 MODEL Action。
+2. 对 openObligationIds 中的每个义务，必须使用它已有的 hypothesisId/obligationId 调用 propose_actions，提交至少一个白名单、非重复且能检验替代解释的动作，并检查调度结果；不要另建相似假设绕过原义务。若仅缺少 action，则使用已有或刚创建的 MODEL hypothesis/obligation 完成同样操作。不能直接调用远程原语冒充 MODEL Action。
 3. 为每个缺失类别调用 record_assessment 写 OBSERVED_CATEGORY；有具体可疑对象时另写 SUBJECT 风险结论。不得把 PARTIAL/ERROR/UNKNOWN 或未决缺口解释为安全。
-4. 通过 query_investigation 核对以上记录已持久化后直接收尾。`);
+4. 通过 query_investigation 核对以上记录已持久化、openObligationIds 已清空后直接收尾。`);
 
     const afterHypotheses = this.options.store.listInvestigationHypotheses(taskId, epochId).filter((item) => item.proposedBy === "MODEL");
     const afterActions = this.options.store.listInvestigationActions(taskId, epochId).filter((item) => item.requestedBy === "MODEL");
     const afterConcluded = new Set(this.options.store.listAssessments(taskId, epochId)
       .filter((item) => item.authorType === "MODEL" && item.scope === "OBSERVED_CATEGORY")
       .map((item) => item.category));
+    const afterEvaluation = new InvestigationCompletionValidator(this.options.store).evaluate(taskId, epochId);
     const remaining = {
       hypothesis: afterHypotheses.length === 0,
       action: afterActions.length === 0,
       assessmentCategories: this.options.task.checks.filter((category) => !afterConcluded.has(category)),
+      openObligationIds: afterEvaluation.openRequiredObligationIds,
     };
-    const complete = !remaining.hypothesis && !remaining.action && remaining.assessmentCategories.length === 0;
+    const complete = !remaining.hypothesis && !remaining.action
+      && remaining.assessmentCategories.length === 0 && remaining.openObligationIds.length === 0;
     this.options.store.appendAudit({
       taskId,
       event: "model_milestone_reconciliation_finished",

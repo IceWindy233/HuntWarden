@@ -8,6 +8,7 @@
 
 - 报告投影现在把当前 Epoch 的只读 ToolRun ID 纳入引用白名单；模型 Assessment 引用实际远程采集运行时，确定性回退报告不再误判为未知 Action，同时继续拒绝跨 Epoch 引用。
 - Socket owner 映射只读取稳定进程身份与 PID namespace，不再因无关的进程环境变量名或 cgroup 元数据截断把完整网络枚举降级为 `PARTIAL`。
+- 模型已形成通用 Hypothesis/Action/Assessment 里程碑时，控制端仍会逐项协调同一调查中残留的模型 required obligation；相似重试假设不再掩盖未验证的替代解释。
 
 ## [0.3.0-beta.2] - 2026-09-14
 
