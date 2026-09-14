@@ -4,6 +4,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- 报告投影现在把当前 Epoch 的只读 ToolRun ID 纳入引用白名单；模型 Assessment 引用实际远程采集运行时，确定性回退报告不再误判为未知 Action，同时继续拒绝跨 Epoch 引用。
+
 ## [0.3.0-beta.2] - 2026-09-14
 
 ### Added
