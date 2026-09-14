@@ -10,6 +10,12 @@
 - Socket owner 映射只读取稳定进程身份与 PID namespace，不再因无关的进程环境变量名或 cgroup 元数据截断把完整网络枚举降级为 `PARTIAL`。
 - 模型已形成通用 Hypothesis/Action/Assessment 里程碑时，控制端仍会逐项协调同一调查中残留的模型 required obligation；相似重试假设不再掩盖未验证的替代解释。
 
+### Validation
+
+- 合并提交 `f804591ebff84cba4e4aaad4b9d8ffb21debd203` 的真实 Provider schema v2 资格为 `PASS`：远端 `tokenrhythm/glm-5.3-flash` 在线 Tool Call、稳定公网 DNS、两种本机协议故障契约、零 IOC Linux 与 Tomcat 9/JDK 17 联合任务全部通过。
+- Linux 任务的 12/12 次 Provider HTTP、2 个 MODEL Action 和 15 个 DiscoveryCheckpoint 均成功；Java 任务的 21/21 次 Provider HTTP、3 个 MODEL Action、17 条完整类字节码 Evidence 均成功，其中 5 条由模型引用。两任务的 Task/Epoch 均为 `COMPLETED`，调查均为 `CLOSED_NO_OBSERVED_FINDING`。
+- 该结果只补齐当前提交的真实 Provider 单项资格；`0.3.0-beta.2` 已发布资产仍绑定旧提交，五平台、真实业务 JVM、运维原件尚未在 `f804591e` 重跑，独立 100 恶意 + 100 良性 + 受限盲测仍未执行，因此稳定发布继续 `BLOCKED`。
+
 ## [0.3.0-beta.2] - 2026-09-14
 
 ### Added
