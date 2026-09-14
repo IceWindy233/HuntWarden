@@ -19,6 +19,7 @@ interface ReportProjectionV2 {
   evidence: Record<string, unknown>[];
   actions: Record<string, unknown>[];
   recovery: Record<string, unknown>[];
+  toolRunIds: string[];
   modelState: Array<{ category: string; state: "CONCLUDED" | "NOT_CONCLUDED" }>;
   investigation: {
     session?: InvestigationSession;
@@ -211,6 +212,9 @@ export class ReportService {
         ...this.store.listApprovals(task.taskId).filter((item) => item.epochId === epochId),
         ...this.store.listActionReceipts(task.taskId).filter((item) => item.epochId === epochId),
       ] as unknown as Record<string, unknown>[],
+      toolRunIds: this.store.listToolRuns(task.taskId, 100_000)
+        .filter((item) => item.epochId === epochId)
+        .map((item) => item.toolCallId),
       recovery: this.store.listAudit(task.taskId)
         .filter((item) => item.data.epochId === epochId && (item.event.includes("recover") || item.event.includes("interrupt")))
         .map(({ eventId: _eventId, taskId: _taskId, ...item }) => item as unknown as Record<string, unknown>),
@@ -234,7 +238,10 @@ export class ReportService {
       coverage: new Set(projection.coverage.map((item) => item.coverageId)),
       gap: new Set(projection.investigationGaps.map((item) => item.gapId)),
       evidence: new Set(projection.evidence.map((item) => String(item.evidenceId ?? "")).filter(Boolean)),
-      action: new Set(projection.actions.map((item) => String(item.actionId ?? "")).filter(Boolean)),
+      action: new Set([
+        ...projection.actions.map((item) => String(item.actionId ?? "")).filter(Boolean),
+        ...projection.toolRunIds,
+      ]),
     };
     for (const id of markdown.match(/\bASM-[0-9a-f-]{36}/gi) ?? []) if (!allowed.assessment.has(id)) errors.push(`未知 Assessment 引用: ${id}`);
     for (const id of markdown.match(/\bCOV-[0-9a-f-]{36}/gi) ?? []) if (!allowed.coverage.has(id)) errors.push(`未知 Coverage 引用: ${id}`);

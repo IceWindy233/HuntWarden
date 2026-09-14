@@ -62,12 +62,24 @@ describe("ReportService v2", () => {
 
   it("INV-20：拒绝投影外的 v2 引用", async () => {
     const { directory, store, task } = await fixture();
+    const currentEpochToolRunId = "ACT-00000000-0000-4000-8000-000000000041";
+    const previousEpochToolRunId = "ACT-00000000-0000-4000-8000-000000000040";
+    for (const [toolCallId, epochId] of [
+      [currentEpochToolRunId, task.activeEpochId!],
+      [previousEpochToolRunId, "EPOCH-00000000-0000-4000-8000-000000000040"],
+    ] as const) {
+      store.startToolRun({
+        toolCallId, taskId: task.taskId, epochId, toolName: "project",
+        risk: "READ", replayPolicy: "SAFE_REOBSERVE", args: { ref: "OBJ-test" },
+      });
+      store.finishToolRun(toolCallId, "SUCCEEDED", {});
+    }
     const service = new ReportService(directory, store);
-    const valid = [task.activeEpochId, "INVESTIGATION: OPEN / INCOMPLETE", "COV-00000000-0000-4000-8000-000000000041 PARTIAL APPLICABLE", "MODEL: NOT_CONCLUDED", "ASM-00000000-0000-4000-8000-000000000041 INCONCLUSIVE", "webshell::OBSERVED_CATEGORY::OBSERVED_CATEGORY INCONCLUSIVE", "IGAP-00000000-0000-4000-8000-000000000041 MODEL_DID_NOT_INVESTIGATE", "INCOMPLETE"].join("\n");
+    const valid = [task.activeEpochId, "INVESTIGATION: OPEN / INCOMPLETE", "COV-00000000-0000-4000-8000-000000000041 PARTIAL APPLICABLE", "MODEL: NOT_CONCLUDED", "ASM-00000000-0000-4000-8000-000000000041 INCONCLUSIVE", "webshell::OBSERVED_CATEGORY::OBSERVED_CATEGORY INCONCLUSIVE", "IGAP-00000000-0000-4000-8000-000000000041 MODEL_DID_NOT_INVESTIGATE", currentEpochToolRunId, "INCOMPLETE"].join("\n");
     expect(service.validate(task.taskId, valid).valid).toBe(true);
     expect(service.validate(task.taskId, `${valid}\nFACT-00000000-0000-4000-8000-999999999999`).valid).toBe(true);
-    const invalid = `${valid}\nASM-00000000-0000-4000-8000-999999999999\nEV-00000000-0000-4000-8000-999999999999`;
-    expect(service.validate(task.taskId, invalid)).toMatchObject({ valid: false, errors: expect.arrayContaining([expect.stringContaining("未知 Assessment"), expect.stringContaining("未知 Evidence")]) });
+    const invalid = `${valid}\nASM-00000000-0000-4000-8000-999999999999\nEV-00000000-0000-4000-8000-999999999999\n${previousEpochToolRunId}`;
+    expect(service.validate(task.taskId, invalid)).toMatchObject({ valid: false, errors: expect.arrayContaining([expect.stringContaining("未知 Assessment"), expect.stringContaining("未知 Evidence"), expect.stringContaining("未知 Action")]) });
     store.close();
   });
 
