@@ -4,6 +4,8 @@
 
 ## [Unreleased]
 
+## [0.3.0-beta.2] - 2026-09-14
+
 ### Added
 
 - 新增仓库外调查批跑、评分清单绑定与发布资格汇总入口，保留 FIRST/RETRY 和中断账本；缺项只生成 BLOCKED 清单，不把开发结果提升为正式资格。
@@ -21,8 +23,8 @@
 
 ### Validation
 
-- `0.3.0-beta.2` 预发布候选已从仓库外干净提交 `14913025fbac44ecbef6e21e77a1923f6b609b21` 构建；本次通过 244 项测试、Docker 14/14、GUI 16/16、五平台、真实业务 12 次 Attach、运维迁移回退及规模负载。维护者委托、AI/automation 执行，非第三方验收。
-- 真实 Provider FIRST 失败、透明 RETRY 仍为 LIMITED，独立盲测未执行；稳定发布继续 BLOCKED。ZIP/DMG 保留预发布警示与摘要，尚未创建发布标签或 GitHub Release。具体证据与已知限制见 `docs/版本发布说明.md`。
+- `0.3.0-beta.2` 资格演练候选使用仓库外干净提交 `14913025fbac44ecbef6e21e77a1923f6b609b21`；通过 244 项测试、Docker 14/14、GUI 16/16、五平台、真实业务 12 次 Attach、运维迁移回退及规模负载。维护者委托、AI/automation 执行，非第三方验收。
+- GitHub Prerelease `v0.3.0-beta.2` 已从合并提交 `5d416ae70a7e220ad298e47d1ca2da8072e7dc20` 重新构建并发布，ZIP/DMG 保留预发布警示与摘要。真实 Provider FIRST 失败、透明 RETRY 仍为 LIMITED，独立盲测未执行；稳定发布继续 BLOCKED。具体证据与已知限制见 `docs/版本发布说明.md`。
 
 ## [0.3.0-beta.1] - 2026-09-10
 
@@ -186,7 +188,8 @@
 - 重启前未消费授权全部过期；远端写动作恢复时优先核对 Action Receipt，禁止盲目重放。
 - `PARTIAL`、`ERROR` 与 `NOT_CHECKED` 不会被报告为安全，Prompt Injection 不得扩展工具范围。
 
-[Unreleased]: https://github.com/IceWindy233/HuntWarden/compare/v0.3.0-beta.1...HEAD
+[Unreleased]: https://github.com/IceWindy233/HuntWarden/compare/v0.3.0-beta.2...HEAD
+[0.3.0-beta.2]: https://github.com/IceWindy233/HuntWarden/compare/v0.3.0-beta.1...v0.3.0-beta.2
 [0.3.0-beta.1]: https://github.com/IceWindy233/HuntWarden/compare/v0.2.0...v0.3.0-beta.1
 [0.2.0]: https://github.com/IceWindy233/HuntWarden/releases/tag/v0.2.0
 [0.1.1]: https://github.com/IceWindy233/HuntWarden/releases/tag/v0.1.1
