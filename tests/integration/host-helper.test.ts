@@ -205,6 +205,47 @@ _rows, hard_warnings, hard_partial, _scan = inventory({}, 0, 500, True)
 print(json.dumps({"pids": [row["pid"] for row in rows], "warnings": warnings, "partial": partial, "scan": scan,
                   "hardWarnings": hard_warnings, "hardPartial": hard_partial}))
 `;
+const socketOwnerMetadataHarness = `
+import json, runpy, types, sys
+ns = runpy.run_path(sys.argv[1])
+collector = ns["read_global_connections"]
+globals_dict = collector.__globals__
+captured = {}
+def enumerate_processes(maximum, include_hash=True, include_context=True):
+    captured.update({"maximum": maximum, "includeHash": include_hash, "includeContext": include_context})
+    process = {"bootId": "boot", "pid": 42, "startTicks": "100"}
+    if include_context:
+        process["namespaces"] = {"pid": "pid:[4026531836]"}
+    return [process], (["environment metadata truncated"] if include_context else []), include_context
+globals_dict["enumerate_stable_processes"] = enumerate_processes
+globals_dict["deadline_exceeded"] = lambda: False
+globals_dict["proc_stat_fields"] = lambda _pid: {"startTicks": "100"}
+class FakePath:
+    def __init__(self, value):
+        self.value = str(value)
+    def __str__(self):
+        return self.value
+    def iterdir(self):
+        return ["/proc/42/fd/3"] if self.value == "/proc/42/fd" else []
+    def is_file(self):
+        return self.value.startswith("/proc/net/")
+    def read_text(self, *_args, **_kwargs):
+        header = "sl local_address rem_address st tx_queue tr tm->when retrnsmt uid timeout inode"
+        if self.value == "/proc/net/tcp":
+            return header + "\\n0: 0100007F:1F90 00000000:0000 0A 00000000:00000000 00:00000000 00000000 0 0 9"
+        return header
+globals_dict["pathlib"] = types.SimpleNamespace(Path=FakePath)
+def readlink(path):
+    value = str(path)
+    if value == "/proc/42/ns/pid":
+        return "pid:[4026531836]"
+    if value == "/proc/42/fd/3":
+        return "socket:[9]"
+    raise FileNotFoundError(value)
+globals_dict["os"] = types.SimpleNamespace(readlink=readlink)
+items, warnings, partial = collector(20)
+print(json.dumps({"captured": captured, "items": items, "warnings": warnings, "partial": partial}))
+`;
 const resumableFileScanHarness = `
 import json, pathlib, runpy, sys
 ns = runpy.run_path(sys.argv[1])
@@ -583,6 +624,22 @@ print(json.dumps({"kind": kind, "partial": ledger.partial, "warnings": ledger.wa
     };
     expect(output).toMatchObject({ pids: [10, 13], warnings: [], partial: false, scan: { scannedCount: 4, matchedCount: 2, complete: true }, hardPartial: true });
     expect(output.hardWarnings).toEqual(expect.arrayContaining([expect.stringContaining("permission denied")]));
+  });
+
+  it("Socket owner 枚举不因无关进程环境或 cgroup 元数据截断而降级", () => {
+    const result = spawnSync("python3", ["-c", socketOwnerMetadataHarness, helper], { encoding: "utf8" });
+    expect(result.status, result.stderr).toBe(0);
+    const output = JSON.parse(result.stdout) as {
+      captured: { maximum: number; includeHash: boolean; includeContext: boolean };
+      items: Array<{ processPid?: number; ownerBootId?: string; ownerStartTicks?: string; ownerPidNamespace?: string }>;
+      warnings: string[];
+      partial: boolean;
+    };
+    expect(output.captured).toEqual({ maximum: 5000, includeHash: false, includeContext: false });
+    expect(output.items).toEqual([expect.objectContaining({
+      processPid: 42, ownerBootId: "boot", ownerStartTicks: "100", ownerPidNamespace: "pid:[4026531836]",
+    })]);
+    expect(output).toMatchObject({ warnings: [], partial: false });
   });
 
   it("Probe 参数不能改写对象绑定，部分输出显式降级且 ClassLoader 身份贯通", () => {

@@ -1668,13 +1668,17 @@ def read_global_connections(maximum: int) -> tuple[list[dict[str, Any]], list[st
     owners: dict[str, dict[str, Any]] = {}
     ambiguous_inodes: set[str] = set()
     processes, process_warnings, process_partial = enumerate_stable_processes(
-        5000, include_hash=False, include_context=True)
+        5000, include_hash=False, include_context=False)
     warnings.extend(process_warnings)
     if process_partial:
         warnings.append("套接字所有者进程枚举不完整")
     for process in processes:
-        pid_namespace = process.get("namespaces", {}).get("pid")
-        if not isinstance(pid_namespace, str) or not pid_namespace:
+        try:
+            pid_namespace = os.readlink(f"/proc/{process['pid']}/ns/pid")[:256]
+        except (FileNotFoundError, ProcessLookupError):
+            continue
+        except OSError:
+            warnings.append(f"PID {process['pid']}: cannot inspect process PID namespace")
             continue
         owner = {"processPid": process["pid"], "ownerBootId": process["bootId"],
                  "ownerStartTicks": process["startTicks"], "ownerPidNamespace": pid_namespace}
