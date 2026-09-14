@@ -4,6 +4,26 @@
 
 ## [Unreleased]
 
+### Added
+
+- 新增仓库外调查批跑、评分清单绑定与发布资格汇总入口，保留 FIRST/RETRY 和中断账本；缺项只生成 BLOCKED 清单，不把开发结果提升为正式资格。
+- 新增 macOS ARM64 上的四个官方 x86_64 QEMU/TCG 平台准备入口，串口带外绑定 Host Key、记录镜像摘要并顺序运行；声明未确认时始终标记为 PREPARATION。
+
+### Fixed
+
+- 正式盲测的评分答案必须与固定归档 `truth.json` 完整匹配；使用真实路径防止符号链接将答案写回运行目录。直接评分同样要求原始运行账本和归档，并核对数据库全部 Epoch 的起止提交、干净状态、Helper 摘要及运行时间。
+- 批跑限制数据库为独立目录中的单文件名，避免绝对文件名绕过新库检查；外部场景控制器仅继承执行必需环境，不再继承模型或威胁情报凭据。未配置控制器时不记作已完成清理。
+- 业务 JVM 验收可核验 HTTP 响应 JSON 的业务状态与数据，拒绝 HTTP 200 包装的认证失败；基线与 Attach 负载采用相同并发与请求间隔，避免串行基线造成虚假延迟退化。
+- Tomcat Probe 支持嵌入式 Spring Boot ROOT Context 和实际委派 ClassLoader 身份，避免完整 inventory 因空 context 或错误 loader 无法形成稳定组件身份。
+- QEMU overlay 不再截短大于默认容量的官方 backing 镜像；Amazon Linux 2023 使用原生 Corretto、匹配系统 Python 的固定 RE2 wheel 和经摘要核验的固定 YARA 源码。
+- 修复桌面启动恢复等待任务执行结束的死锁：后台任务登记立即返回，运行 Promise 由取消/关闭路径显式等待；崩溃后可重新进入界面并恢复持久化状态。
+- 修复文件 Scope 根目录过多时忽略 `limitRoots`、耗尽对象页容量而跳过后续扫描的问题；`SCAN_TRUNCATED` 明确表示不完整覆盖，不能被隐去为成功。
+
+### Validation
+
+- `0.3.0-beta.2` 预发布候选已从仓库外干净提交 `14913025fbac44ecbef6e21e77a1923f6b609b21` 构建；本次通过 244 项测试、Docker 14/14、GUI 16/16、五平台、真实业务 12 次 Attach、运维迁移回退及规模负载。维护者委托、AI/automation 执行，非第三方验收。
+- 真实 Provider FIRST 失败、透明 RETRY 仍为 LIMITED，独立盲测未执行；稳定发布继续 BLOCKED。ZIP/DMG 保留预发布警示与摘要，尚未创建发布标签或 GitHub Release。具体证据与已知限制见 `docs/版本发布说明.md`。
+
 ## [0.3.0-beta.1] - 2026-09-10
 
 ### Added

@@ -894,7 +894,19 @@ def search_web_access_log(request: dict[str, Any]) -> dict[str, Any]:
 
 
 def list_java_processes(_: dict[str, Any]) -> list[dict[str, Any]]:
-    return list_processes({"pattern": "java"})
+    rows = []
+    for value in list_processes({"pattern": "java"}):
+        try:
+            executable = pathlib.Path(os.readlink(f"/proc/{value['pid']}/exe")).name
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            raise HelperError("EVIDENCE_COLLECTION", "JVM executable identity is unavailable") from exc
+        # A launcher such as sudo can contain the complete Java command without
+        # hosting a JVM. A deleted Java executable is still a running JVM.
+        if executable in {"java", "java (deleted)"}:
+            rows.append(value)
+    return rows
 
 
 def detect_java_container(request: dict[str, Any]) -> dict[str, Any]:

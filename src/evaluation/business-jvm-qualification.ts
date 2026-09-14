@@ -6,11 +6,17 @@ import type { ForensicVerb } from "../executor/protocol-v2-executor.js";
 import { MANIFEST_VERSION, type HelperCapabilitiesV2, type WireRequest, type WireResponse, type WireSuccess } from "../protocol-v2/types.js";
 
 const Strict = { additionalProperties: false } as const;
+const JsonPathSchema = Type.Array(Type.String({ minLength: 1, maxLength: 128 }), { minItems: 1, maxItems: 16 });
+const JsonAssertionSchema = Type.Union([
+  Type.Object({ path: JsonPathSchema, equals: Type.Union([Type.String({ maxLength: 4096 }), Type.Number(), Type.Boolean(), Type.Null()]) }, Strict),
+  Type.Object({ path: JsonPathSchema, minItems: Type.Integer({ minimum: 1, maximum: 1_000_000 }) }, Strict),
+]);
 const EndpointSchema = Type.Object({
   method: Type.Optional(Type.Literal("GET")),
   url: Type.String({ minLength: 8, maxLength: 4096 }),
   expectedStatus: Type.Integer({ minimum: 100, maximum: 599 }),
   headersFromEnv: Type.Optional(Type.Record(Type.String({ minLength: 1, maxLength: 128 }), Type.String({ pattern: "^[A-Z][A-Z0-9_]{1,127}$" }))),
+  expectedJson: Type.Optional(Type.Array(JsonAssertionSchema, { minItems: 1, maxItems: 32 })),
 }, Strict);
 export const BusinessJvmQualificationManifestSchema = Type.Object({
   schemaVersion: Type.Literal(1),
@@ -104,6 +110,7 @@ export function parseBusinessJvmQualificationManifest(value: unknown): BusinessJ
   if (errors.length > 0) throw new Error(`真实业务 JVM 验收清单无效:\n${errors.map((item) => `${item.instancePath || "/"}: ${item.message}`).join("\n")}`);
   const manifest = structuredClone(value) as BusinessJvmQualificationManifest;
   if (!Number.isFinite(Date.parse(manifest.workload.attestedAt))) throw new Error("真实业务 JVM 工作负载 attestedAt 不是有效时间");
+  if (manifest.traffic.baselineRequests < manifest.traffic.concurrency) throw new Error("基线请求数不能少于并发数");
   for (const endpoint of manifest.traffic.endpoints) {
     let parsed: URL;
     try { parsed = new URL(endpoint.url); } catch { throw new Error("真实业务 JVM 流量端点 URL 无效"); }
@@ -119,25 +126,40 @@ function percentile95(values: number[]): number | null {
   return Math.round(sorted[Math.max(0, Math.ceil(sorted.length * 0.95) - 1)] ?? 0);
 }
 
-async function boundedBody(response: Response, maximum: number): Promise<void> {
-  if (!response.body) return;
+async function boundedBody(response: Response, maximum: number, retain: boolean): Promise<string | undefined> {
+  if (!response.body) return retain ? "" : undefined;
   const reader = response.body.getReader();
+  const chunks: Uint8Array[] | undefined = retain ? [] : undefined;
   let bytes = 0;
   try {
     for (;;) {
       const next = await reader.read();
-      if (next.done) return;
+      if (next.done) return chunks ? Buffer.concat(chunks, bytes).toString("utf8") : undefined;
       bytes += next.value.byteLength;
       if (bytes > maximum) throw new Error("RESPONSE_TOO_LARGE");
+      chunks?.push(next.value);
     }
   } finally {
     await reader.cancel().catch(() => undefined);
   }
 }
 
+function verifyJson(body: string, assertions: Static<typeof JsonAssertionSchema>[]): void {
+  let document: unknown;
+  try { document = JSON.parse(body); } catch { throw new Error("RESPONSE_JSON_INVALID"); }
+  for (const assertion of assertions) {
+    let value: unknown = document;
+    for (const key of assertion.path) {
+      if (!value || typeof value !== "object" || !Object.hasOwn(value, key)) throw new Error("RESPONSE_JSON_MISMATCH");
+      value = (value as Record<string, unknown>)[key];
+    }
+    if ("equals" in assertion ? !Object.is(value, assertion.equals) : !Array.isArray(value) || value.length < assertion.minItems) throw new Error("RESPONSE_JSON_MISMATCH");
+  }
+}
+
 function failureCode(error: unknown): string {
   if (error instanceof DOMException && error.name === "TimeoutError") return "REQUEST_TIMEOUT";
-  if (error instanceof Error && error.message === "RESPONSE_TOO_LARGE") return error.message;
+  if (error instanceof Error && ["RESPONSE_TOO_LARGE", "RESPONSE_JSON_INVALID", "RESPONSE_JSON_MISMATCH"].includes(error.message)) return error.message;
   return `REQUEST_${error instanceof Error && /^[A-Za-z][A-Za-z0-9]*$/.test(error.name) ? error.name.toUpperCase() : "FAILED"}`;
 }
 
@@ -188,7 +210,7 @@ export async function runBusinessJvmQualification(input: BusinessJvmQualificatio
   const before = await enumerateJvms();
   const selected = before.filter((item) => item.namespace === "jvm" && String(item.fields.command ?? "").includes(manifest.jvmSelector.commandContains));
   if (selected.length !== 1) failures.push(`JVM selector 必须唯一命中，实际 ${selected.length}`);
-  const jvm = selected[0];
+  const jvm = selected.length === 1 ? selected[0] : undefined;
   if (jvm?.fields.attachSupported !== true) failures.push("目标 JVM 不支持 Attach");
   const binding = jvm ? { namespace: "jvm", identity: jvm.identity, locator: {} } : undefined;
 
@@ -207,7 +229,8 @@ export async function runBusinessJvmQualification(input: BusinessJvmQualificatio
     const startedAt = performance.now();
     try {
       const response = await fetchImpl(endpoint.url, { method: endpoint.method ?? "GET", headers, redirect: "error", signal: AbortSignal.timeout(manifest.traffic.requestTimeoutMs) });
-      await boundedBody(response, manifest.traffic.maxResponseBytes);
+      const body = await boundedBody(response, manifest.traffic.maxResponseBytes, Boolean(endpoint.expectedJson));
+      if (endpoint.expectedJson) verifyJson(body!, endpoint.expectedJson);
       if (response.status !== endpoint.expectedStatus) trafficFailures.push(`HTTP_STATUS_${response.status}`);
     } catch (error) {
       trafficFailures.push(failureCode(error));
@@ -215,14 +238,26 @@ export async function runBusinessJvmQualification(input: BusinessJvmQualificatio
       target.push(performance.now() - startedAt);
     }
   };
-  for (let index = 0; index < manifest.traffic.baselineRequests; index += 1) await requestOnce(baselineLatencies);
+  const pause = () => {
+    const { promise, resolve } = Promise.withResolvers<void>();
+    if (manifest.traffic.pauseMs > 0) setTimeout(resolve, manifest.traffic.pauseMs);
+    else setImmediate(resolve);
+    return promise;
+  };
+  let baselineStarted = 0;
+  await Promise.all(Array.from({ length: manifest.traffic.concurrency }, async () => {
+    while (baselineStarted < manifest.traffic.baselineRequests) {
+      baselineStarted += 1;
+      await requestOnce(baselineLatencies);
+      await pause();
+    }
+  }));
 
   let running = true;
   const workers = Array.from({ length: manifest.traffic.concurrency }, async () => {
     while (running) {
       await requestOnce(loadedLatencies);
-      if (manifest.traffic.pauseMs > 0) await new Promise((resolve) => setTimeout(resolve, manifest.traffic.pauseMs));
-      else await new Promise<void>((resolve) => setImmediate(resolve));
+      await pause();
     }
   });
   let componentMisses = 0;
@@ -258,7 +293,9 @@ export async function runBusinessJvmQualification(input: BusinessJvmQualificatio
   const identityStable = Boolean(jvm && after.some((item) => item.namespace === "jvm" && digestObject(item.identity) === digestObject(jvm.identity)));
   const baselineP95 = percentile95(baselineLatencies);
   const loadedP95 = percentile95(loadedLatencies);
-  const loadedMax = loadedLatencies.length > 0 ? Math.round(Math.max(...loadedLatencies)) : null;
+  let loadedMax: number | null = null;
+  for (const latency of loadedLatencies) if (loadedMax === null || latency > loadedMax) loadedMax = latency;
+  if (loadedMax !== null) loadedMax = Math.round(loadedMax);
   const failureRate = trafficFailures.length / Math.max(1, baselineLatencies.length + loadedLatencies.length);
   if (loadedLatencies.length < manifest.traffic.minLoadedRequests) failures.push(`业务负载请求不足: ${loadedLatencies.length}/${manifest.traffic.minLoadedRequests}`);
   if (failureRate > manifest.traffic.maxFailureRate) failures.push(`业务请求失败率超限: ${failureRate}/${manifest.traffic.maxFailureRate}`);

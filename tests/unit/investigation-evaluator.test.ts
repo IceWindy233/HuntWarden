@@ -2,7 +2,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { evaluateInvestigation, parseInvestigationEvaluationManifest } from "../../src/evaluation/investigation-evaluator.js";
+import { evaluateInvestigation, parseInvestigationEvaluationManifest, type InvestigationEvaluationManifest } from "../../src/evaluation/investigation-evaluator.js";
 import type { InvestigationSession } from "../../src/investigation/types.js";
 import type { ScanEpoch } from "../../src/protocol-v2/types.js";
 import { RuntimeStore } from "../../src/storage/runtime-store.js";
@@ -11,12 +11,15 @@ import { testTask } from "../helpers.js";
 const directories: string[] = []; const stores: RuntimeStore[] = [];
 afterEach(async () => { for (const store of stores.splice(0)) store.close(); await Promise.all(directories.splice(0).map((path) => rm(path, { recursive: true, force: true }))); });
 
-async function seed(caseId: string, malicious: boolean, adjudicate = malicious) {
-  const directory = await mkdtemp(join(tmpdir(), `huntwarden-eval-${caseId}-`)); directories.push(directory);
-  const store = await RuntimeStore.open(directory, "runtime.db"); stores.push(store);
+async function seed(caseId: string, malicious: boolean, adjudicate = malicious, existingStore?: RuntimeStore, identity?: { commit: string; helperSha256: string }) {
+  let store = existingStore;
+  if (!store) {
+    const directory = await mkdtemp(join(tmpdir(), `huntwarden-eval-${caseId}-`)); directories.push(directory);
+    store = await RuntimeStore.open(directory, "runtime.db"); stores.push(store);
+  }
   const task = testTask(); task.taskId = `TASK-${caseId}`; task.protocolVersion = 2; task.checks = ["linux_intrusion_triage"]; store.createTask(task);
   const now = new Date().toISOString();
-  const epoch: ScanEpoch = { epochId: `EPOCH-${caseId}`, taskId: task.taskId, targetFingerprint: task.target.hostFingerprint, protocolVersion: 2, manifestVersion: "3.0.0", helperVersion: "3.0.0", reason: "INITIAL", status: "RUNNING", startedAt: now };
+  const epoch: ScanEpoch = { epochId: `EPOCH-${caseId}`, taskId: task.taskId, targetFingerprint: task.target.hostFingerprint, protocolVersion: 2, manifestVersion: "3.0.0", helperVersion: "3.0.0", reason: "INITIAL", status: "RUNNING", startedAt: now, ...(identity ? { controllerCommit: identity.commit, controllerTreeClean: true, helperSha256: identity.helperSha256 } : {}) };
   store.createScanEpoch(epoch); task.activeEpochId = epoch.epochId; store.saveTask(task);
   const session: InvestigationSession = { sessionId: `ISESS-${caseId}`, taskId: task.taskId, epochId: epoch.epochId, engineVersion: "1.0.0", playbookRegistryDigest: "a".repeat(64), ruleRegistryDigest: "b".repeat(64), authorizationVersion: "AUTH", executionStatus: "STOPPED", investigationStatus: malicious ? "CLOSED_WITH_FINDINGS" : "CLOSED_NO_OBSERVED_FINDING", revision: 0, createdAt: now, updatedAt: now };
   store.createInvestigationSession(session);
@@ -160,5 +163,49 @@ describe("自主调查端到端评测", () => {
     expect(() => parseInvestigationEvaluationManifest({ ...blind, cases: cases.slice(1) })).toThrow(/malicious=99/);
     expect(() => parseInvestigationEvaluationManifest({ ...blind, thresholds: { ...blind.thresholds, minDiscoveryRecall: 0.94 } })).toThrow(/阈值/);
     expect(() => parseInvestigationEvaluationManifest({ ...blind, environment: { ...blind.environment, commit: "abcdef0" } })).toThrow(/完整提交摘要/);
+  });
+
+  it("正式评分核对数据库全部 Epoch，不能以账本或选定旧 Epoch 掩盖身份漂移", async () => {
+    const identity = { commit: "a".repeat(40), helperSha256: "b".repeat(64) };
+    const startedAt = new Date().toISOString();
+    let store: RuntimeStore | undefined;
+    const cases: InvestigationEvaluationManifest["cases"] = [];
+    for (let index = 0; index < 201; index += 1) {
+      const disposition = index < 100 ? "MALICIOUS" : index < 200 ? "BENIGN" : "LIMITED";
+      const value = await seed(`BLIND-${index}`, disposition === "MALICIOUS", true, store, identity);
+      store = value.store;
+      if (disposition === "LIMITED") {
+        const session = store.getInvestigationSession(value.task.taskId, value.epoch.epochId)!;
+        store.updateInvestigationSession({ ...session, investigationStatus: "LIMITED", revision: session.revision + 1 }, session.revision);
+        const obligation = store.listInvestigationObligations(value.task.taskId, value.epoch.epochId)[0]!;
+        store.updateInvestigationObligation({ ...obligation, gapRefs: ["FIXTURE_UNAVAILABLE"] }, obligation.status);
+      }
+      store.finishScanEpoch(value.task.taskId, value.epoch.epochId, "COMPLETED", { commit: identity.commit, clean: true });
+      cases.push({ caseId: `case-${index}`, taskId: value.task.taskId, epochId: value.epoch.epochId, disposition, entryMode: "ZERO_IOC", runKind: "FIRST", expectedCategories: ["linux_intrusion_triage"],
+        expectedFacts: [{ namespace: "process", field: "exe", value: disposition === "MALICIOUS" ? "/tmp/payload" : "/usr/bin/updater", ...(disposition === "MALICIOUS" ? { evidenceRequired: true } : {}) }],
+        ...(disposition === "LIMITED" ? { expectedGapCodes: ["FIXTURE_UNAVAILABLE"] } : {}) });
+    }
+    const manifest = parseInvestigationEvaluationManifest({ schemaVersion: 2, suiteId: "actual-epoch-identity", evaluationMode: "BLIND_RELEASE",
+      truthSet: { archiveSha256: "d".repeat(64), frozenAt: "2026-09-07T00:00:00.000Z", curator: "curator", runner: "runner", independentFromTuning: true,
+        isolation: { targetAuthorizationContainsTruth: false, helperReceivesTruth: false, modelReceivesTruth: false } },
+      environment: { targetOs: "fixture", architecture: "arm64", transport: "SSH", applicationVersion: "0.3.0", protocolVersion: 2, manifestVersion: "3.0.0", helperVersion: "3.0.0", investigationEngineVersion: "1.0.0", ruleRegistryVersion: "2.3.0", playbookRegistryVersion: "1.3.1", commit: identity.commit, budgetProfile: "STANDARD" },
+      cases, thresholds: { minCollectionRecall: 0.95, minDiscoveryRecall: 0.95, minEvidencePreservation: 0.95, minObligationClosure: 1, maxBenignFalsePositive: 0.05, minLimitedRecognition: 1 } });
+    const runRecord = { schemaVersion: 1, suiteId: manifest.suiteId, evaluationMode: "BLIND_RELEASE", ...identity, clean: true, startedAt, finishedAt: new Date().toISOString(), state: "FINISHED", plannedCases: cases.length,
+      cases: cases.map((item) => ({ caseId: item.caseId, taskId: item.taskId, epochId: item.epochId, runKind: item.runKind, state: "FINISHED" })) };
+    const archivedTruth = { ...manifest, cases: manifest.cases.map(({ taskId: _taskId, epochId: _epochId, ...definition }) => definition) };
+    const qualification = { run: runRecord, archivedTruth, archiveSha256: manifest.truthSet!.archiveSha256 };
+    expect(() => evaluateInvestigation(store!, manifest)).toThrow();
+    const valid = evaluateInvestigation(store!, manifest, qualification);
+    expect(valid.status, JSON.stringify({ failures: valid.qualificationFailures, thresholds: valid.thresholdResults })).toBe("PASS");
+    expect(() => evaluateInvestigation(store!, manifest, { ...qualification, run: { ...runRecord, evaluationMode: "DEVELOPMENT" } })).toThrow();
+
+    const first = store!.getScanEpoch(cases[0]!.taskId, cases[0]!.epochId!)!;
+    store!.createScanEpoch({ ...first, epochId: "EPOCH-DRIFTED", helperSha256: "f".repeat(64), controllerTreeCleanAtFinish: false });
+    const failed = evaluateInvestigation(store!, manifest, qualification);
+    expect(failed.status).toBe("FAIL");
+    expect(failed.population.firstRunCases).toBe(201);
+    expect(failed.qualificationFailures).toEqual(expect.arrayContaining([
+      "case-0/EPOCH-DRIFTED: HELPER_SHA256_MISMATCH", "case-0/EPOCH-DRIFTED: CONTROLLER_FINISH_TREE_NOT_CLEAN",
+    ]));
   });
 });

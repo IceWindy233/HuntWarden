@@ -115,6 +115,21 @@ assert(typeof blind.truthSet?.curator === "string" && typeof blind.truthSet?.run
 assert(blind.truthSet?.isolation?.targetAuthorizationContainsTruth === false && blind.truthSet?.isolation?.helperReceivesTruth === false && blind.truthSet?.isolation?.modelReceivesTruth === false, "独立盲测结果缺少答案隔离证明");
 assert(blind.population?.maliciousFirstRunCases >= 100 && blind.population?.benignFirstRunCases >= 100 && blind.population?.limitedFirstRunCases >= 1, "独立盲测首跑总体不足");
 assert(blind.metrics?.collectionRecall?.rate >= 0.95 && blind.metrics?.discoveryRecall?.rate >= 0.95 && blind.metrics?.evidencePreservation?.rate >= 0.95 && blind.metrics?.benignFalsePositive?.rate <= 0.05, "独立盲测发布指标未达到冻结阈值");
+assert(blind.schemaVersion === 2 && Array.isArray(blind.qualificationFailures) && blind.qualificationFailures.length === 0, "独立盲测缺少身份资格核验或存在失败");
+assert(blind.runIdentity?.evaluationMode === "BLIND_RELEASE" && blind.runIdentity?.commit === currentCommit
+  && blind.runIdentity?.clean === true && blind.runIdentity?.helperSha256 === currentHelperSha256, "独立盲测运行账本未绑定当前干净提交和 Helper");
+const blindCases = Array.isArray(blind.cases) ? blind.cases : [];
+assert(blindCases.length > 0 && blindCases.length === blind.population?.firstRunCases + blind.population?.retryCases
+  && new Set(blindCases.map((item) => `${item.taskId}:${item.epochId}`)).size === blindCases.length
+  && blindCases.filter((item) => item.runKind === "FIRST").length === blind.population?.firstRunCases
+  && blindCases.filter((item) => item.runKind === "RETRY").length === blind.population?.retryCases
+  && ["MALICIOUS", "BENIGN", "LIMITED"].every((disposition) => blindCases.filter((item) => item.runKind === "FIRST" && item.disposition === disposition).length
+    === blind.population?.[`${disposition.toLowerCase()}FirstRunCases`]), "独立盲测案例证明与 FIRST/RETRY 总体不一致");
+assert(blindCases.every((item) => Array.isArray(item.epochs) && item.epochs.length > 0
+  && item.epochs.some((epoch) => epoch.epochId === item.epochId)
+  && item.epochs.every((epoch) => epoch.controllerCommit === currentCommit && epoch.controllerTreeClean === true
+    && epoch.controllerCommitAtFinish === currentCommit && epoch.controllerTreeCleanAtFinish === true
+    && epoch.helperSha256 === currentHelperSha256)), "独立盲测实际 Epoch 未在起止阶段绑定当前干净提交和 Helper");
 
 const businessJvm = evidence(evidenceSet.businessJvm, "真实业务 JVM 证据");
 assert(businessJvm.status === "PASS" && businessJvm.environment?.fixture === false && businessJvm.environment?.workloadKind === "BUSINESS_APPLICATION", "真实业务 JVM 证据必须来自非夹具业务应用");

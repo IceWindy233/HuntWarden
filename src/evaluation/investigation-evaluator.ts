@@ -1,19 +1,20 @@
 import { Type, type Static } from "typebox";
 import { Value } from "typebox/value";
 import type { CheckCategory } from "../domain/types.js";
-import { NAMESPACE_NAMES, type FactRecord } from "../protocol-v2/types.js";
+import { NAMESPACE_NAMES, type FactRecord, type ScanEpoch } from "../protocol-v2/types.js";
 import type { RuntimeStore } from "../storage/runtime-store.js";
 import { projectEffectiveAssessments } from "../assessments/projection.js";
+import { digestObject } from "../common/json.js";
 
 const categories = ["webshell", "java_memory_shell", "backdoor_account", "linux_persistence", "linux_intrusion_triage"] as const;
 const ExpectedFactSchema = Type.Object({
-  namespace: Type.Union(NAMESPACE_NAMES.map((value) => Type.Literal(value))),
+  namespace: Type.Enum(NAMESPACE_NAMES),
   field: Type.String({ minLength: 1, maxLength: 128 }),
   value: Type.Union([Type.String({ maxLength: 4096 }), Type.Number(), Type.Boolean()]),
   evidenceRequired: Type.Optional(Type.Boolean()),
 }, { additionalProperties: false });
 const ExpectedEndpointSchema = Type.Object({
-  namespace: Type.Union(NAMESPACE_NAMES.map((value) => Type.Literal(value))),
+  namespace: Type.Enum(NAMESPACE_NAMES),
   field: Type.String({ minLength: 1, maxLength: 128 }),
   value: Type.Union([Type.String({ maxLength: 4096 }), Type.Number(), Type.Boolean()]),
 }, { additionalProperties: false });
@@ -58,7 +59,7 @@ export const InvestigationEvaluationManifestSchema = Type.Object({
     entryMode: Type.Union([Type.Literal("ZERO_IOC"), Type.Literal("SINGLE_LEAD")]),
     runKind: Type.Union([Type.Literal("FIRST"), Type.Literal("RETRY")]),
     retryOfCaseId: Type.Optional(Type.String({ minLength: 1, maxLength: 128, pattern: "^[A-Za-z0-9._-]+$" })),
-    expectedCategories: Type.Array(Type.Union(categories.map((value) => Type.Literal(value))), { minItems: 1, maxItems: 5, uniqueItems: true }),
+    expectedCategories: Type.Array(Type.Enum(categories), { minItems: 1, maxItems: 5, uniqueItems: true }),
     expectedFacts: Type.Array(ExpectedFactSchema, { minItems: 1, maxItems: 100 }),
     expectedRelations: Type.Optional(Type.Array(Type.Object({
       relation: Type.String({ minLength: 1, maxLength: 128 }),
@@ -81,12 +82,74 @@ export const InvestigationEvaluationManifestSchema = Type.Object({
 }, { additionalProperties: false });
 
 export type InvestigationEvaluationManifest = Static<typeof InvestigationEvaluationManifestSchema>;
+export const InvestigationEvaluationTruthSchema = Type.Object({
+  ...InvestigationEvaluationManifestSchema.properties,
+  cases: Type.Array(Type.Omit(InvestigationEvaluationManifestSchema.properties.cases.items, ["taskId", "epochId"]), { minItems: 1, maxItems: 500 }),
+}, { additionalProperties: false });
+const ArchivedInvestigationTruthSchema = Type.Object({
+  ...InvestigationEvaluationTruthSchema.properties,
+  truthSet: Type.Optional(Type.Object({
+    ...InvestigationEvaluationManifestSchema.properties.truthSet.properties,
+    archiveSha256: Type.Optional(Type.String({ pattern: "^[a-f0-9]{64}$" })),
+  }, { additionalProperties: false })),
+}, { additionalProperties: false });
+
+export function verifyInvestigationTruthArchive(truth: unknown, archivedTruth: unknown, archiveSha256: string): void {
+  if (!Value.Check(InvestigationEvaluationTruthSchema, truth) || !truth.truthSet) throw new Error("正式评分真值必须使用无 Task/Epoch 的严格 schema v2");
+  if (!/^[a-f0-9]{64}$/.test(archiveSha256) || truth.truthSet.archiveSha256 !== archiveSha256) throw new Error("独立真值归档 SHA-256 不一致");
+  if (!Value.Check(ArchivedInvestigationTruthSchema, archivedTruth) || !archivedTruth.truthSet) throw new Error("归档 truth.json 必须使用无 Task/Epoch 的严格真值 schema");
+  if (archivedTruth.truthSet.archiveSha256 !== undefined && archivedTruth.truthSet.archiveSha256 !== archiveSha256) throw new Error("归档 truth.json 的 SHA-256 声明不一致");
+  const boundTruth = { ...archivedTruth, truthSet: { ...archivedTruth.truthSet, archiveSha256 } };
+  if (digestObject(truth) !== digestObject(boundTruth)) throw new Error("真值清单内容与归档 truth.json 不一致");
+}
+
+export const InvestigationRunRecordSchema = Type.Object({
+  schemaVersion: Type.Literal(1), suiteId: Type.String(), evaluationMode: Type.Union([Type.Literal("DEVELOPMENT"), Type.Literal("BLIND_RELEASE")]),
+  commit: Type.String({ pattern: "^[a-f0-9]{40}$" }), clean: Type.Boolean(), helperSha256: Type.String({ pattern: "^[a-f0-9]{64}$" }),
+  startedAt: Type.String(), finishedAt: Type.String(), state: Type.Union([Type.Literal("FINISHED"), Type.Literal("FAILED")]),
+  plannedCases: Type.Integer({ minimum: 1, maximum: 500 }),
+  cases: Type.Array(Type.Object({
+    caseId: Type.String(), runKind: Type.Union([Type.Literal("FIRST"), Type.Literal("RETRY")]), retryOfCaseId: Type.Optional(Type.String()),
+    state: Type.Union([Type.Literal("STARTED"), Type.Literal("FINISHED"), Type.Literal("FAILED")]),
+    taskId: Type.Optional(Type.String()), epochId: Type.Optional(Type.String()),
+  })),
+});
+export type InvestigationRunRecord = Static<typeof InvestigationRunRecordSchema>;
+export interface InvestigationEvaluationQualification { run: unknown; archivedTruth: unknown; archiveSha256: string }
+export interface InvestigationEpochIdentity {
+  epochId: string;
+  controllerCommit: string | null;
+  controllerTreeClean: boolean | null;
+  controllerCommitAtFinish: string | null;
+  controllerTreeCleanAtFinish: boolean | null;
+  helperSha256: string | null;
+}
+
+export function investigationEpochIdentity(epoch: ScanEpoch): InvestigationEpochIdentity {
+  return {
+    epochId: epoch.epochId,
+    controllerCommit: epoch.controllerCommit ?? null, controllerTreeClean: epoch.controllerTreeClean ?? null,
+    controllerCommitAtFinish: epoch.controllerCommitAtFinish ?? null, controllerTreeCleanAtFinish: epoch.controllerTreeCleanAtFinish ?? null,
+    helperSha256: epoch.helperSha256 ?? null,
+  };
+}
+
+export function investigationEpochIdentityFailures(epoch: ScanEpoch, identity: { commit: string; helperSha256: string }): string[] {
+  const failures: string[] = [];
+  if (epoch.controllerCommit !== identity.commit) failures.push("CONTROLLER_COMMIT_MISMATCH");
+  if (epoch.controllerTreeClean !== true) failures.push("CONTROLLER_TREE_NOT_CLEAN");
+  if (epoch.controllerCommitAtFinish !== identity.commit) failures.push("CONTROLLER_FINISH_COMMIT_MISMATCH");
+  if (epoch.controllerTreeCleanAtFinish !== true) failures.push("CONTROLLER_FINISH_TREE_NOT_CLEAN");
+  if (epoch.helperSha256 !== identity.helperSha256) failures.push("HELPER_SHA256_MISMATCH");
+  return failures;
+}
 export type FailureAttribution = "COLLECTION_MISSING" | "INVESTIGATION_NOT_REACHED" | "ADJUDICATION_MISSING" | "PRESERVATION_FAILED" | "OBLIGATION_INCOMPLETE" | "EXPECTED_LIMIT_NOT_RECORDED";
 export interface RateMetric { numerator: number; denominator: number; rate: number | null; confidence95: { low: number; high: number } | null }
 export interface InvestigationCaseEvaluation {
   caseId: string;
   taskId: string;
   epochId: string;
+  epochs: InvestigationEpochIdentity[];
   disposition: "MALICIOUS" | "BENIGN" | "LIMITED";
   runKind: "FIRST" | "RETRY";
   retryOfCaseId?: string;
@@ -114,6 +177,8 @@ export interface InvestigationEvaluationResult {
   truthSet?: InvestigationEvaluationManifest["truthSet"];
   evaluatedAt: string;
   environment: Static<typeof EnvironmentSchema>;
+  runIdentity?: Pick<InvestigationRunRecord, "evaluationMode" | "commit" | "clean" | "helperSha256" | "startedAt" | "finishedAt">;
+  qualificationFailures: string[];
   status: "PASS" | "FAIL";
   population: { firstRunCases: number; retryCases: number; maliciousFirstRunCases: number; benignFirstRunCases: number; limitedFirstRunCases: number };
   metrics: InvestigationMetricSet;
@@ -172,7 +237,10 @@ export function parseInvestigationEvaluationManifest(input: unknown): Investigat
   return value;
 }
 
-export function evaluateInvestigation(store: RuntimeStore, manifest: InvestigationEvaluationManifest): InvestigationEvaluationResult {
+export function evaluateInvestigation(store: RuntimeStore, manifest: InvestigationEvaluationManifest, qualification?: InvestigationEvaluationQualification): InvestigationEvaluationResult {
+  manifest = parseInvestigationEvaluationManifest(manifest);
+  const run = manifest.evaluationMode === "BLIND_RELEASE" ? validateBlindRun(manifest, qualification) : undefined;
+  const qualificationFailures: string[] = [];
   const cases: InvestigationCaseEvaluation[] = [];
   const firstRun = emptyAccumulator();
   const retries = emptyAccumulator();
@@ -181,6 +249,18 @@ export function evaluateInvestigation(store: RuntimeStore, manifest: Investigati
     if (task?.protocolVersion !== 2) throw new Error(`评测 case 引用未知 v2 task: ${definition.caseId}`);
     const epochId = definition.epochId ?? task.activeEpochId;
     if (!epochId) throw new Error(`评测 case 缺少 epoch: ${definition.caseId}`);
+    const epochs = store.listScanEpochs(task.taskId);
+    if (!epochs.some((epoch) => epoch.epochId === epochId)) throw new Error(`评测 case 引用未知 epoch: ${definition.caseId}`);
+    if (run) {
+      for (const epoch of epochs) {
+        qualificationFailures.push(...investigationEpochIdentityFailures(epoch, run).map((failure) => `${definition.caseId}/${epoch.epochId}: ${failure}`));
+        const startedAt = Date.parse(epoch.startedAt); const finishedAt = Date.parse(epoch.finishedAt ?? "");
+        if (epoch.status === "RUNNING" || !Number.isFinite(startedAt) || !Number.isFinite(finishedAt)
+          || startedAt < Date.parse(run.startedAt) || finishedAt < startedAt || finishedAt > Date.parse(run.finishedAt)) {
+          qualificationFailures.push(`${definition.caseId}/${epoch.epochId}: EPOCH_OUTSIDE_FROZEN_RUN`);
+        }
+      }
+    }
     const facts = store.listFacts(task.taskId, epochId);
     const evidence = store.listEvidence(task.taskId);
     const assessments = store.listAssessments(task.taskId, epochId);
@@ -244,7 +324,7 @@ export function evaluateInvestigation(store: RuntimeStore, manifest: Investigati
     if (autonomouslyClosed) accumulator.autonomousCompleted += 1;
     const timestamps = [session?.createdAt, session?.updatedAt, ...attempts.flatMap((attempt) => [attempt.startedAt, attempt.finishedAt])].filter((value): value is string => Boolean(value)).map(Date.parse).filter(Number.isFinite);
     const durationMs = timestamps.length >= 2 ? Math.max(...timestamps) - Math.min(...timestamps) : null;
-    cases.push({ caseId: definition.caseId, taskId: task.taskId, epochId, disposition: definition.disposition, runKind: definition.runKind, ...(definition.retryOfCaseId ? { retryOfCaseId: definition.retryOfCaseId } : {}), discoveredLabels: caseDiscovered, expectedLabels: definition.expectedFacts.length, preservedLabels: casePreserved, expectedPreservationLabels: requiredEvidence.length, matchedRelations: caseMatchedRelations, expectedRelations: definition.expectedRelations?.length ?? 0, riskyCategories, openRequiredObligationIds, autonomousExecutedActions: attempts.filter((attempt) => ["DISCOVERY", "PLAYBOOK", "MODEL"].includes(actionsById.get(attempt.actionId)?.requestedBy ?? "")).length, completionStatus, observedGapCodes, autonomouslyCompleted: autonomouslyClosed, durationMs, actionAttempts: attempts.map((attempt) => ({ attemptId: attempt.attemptId, actionId: attempt.actionId, attempt: attempt.attempt, status: attempt.status, ...(attempt.error ? { error: attempt.error } : {}), startedAt: attempt.startedAt, ...(attempt.finishedAt ? { finishedAt: attempt.finishedAt } : {}) })), failureAttributions: [...failureAttributions] });
+    cases.push({ caseId: definition.caseId, taskId: task.taskId, epochId, epochs: epochs.map(investigationEpochIdentity), disposition: definition.disposition, runKind: definition.runKind, ...(definition.retryOfCaseId ? { retryOfCaseId: definition.retryOfCaseId } : {}), discoveredLabels: caseDiscovered, expectedLabels: definition.expectedFacts.length, preservedLabels: casePreserved, expectedPreservationLabels: requiredEvidence.length, matchedRelations: caseMatchedRelations, expectedRelations: definition.expectedRelations?.length ?? 0, riskyCategories, openRequiredObligationIds, autonomousExecutedActions: attempts.filter((attempt) => ["DISCOVERY", "PLAYBOOK", "MODEL"].includes(actionsById.get(attempt.actionId)?.requestedBy ?? "")).length, completionStatus, observedGapCodes, autonomouslyCompleted: autonomouslyClosed, durationMs, actionAttempts: attempts.map((attempt) => ({ attemptId: attempt.attemptId, actionId: attempt.actionId, attempt: attempt.attempt, status: attempt.status, ...(attempt.error ? { error: attempt.error } : {}), startedAt: attempt.startedAt, ...(attempt.finishedAt ? { finishedAt: attempt.finishedAt } : {}) })), failureAttributions: [...failureAttributions] });
   }
   const metrics = metricSet(firstRun);
   const retryMetrics = retries.caseCount > 0 ? metricSet(retries) : null;
@@ -265,6 +345,8 @@ export function evaluateInvestigation(store: RuntimeStore, manifest: Investigati
     evaluationMode: manifest.evaluationMode ?? "DEVELOPMENT",
     ...(manifest.truthSet ? { truthSet: manifest.truthSet } : {}),
     environment: manifest.environment,
+    ...(run ? { runIdentity: { evaluationMode: run.evaluationMode, commit: run.commit, clean: run.clean, helperSha256: run.helperSha256, startedAt: run.startedAt, finishedAt: run.finishedAt } } : {}),
+    qualificationFailures,
     population: {
       firstRunCases: firstCases.length,
       retryCases: retries.caseCount,
@@ -273,12 +355,31 @@ export function evaluateInvestigation(store: RuntimeStore, manifest: Investigati
       limitedFirstRunCases: firstCases.filter((item) => item.disposition === "LIMITED").length,
     },
     evaluatedAt: new Date().toISOString(),
-    status: thresholdResults.every((item) => item.pass) ? "PASS" : "FAIL",
+    status: qualificationFailures.length === 0 && thresholdResults.every((item) => item.pass) ? "PASS" : "FAIL",
     metrics,
     retryMetrics,
     thresholdResults,
     cases,
   };
+}
+
+function validateBlindRun(manifest: InvestigationEvaluationManifest, qualification: InvestigationEvaluationQualification | undefined): InvestigationRunRecord {
+  if (!qualification || !Value.Check(InvestigationRunRecordSchema, qualification.run)) throw new Error("BLIND_RELEASE 必须提供包含 Helper 摘要的完整 schema v1 运行账本和真值归档");
+  const run = qualification.run;
+  if (run.evaluationMode !== "BLIND_RELEASE" || !run.clean || run.commit !== manifest.environment.commit || run.suiteId !== manifest.suiteId) throw new Error("BLIND_RELEASE 运行模式、干净提交或套件不一致；DEVELOPMENT 不能提升为正式资格");
+  const startedAt = Date.parse(run.startedAt); const finishedAt = Date.parse(run.finishedAt);
+  if (!Number.isFinite(startedAt) || !Number.isFinite(finishedAt) || finishedAt < startedAt || Date.parse(manifest.truthSet!.frozenAt) > startedAt) throw new Error("BLIND_RELEASE 真值必须在完整运行时间区间前冻结");
+  if (run.plannedCases !== manifest.cases.length || run.cases.length !== run.plannedCases) throw new Error("BLIND_RELEASE 必须保留完整 FIRST/RETRY 运行分母");
+  const runCases = new Map(run.cases.map((item) => [item.caseId, item]));
+  if (runCases.size !== run.cases.length) throw new Error("BLIND_RELEASE 运行账本包含重复 caseId");
+  for (const definition of manifest.cases) {
+    const actual = runCases.get(definition.caseId);
+    if (!actual?.taskId || !actual.epochId || actual.taskId !== definition.taskId || actual.epochId !== definition.epochId
+      || actual.runKind !== definition.runKind || actual.retryOfCaseId !== definition.retryOfCaseId) throw new Error(`BLIND_RELEASE 案例与实际运行账本不一致: ${definition.caseId}`);
+  }
+  const truth = { ...manifest, cases: manifest.cases.map(({ taskId: _taskId, epochId: _epochId, ...definition }) => definition) };
+  verifyInvestigationTruthArchive(truth, qualification.archivedTruth, qualification.archiveSha256);
+  return run;
 }
 
 function validateBlindRelease(value: InvestigationEvaluationManifest): void {

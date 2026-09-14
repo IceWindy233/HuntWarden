@@ -1,6 +1,7 @@
 import { createServer, type IncomingMessage, type RequestListener, type ServerResponse } from "node:http";
 import { execFileSync } from "node:child_process";
 import { writeFile } from "node:fs/promises";
+import { isAbsolute, relative } from "node:path";
 import type { AddressInfo } from "node:net";
 import type { Context } from "@earendil-works/pi-ai";
 import { afterEach, describe, expect, it } from "vitest";
@@ -194,6 +195,10 @@ async function runEmptyContract() {
 
 describe.skipIf(!enabled)("OpenAI-compatible Provider HTTP/SSE 契约", () => {
   it("两种协议均完成请求校验、流式分片重组和 Tool Call 验证", async () => {
+    const outputPath = process.env.HUNTWARDEN_PROVIDER_CONTRACT_OUTPUT;
+    if (!outputPath || !isAbsolute(outputPath)) throw new Error("HUNTWARDEN_PROVIDER_CONTRACT_OUTPUT 必须是仓库外的绝对结果路径");
+    const fromRoot = relative(process.cwd(), outputPath);
+    if (fromRoot !== ".." && !fromRoot.startsWith("../") && !isAbsolute(fromRoot)) throw new Error("Provider 契约结果必须位于仓库外");
     const results = [];
     for (const protocol of ["openai-completions", "openai-responses"] as const) results.push(await runProtocol(protocol));
     expect(results).toEqual([
@@ -204,7 +209,7 @@ describe.skipIf(!enabled)("OpenAI-compatible Provider HTTP/SSE 契约", () => {
     const stall = await runStallContract();
     const empty = await runEmptyContract();
     const commit = execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim();
-    await writeFile("acceptance/provider-contract/result-local.json", `${JSON.stringify({
+    await writeFile(outputPath, `${JSON.stringify({
       schemaVersion: 1,
       status: "PASS",
       evaluationKind: "PROTOCOL_FIXTURE",
@@ -213,6 +218,6 @@ describe.skipIf(!enabled)("OpenAI-compatible Provider HTTP/SSE 契约", () => {
       manifestVersion: MANIFEST_VERSION,
       protocols: results,
       faults: { retry, stall, empty },
-    }, null, 2)}\n`, "utf8");
+    }, null, 2)}\n`, { encoding: "utf8", mode: 0o600, flag: "wx" });
   });
 });

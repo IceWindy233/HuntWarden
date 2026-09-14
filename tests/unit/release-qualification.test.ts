@@ -47,12 +47,18 @@ async function fixture() {
     failures: [],
   });
   const blindEvaluation = await writeEvidence("blind.json", {
-    status: "PASS", evaluationMode: "BLIND_RELEASE", environment: { commit, manifestVersion: "3.0.0" },
+    schemaVersion: 2, status: "PASS", evaluationMode: "BLIND_RELEASE", environment: { commit, manifestVersion: "3.0.0" },
+    qualificationFailures: [],
+    runIdentity: { evaluationMode: "BLIND_RELEASE", commit, clean: true, helperSha256, startedAt: "2026-09-08T00:00:00.000Z", finishedAt: "2026-09-08T01:00:00.000Z" },
     truthSet: {
       archiveSha256: "d".repeat(64), frozenAt: "2026-09-07T00:00:00.000Z", curator: "independent-curator", runner: "release-runner", independentFromTuning: true,
       isolation: { targetAuthorizationContainsTruth: false, helperReceivesTruth: false, modelReceivesTruth: false },
     },
-    population: { maliciousFirstRunCases: 100, benignFirstRunCases: 100, limitedFirstRunCases: 1 },
+    population: { firstRunCases: 201, retryCases: 0, maliciousFirstRunCases: 100, benignFirstRunCases: 100, limitedFirstRunCases: 1 },
+    cases: Array.from({ length: 201 }, (_, index) => ({
+      caseId: `case-${index}`, taskId: `TASK-${index}`, epochId: `EPOCH-${index}`, runKind: "FIRST", disposition: index < 100 ? "MALICIOUS" : index < 200 ? "BENIGN" : "LIMITED",
+      epochs: [{ epochId: `EPOCH-${index}`, controllerCommit: commit, controllerTreeClean: true, controllerCommitAtFinish: commit, controllerTreeCleanAtFinish: true, helperSha256 }],
+    })),
     metrics: { collectionRecall: { rate: 0.95 }, discoveryRecall: { rate: 0.95 }, evidencePreservation: { rate: 0.96 }, benignFalsePositive: { rate: 0.05 } },
   });
   const businessJvm = await writeEvidence("business-jvm.json", {
@@ -120,6 +126,15 @@ describe("发布资格硬门禁", () => {
     await writeFile(value.qualificationPath, `${JSON.stringify(value.qualification, null, 2)}\n`, "utf8");
     await expect(run("node", ["scripts/release-qualification-check.mjs", "--qualification", value.qualificationPath], { cwd: process.cwd() }))
       .rejects.toMatchObject({ stderr: expect.stringContaining("不能使用本机或夹具端点") });
+  });
+
+  it("拒绝摘要正确但实际盲测 Epoch 的 Helper 不一致", async () => {
+    const value = await fixture();
+    const blind = JSON.parse(await readFile(join(value.directory, "blind.json"), "utf8"));
+    blind.cases[0].epochs[0].helperSha256 = "0".repeat(64);
+    value.qualification.evidence.blindEvaluation = await value.writeEvidence("blind.json", blind);
+    await writeFile(value.qualificationPath, JSON.stringify(value.qualification));
+    await expect(run("node", ["scripts/release-qualification-check.mjs", "--qualification", value.qualificationPath], { cwd: process.cwd() })).rejects.toMatchObject({ code: 1 });
   });
 
   it("运维证据没有完成数据库回退时失败关闭", async () => {
