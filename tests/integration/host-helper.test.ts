@@ -323,6 +323,25 @@ function invoke(operation: string, input: unknown) {
 }
 
 describe("目标辅助程序边界", () => {
+  it("JVM 枚举排除命令行包含 Java 的包装进程并保留删除后运行 JVM", () => {
+    const result = spawnSync("python3", ["-c", `
+import json, runpy, sys
+from unittest.mock import patch
+ns = runpy.run_path(sys.argv[1])
+collect = ns["list_java_processes"]
+collect.__globals__["list_processes"] = lambda _: [{"pid": pid, "command": "java -jar app.jar"} for pid in (11, 12, 13, 14)]
+paths = {"/proc/11/exe": "/usr/bin/sudo", "/proc/12/exe": "/usr/lib/jvm/bin/java", "/proc/13/exe": "/usr/lib/jvm/bin/java (deleted)"}
+def executable(path):
+    if path not in paths:
+        raise FileNotFoundError(path)
+    return paths[path]
+with patch("os.readlink", side_effect=executable):
+    print(json.dumps([row["pid"] for row in collect({})]))
+`, helper], { encoding: "utf8" });
+    expect(result.status, result.stderr).toBe(0);
+    expect(JSON.parse(result.stdout)).toEqual([12, 13]);
+  });
+
   it("轮转日志超过文件与模式上限时明确报告未扫描来源", async () => {
     const directory = await mkdtemp(resolve(tmpdir(), "huntwarden-log-source-limit-"));
     try {

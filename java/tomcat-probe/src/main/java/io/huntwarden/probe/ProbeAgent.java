@@ -112,6 +112,19 @@ public final class ProbeAgent {
             ClassLoader loader = loaded.getClassLoader();
             if (loader != null && loader.getClass().getName().toLowerCase(Locale.ROOT).contains("webappclassloader")) loaders.add(loader);
         }
+        // Embedded Tomcat can delegate every application class to Boot's parent
+        // loader, so its WebappClassLoader is only visible as a thread context loader.
+        ThreadGroup rootGroup = Thread.currentThread().getThreadGroup();
+        while (rootGroup.getParent() != null) rootGroup = rootGroup.getParent();
+        Thread[] threads = new Thread[RuntimeDiagnostics.MAX_THREAD_STATE_SCAN];
+        int threadCount = rootGroup.enumerate(threads, true);
+        if (threadCount == threads.length) {
+            diagnostics.partial("tomcat_context_threads", null, List.of("线程枚举达到安全上限，ContextClassLoader 发现可能不完整"));
+        }
+        for (int index = 0; index < threadCount; index++) {
+            ClassLoader loader = threads[index].getContextClassLoader();
+            if (loader != null && loader.getClass().getName().toLowerCase(Locale.ROOT).contains("webappclassloader")) loaders.add(loader);
+        }
         if (loaders.isEmpty()) {
             diagnostics.notPresent("tomcat_context_discovery", null, "未发现 Tomcat WebappClassLoader");
             return components;
@@ -133,6 +146,7 @@ public final class ProbeAgent {
             String contextName;
             try {
                 contextName = String.valueOf(invoke(context, "getName"));
+                if (contextName.isEmpty()) contextName = "/";
             } catch (Throwable error) {
                 contextName = context.getClass().getName() + "@" + Integer.toHexString(System.identityHashCode(context));
                 diagnostics.partial("tomcat_context_identity", contextName, List.of(describe(error)));
@@ -333,7 +347,12 @@ public final class ProbeAgent {
         item.put("context", contextName);
         item.put("source", source);
         if (className != null) {
-            Class<?> loaded = findLoaded(instrumentation, className, loaderId(preferredLoader));
+            List<Class<?>> candidates = findLoadedClasses(instrumentation, className);
+            Class<?> loaded = null;
+            for (ClassLoader loader = preferredLoader; loader != null && loaded == null; loader = loader.getParent()) {
+                loaded = selectLoaded(candidates, loaderId(loader));
+            }
+            if (loaded == null) loaded = selectLoaded(candidates, "bootstrap");
             if (loaded != null) item.putAll(classFacts(instrumentation, loaded));
         }
         return item;

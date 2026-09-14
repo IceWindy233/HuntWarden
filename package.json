@@ -1,7 +1,7 @@
 {
   "name": "huntwarden-agent",
   "productName": "HuntWarden",
-  "version": "0.3.0-beta.1",
+  "version": "0.3.0-beta.2",
   "description": "AI-assisted Linux host investigation and controlled remediation agent with evidence, approvals, and crash recovery.",
   "author": "IceWindy",
   "license": "MIT",
@@ -65,6 +65,9 @@
     "model:smoke": "tsx src/cli/smoke-model.ts",
     "eval:model": "tsx src/cli/evaluate-model.ts",
     "eval:investigation": "tsx src/cli/evaluate-investigation.ts",
+    "run:investigation": "tsx src/cli/run-investigation.ts",
+    "prepare:investigation-evaluation": "tsx src/cli/prepare-investigation-evaluation.ts",
+    "release:assemble-qualification": "node scripts/assemble-release-qualification.mjs",
     "qualify:provider": "tsx src/cli/qualify-provider.ts",
     "qualify:provider:tasks": "tsx src/cli/run-provider-qualification.ts",
     "qualify:business-jvm": "tsx src/cli/qualify-business-jvm.ts",

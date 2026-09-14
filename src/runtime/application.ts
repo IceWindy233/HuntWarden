@@ -142,10 +142,24 @@ export class Application extends EventEmitter {
   async startTask(taskId: string): Promise<void> {
     const task = this.requireTask(taskId);
     this.assertNotArchived(task);
-    const runtime = await this.ensureRuntimeFor(task);
-    await runtime.prompt(`${task.request}\n\n<preset-v2>\n${this.presetContext}\n</preset-v2>`);
-    if (this.requireTask(task.taskId).status !== "PAUSED") this.finishActiveEpoch(task.taskId);
-    this.emit("changed", taskId);
+    // Bootstrap can already persist facts/Evidence. Mark the task first so a
+    // process death during those side effects is recoverable on next launch.
+    task.status = "RUNNING";
+    this.store.saveTask(task);
+    try {
+      const runtime = await this.ensureRuntimeFor(task);
+      await runtime.prompt(`${task.request}\n\n<preset-v2>\n${this.presetContext}\n</preset-v2>`);
+      if (this.requireTask(task.taskId).status !== "PAUSED") this.finishActiveEpoch(task.taskId);
+    } catch (error) {
+      const failed = this.requireTask(taskId);
+      if (failed.status === "RUNNING") {
+        failed.status = "FAILED";
+        this.store.saveTask(failed);
+      }
+      throw error;
+    } finally {
+      this.emit("changed", taskId);
+    }
   }
 
   pauseTask(taskId: string): void {
